@@ -78,3 +78,30 @@ buildvariants:
     tasks:
       - name: sync_repo_with_copybara
         priority: 50
+
+  - name: devcontainer-ubuntu
+    display_name: "Devcontainer Test (ubuntu2204)"
+    tags:
+      ["assigned_to_jira_team_devprod_correctness", "auxiliary", "devcontainer"]
+    activate: true
+    paths:
+      - ".devcontainer/**"
+      - "evergreen/devcontainer*.sh"
+      - "poetry_requirements.txt"
+    run_on:
+      - ubuntu2204-large
+    tasks:
+      - name: devcontainer_test
+
+  - name: create_sbom_and_pr
+    display_name: "Generate SBOM files and create PR"
+    # Don't run as part of patch builds
+    patchable: false
+    # Run at 6 am UTC daily
+    cron: "0 6 * * *"
+    run_on: rhel92-small
+    expansions:
+      ENDOR_NAMESPACE: mongodb.10gen
+    stepback: false
+    tasks:
+      - name: update_sbom

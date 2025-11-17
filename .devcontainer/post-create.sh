@@ -8,19 +8,45 @@ set -euo pipefail
 
 echo "Starting MongoDB development container post-create setup..."
 
-# Step 1: Fix volume permissions
+# Setup user's .bazelrc to import system-wide devcontainer config
+echo "Setting up Bazel configuration..."
+if [ -f "/etc/devcontainer/bazelrc" ]; then
+    if [ ! -f "${HOME}/.bazelrc" ]; then
+        # Create new .bazelrc with import
+        echo "# Import devcontainer system configuration" >"${HOME}/.bazelrc"
+        echo "try-import /etc/devcontainer/bazelrc" >>"${HOME}/.bazelrc"
+        echo "[OK] Created .bazelrc with system config import"
+    elif ! grep -q "try-import /etc/devcontainer/bazelrc" "${HOME}/.bazelrc" 2>/dev/null; then
+        # Add import to existing .bazelrc
+        echo "" >>"${HOME}/.bazelrc"
+        echo "# Import devcontainer system configuration" >>"${HOME}/.bazelrc"
+        echo "try-import /etc/devcontainer/bazelrc" >>"${HOME}/.bazelrc"
+        echo "[OK] Added system config import to existing .bazelrc"
+    else
+        echo "Info: .bazelrc already imports system config"
+    fi
+fi
+
+# Fix volume permissions
 echo "Fixing volume permissions..."
-sudo chown -R "$(whoami)": "${HOME}/.config/engflow_auth" || echo "Warning: Could not fix engflow_auth permissions"
-sudo chown -R "$(whoami)": "${HOME}/.cache" || echo "Warning: Could not fix cache permissions"
+sudo chown -R "$(whoami)": "${HOME}" || echo "Warning: Could not fix home directory permissions"
 sudo chown -R "$(whoami)": "${WORKSPACE_FOLDER}/python3-venv" || echo "Warning: Could not fix python3-venv permissions"
 sudo chown "$(whoami)": "${WORKSPACE_FOLDER}/.." || echo "Warning: Could not fix parent directory permissions"
+
+# Fix workspace root permissions (prevents bazelrc and other file permission issues)
+echo "Fixing workspace root permissions..."
+sudo chown -R "$(whoami)": "${WORKSPACE_FOLDER}" || echo "Warning: Could not fix workspace permissions"
 
 # Fix Git repository permissions (prevents "insufficient permission" errors)
 echo "Fixing Git repository permissions..."
 sudo chown -R "$(whoami)": "${WORKSPACE_FOLDER}/.git" || echo "Warning: Could not fix .git permissions"
+
+# Configure git safe.directory (prevents "dubious ownership" warnings)
+echo "Configuring git safe.directory..."
+git config --global --add safe.directory "${WORKSPACE_FOLDER}" || echo "Warning: Could not configure git safe.directory"
 echo "[OK] Volume and Git permissions fixed"
 
-# Step 2: Configure Bazel with Docker information (one-time container setup)
+# Configure Bazel with Docker information (one-time container setup)
 echo "Configuring Bazel with Docker server information..."
 
 # Helper function to add Bazel keyword if not already present
@@ -49,7 +75,7 @@ add_bazel_keyword "docker_server_version" "${DOCKER_VERSION}"
 ARCH=$(uname -i 2>/dev/null || echo "unknown")
 add_bazel_keyword "arch" "${ARCH}"
 
-# Step 4: Unshallow Git repository (one-time setup)
+# Unshallow Git repository (one-time setup)
 echo "Setting up Git repository..."
 
 # Helper function to handle git shallow lock
@@ -92,7 +118,7 @@ else
     fi
 fi
 
-# Step 4: Create Python virtual environment and install dependencies
+# Create Python virtual environment and install dependencies
 echo "Creating Python virtual environment..."
 venv_created=false
 if [ ! -d "${WORKSPACE_FOLDER}/python3-venv/bin" ]; then
@@ -119,15 +145,49 @@ else
     echo "Info: Python virtual environment already exists"
 fi
 
-# Step 5: Build clang configuration
+# Build clang configuration
 echo "Building clang configuration..."
-if bazel build compiledb --config=local --config=no-remote-exec; then
+
+# Backup existing .bazelrc.compiledb if it exists, then use our known-good config
+COMPILEDB_RC="${WORKSPACE_FOLDER}/.bazelrc.compiledb"
+COMPILEDB_RC_BACKUP="${WORKSPACE_FOLDER}/.bazelrc.compiledb.backup"
+
+if [ -f "${COMPILEDB_RC}" ]; then
+    echo "Info: Backing up existing .bazelrc.compiledb"
+    mv "${COMPILEDB_RC}" "${COMPILEDB_RC_BACKUP}"
+fi
+
+# Create our temporary config for setup (allow remote execution if auth is configured)
+echo "common --config=dbg" >"${COMPILEDB_RC}"
+
+# Check for engflow credentials (supports three auth methods: workspace certs, volume certs, or browser token)
+if [ -f "${WORKSPACE_FOLDER}/engflow.cert" ] && [ -f "${WORKSPACE_FOLDER}/engflow.key" ]; then
+    echo "Info: Engflow TLS credentials found in workspace (CI mode), using remote execution"
+elif [ -d "${HOME}/.config/engflow_auth" ] && [ -n "$(ls -A ${HOME}/.config/engflow_auth 2>/dev/null)" ]; then
+    echo "Info: Engflow auth directory exists (likely browser token), using remote execution"
+else
+    echo "Info: No engflow credentials found, using local execution"
+    echo "common --config=local" >>"${COMPILEDB_RC}"
+fi
+
+# Ensure restore happens even if build fails
+restore_compiledb_rc() {
+    if [ -f "${COMPILEDB_RC_BACKUP}" ]; then
+        echo "Info: Restoring user's .bazelrc.compiledb"
+        mv "${COMPILEDB_RC_BACKUP}" "${COMPILEDB_RC}"
+    else
+        rm -f "${COMPILEDB_RC}"
+    fi
+}
+trap restore_compiledb_rc EXIT
+
+if bazel build compiledb; then
     echo "[OK] Clang configuration built successfully"
 else
     echo "Warning: Failed to build clang configuration"
 fi
 
-# Step 6: Setup GDB pretty printers
+# Setup GDB pretty printers
 echo "Setting up GDB pretty printers..."
 cd "${WORKSPACE_FOLDER}/.."
 if [ -d "Boost-Pretty-Printer" ]; then
@@ -147,7 +207,7 @@ else
 fi
 cd "${WORKSPACE_FOLDER}"
 
-# Step 7: Configure automatic Python virtual environment activation
+# Configure automatic Python virtual environment activation
 echo "Configuring automatic Python virtual environment activation..."
 
 # Helper function to add Python venv activation to shell config
@@ -178,7 +238,7 @@ else
     echo "Warning: Python virtual environment not found at ${WORKSPACE_FOLDER}/python3-venv"
 fi
 
-# Step 8: Sync Python dependencies
+# Sync Python dependencies
 echo "Syncing Python dependencies..."
 if [ -f "${WORKSPACE_FOLDER}/python3-venv/bin/activate" ]; then
     # Only run sync if venv was just created OR if we're updating an existing one
@@ -199,7 +259,7 @@ else
     echo "Warning: Python virtual environment not found at ${WORKSPACE_FOLDER}/python3-venv"
 fi
 
-# Step 9: Install Node modules
+# Install Node modules
 echo "Installing Node.js dependencies..."
 if bazel run @pnpm//:pnpm --config=local -- --dir "${WORKSPACE_FOLDER}" install; then
     echo "[OK] Node.js dependencies installed successfully"

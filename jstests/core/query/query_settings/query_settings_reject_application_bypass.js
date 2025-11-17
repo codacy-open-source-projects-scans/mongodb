@@ -12,6 +12,8 @@
 //   simulate_mongoq_incompatible,
 //   # This test relies on aggregations returning specific batch-sized responses.
 //   assumes_no_implicit_cursor_exhaustion,
+//   # TODO(SERVER-113800): Enable setClusterParameters with replicaset started with --shardsvr
+//   transitioning_replicaset_incompatible,
 // ]
 //
 

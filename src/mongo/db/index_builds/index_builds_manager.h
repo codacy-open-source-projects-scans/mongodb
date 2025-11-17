@@ -48,24 +48,14 @@
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/uuid.h"
 
-#include <functional>
 #include <map>
 #include <memory>
-#include <string>
 #include <utility>
 #include <vector>
 
-#include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 
 namespace mongo {
-
-class Collection;
-class CollectionPtr;
-class OperationContext;
-class ServiceContext;
-struct IndexBuildInfo;
-
 enum IndexBuildRecoveryState { Building, Verifying, Committing };
 
 /**
@@ -143,10 +133,7 @@ public:
      * Returns the number of records and the size of the data iterated over.
      */
     StatusWith<std::pair<long long, long long>> startBuildingIndexForRecovery(
-        OperationContext* opCtx,
-        const CollectionAcquisition& coll,
-        const UUID& buildUUID,
-        RepairData repair);
+        OperationContext* opCtx, const CollectionAcquisition& coll, const UUID& buildUUID);
 
     /**
      * Document inserts observed during the scanning/insertion phase of an index build are not

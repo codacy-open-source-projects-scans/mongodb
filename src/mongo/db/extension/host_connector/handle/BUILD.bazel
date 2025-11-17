@@ -10,8 +10,6 @@ exports_files(
 
 mongo_cc_library(
     name = "host_handles",
-    srcs = [
-    ],
     hdrs = [
         "host_operation_metrics_handle.h",
     ],

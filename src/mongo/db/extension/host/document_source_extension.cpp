@@ -30,11 +30,7 @@
 #include "mongo/db/extension/host/document_source_extension.h"
 
 #include "mongo/base/init.h"  // IWYU pragma: keep
-#include "mongo/db/exec/agg/document_source_to_stage_registry.h"
-#include "mongo/db/extension/host/aggregation_stage/parse_node.h"
 #include "mongo/db/extension/host/document_source_extension_expandable.h"
-#include "mongo/db/extension/host/document_source_extension_optimizable.h"
-#include "mongo/db/extension/host/extension_stage.h"
 #include "mongo/db/extension/shared/handle/aggregation_stage/stage_descriptor.h"
 
 namespace mongo::extension::host {
@@ -112,41 +108,26 @@ LiteParsedList DocumentSourceExtension::LiteParsedExpandable::expandImpl(
     LiteParsedList outExpanded;
     auto expanded = parseNodeHandle.expand();
 
-    for (auto& variantNodeHandle : expanded) {
-        std::visit(
-            [&](auto&& handle) {
-                using H = std::decay_t<decltype(handle)>;
-
-                // Case 1: Parse node handle
-                //   a) Host-allocated parse node: convert directly to a host
-                //      LiteParsedDocumentSource using the host-provided BSON spec. No recursion in
-                //      this branch.
-                //   b) Extension-allocated parse node: Enter a validation frame for expansion
-                //      constraint enforcement (depth and cycles) and recurse on the parse node
-                //      handle, splicing the results of its expansion.
-                if constexpr (std::is_same_v<H, AggStageParseNodeHandle>) {
-                    if (host::HostAggStageParseNode::isHostAllocated(*handle.get())) {
-                        const auto& spec =
-                            static_cast<host::HostAggStageParseNode*>(handle.get())->getBsonSpec();
-                        outExpanded.emplace_back(
-                            LiteParsedDocumentSource::parse(nss, spec, options));
-                    } else {
-                        const auto stageName = std::string(handle.getName());
-                        ExpansionValidationFrame frame{state, stageName};
-                        auto children = expandImpl(handle, state, nss, options);
-                        outExpanded.splice(outExpanded.end(), children);
-                    }
-                }
-                // Case 2: AST node handle. Wrap in LiteParsedExpanded and append directly to the
-                // expanded result.
-                else if constexpr (std::is_same_v<H, AggStageAstNodeHandle>) {
-                    outExpanded.emplace_back(
-                        std::make_unique<DocumentSourceExtension::LiteParsedExpanded>(
-                            std::string(handle.getName()), std::move(handle)));
-                }
-            },
-            variantNodeHandle);
-    }
+    helper::visitExpandedNodes(
+        expanded,
+        [&](const HostAggStageParseNode& hostParse) {
+            const auto& spec = hostParse.getBsonSpec();
+            outExpanded.emplace_back(LiteParsedDocumentSource::parse(nss, spec, options));
+        },
+        [&](const AggStageParseNodeHandle& handle) {
+            const auto stageName = std::string(handle.getName());
+            ExpansionValidationFrame frame{state, stageName};
+            auto children = expandImpl(handle, state, nss, options);
+            outExpanded.splice(outExpanded.end(), children);
+        },
+        [&](const HostAggStageAstNode& hostAst) {
+            const auto& spec = hostAst.getIdLookupSpec();
+            outExpanded.emplace_back(LiteParsedDocumentSource::parse(nss, spec, options));
+        },
+        [&](AggStageAstNodeHandle handle) {
+            outExpanded.emplace_back(std::make_unique<LiteParsedExpanded>(
+                std::string(handle.getName()), std::move(handle), nss));
+        });
 
     return outExpanded;
 }
@@ -154,8 +135,7 @@ LiteParsedList DocumentSourceExtension::LiteParsedExpandable::expandImpl(
 // static
 void DocumentSourceExtension::registerStage(AggStageDescriptorHandle descriptor) {
     auto nameStringData = descriptor.getName();
-    auto id = DocumentSource::allocateId(nameStringData);
-    auto nameAsString = std::string(nameStringData);
+    auto stageName = std::string(nameStringData);
 
     using LiteParseFn = std::function<std::unique_ptr<LiteParsedDocumentSource>(
         const NamespaceString&, const BSONElement&, const LiteParserOptions&)>;
@@ -169,33 +149,16 @@ void DocumentSourceExtension::registerStage(AggStageDescriptorHandle descriptor)
         };
     }();
 
-    LiteParsedDocumentSource::registerParser(nameAsString,
-                                             std::move(parser),
-                                             AllowedWithApiStrict::kAlways,
-                                             AllowedWithClientType::kAny);
-
     // Register the correct DocumentSource to construct the stage with.
     DocumentSource::registerParser(
-        nameAsString,
+        stageName,
         [descriptor](BSONElement specElem, const boost::intrusive_ptr<ExpressionContext>& expCtx)
             -> boost::intrusive_ptr<DocumentSource> {
-            return DocumentSourceExtensionExpandable::create(
-                specElem.fieldNameStringData(), expCtx, specElem.wrap(), descriptor);
+            return DocumentSourceExtensionExpandable::create(expCtx, specElem.wrap(), descriptor);
         });
 
-    // Register the correct exec::agg to execute the stage with.
-    exec::agg::registerDocumentSourceToStageFn(
-        id, [](const boost::intrusive_ptr<DocumentSource>& source) {
-            auto* documentSource = dynamic_cast<DocumentSourceExtension*>(source.get());
-
-            tassert(10980400, "expected 'DocumentSourceExtension' type", documentSource);
-
-            return make_intrusive<exec::agg::ExtensionStage>(documentSource->getSourceName(),
-                                                             documentSource->getExpCtx());
-        });
-
-    // Add the allocated id to the static map for lookup upon object construction.
-    stageToIdMap[nameAsString] = id;
+    LiteParsedDocumentSource::registerParser(
+        stageName, std::move(parser), AllowedWithApiStrict::kAlways, AllowedWithClientType::kAny);
 }
 
 void DocumentSourceExtension::unregisterParser_forTest(const std::string& name) {
@@ -204,16 +167,10 @@ void DocumentSourceExtension::unregisterParser_forTest(const std::string& name) 
 
 DocumentSourceExtension::DocumentSourceExtension(
     StringData name, const boost::intrusive_ptr<ExpressionContext>& exprCtx)
-    : DocumentSource(name, exprCtx),
-      _stageName(std::string(name)),
-      _id(findStageId(std::string(name))) {}
+    : DocumentSource(name, exprCtx), _stageName(std::string(name)) {}
 
 const char* DocumentSourceExtension::getSourceName() const {
     return _stageName.c_str();
-}
-
-DocumentSource::Id DocumentSourceExtension::getId() const {
-    return _id;
 }
 
 boost::optional<DocumentSource::DistributedPlanLogic>
@@ -222,25 +179,33 @@ DocumentSourceExtension::distributedPlanLogic() {
 }
 
 StageConstraints DocumentSourceExtension::constraints(PipelineSplitState pipeState) const {
-    auto constraints = StageConstraints(StageConstraints::StreamType::kStreaming,
-                                        StageConstraints::PositionRequirement::kNone,
-                                        StageConstraints::HostTypeRequirement::kNone,
+    // Default constraints for extension stages.
+    //
+    // Only DocumentSourceExtensionOptimizable has access to MongoExtensionStaticProperties and
+    // overrides constraints() accordingly. DocumentSourceExtensionExpandable is a pre-desugar
+    // wrapper around an AggStageParseNode and therefore always uses these defaults.
+    //
+    // This is acceptable because the aggregate command calls validateCommon() twice:
+    //   (1) pre-desugar, when Expandable stages are still present, and
+    //   (2) post-desugar/optimization, when all extension stages have been replaced by their
+    //       expanded children, whose own constraints() reflect the true placement/host semantics.
+    //
+    // As long as validateCommon() is run again after desugaring, these defaults should remain as
+    // lenient as possible to avoid prematurely rejecting a valid pipeline. If new callers begin
+    // relying on constraints() before desugaring for correctness, we may need to surface
+    // constraint metadata on the ParseNode or delay constraint checks until after desugar.
+    auto constraints = StageConstraints(StreamType::kStreaming,
+                                        PositionRequirement::kNone,
+                                        HostTypeRequirement::kNone,
                                         DiskUseRequirement::kNoDiskUse,
                                         FacetRequirement::kNotAllowed,
                                         TransactionRequirement::kNotAllowed,
                                         LookupRequirement::kNotAllowed,
                                         UnionRequirement::kNotAllowed,
                                         ChangeStreamRequirement::kDenylist);
+    constraints.canRunOnTimeseries = false;
+
     return constraints;
-}
-
-DocumentSourceExtension::Id DocumentSourceExtension::findStageId(std::string stageName) {
-    auto it = stageToIdMap.find(stageName);
-    tassert(11250700,
-            str::stream() << "Could not find id associated with extension stage " << stageName,
-            it != stageToIdMap.end());
-
-    return it->second;
 }
 
 DocumentSourceExtension::~DocumentSourceExtension() = default;

@@ -27,16 +27,10 @@
  *    it in the license file.
  */
 
-#include <boost/container/small_vector.hpp>
-#include <boost/container/vector.hpp>
-#include <fmt/format.h>
-// IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
-// IWYU pragma: no_include "boost/move/algo/detail/set_difference.hpp"
 #include "mongo/base/data_view.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
@@ -48,6 +42,7 @@
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/index_builds/index_build_interceptor.h"
+#include "mongo/db/index_builds/index_build_test_helpers.h"
 #include "mongo/db/index_builds/index_builds_common.h"
 #include "mongo/db/index_builds/multi_index_block.h"
 #include "mongo/db/local_catalog/catalog_raii.h"
@@ -56,7 +51,6 @@
 #include "mongo/db/local_catalog/collection_catalog.h"
 #include "mongo/db/local_catalog/collection_options.h"
 #include "mongo/db/local_catalog/database.h"
-#include "mongo/db/local_catalog/db_raii.h"
 #include "mongo/db/local_catalog/durable_catalog.h"
 #include "mongo/db/local_catalog/index_catalog.h"
 #include "mongo/db/local_catalog/index_catalog_entry.h"
@@ -93,14 +87,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <ostream>
 #include <string>
 #include <utility>
-#include <vector>
 
-#include <boost/move/algo/move.hpp>
-#include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 namespace ValidateTests {
@@ -340,7 +331,7 @@ protected:
             Lock::CollectionLock collLock(&_opCtx, _nss, MODE_X);
             CollectionWriter collection(&_opCtx, _nss);
             beginTransaction();
-            auto status = dbtests::initializeMultiIndexBlock(&_opCtx, collection, indexer, spec);
+            auto status = initializeMultiIndexBlock(&_opCtx, collection, indexer, spec);
             commitTransaction();
             if (status == ErrorCodes::IndexAlreadyExists) {
                 return Status::OK();
@@ -2292,7 +2283,7 @@ public:
                     acquireCollection(&_opCtx,
                                       CollectionAcquisitionRequest(
                                           lostAndFoundNss,
-                                          PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                          PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                           repl::ReadConcernArgs::get(&_opCtx),
                                           AcquisitionPrerequisites::kRead),
                                       MODE_IS);
@@ -2307,7 +2298,7 @@ public:
                     acquireCollection(&_opCtx,
                                       CollectionAcquisitionRequest(
                                           _nss,
-                                          PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                          PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                           repl::ReadConcernArgs::get(&_opCtx),
                                           AcquisitionPrerequisites::kRead),
                                       MODE_IS);
@@ -2576,7 +2567,7 @@ public:
                     acquireCollection(&_opCtx,
                                       CollectionAcquisitionRequest(
                                           lostAndFoundNss,
-                                          PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                          PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                           repl::ReadConcernArgs::get(&_opCtx),
                                           AcquisitionPrerequisites::kRead),
                                       MODE_IS);
@@ -2591,7 +2582,7 @@ public:
                     acquireCollection(&_opCtx,
                                       CollectionAcquisitionRequest(
                                           _nss,
-                                          PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                          PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                           repl::ReadConcernArgs::get(&_opCtx),
                                           AcquisitionPrerequisites::kRead),
                                       MODE_IS);
@@ -2961,7 +2952,7 @@ public:
                     acquireCollection(&_opCtx,
                                       CollectionAcquisitionRequest(
                                           lostAndFoundNss,
-                                          PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                          PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                           repl::ReadConcernArgs::get(&_opCtx),
                                           AcquisitionPrerequisites::kRead),
                                       MODE_IS);
@@ -2976,7 +2967,7 @@ public:
                     acquireCollection(&_opCtx,
                                       CollectionAcquisitionRequest(
                                           _nss,
-                                          PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                          PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                           repl::ReadConcernArgs::get(&_opCtx),
                                           AcquisitionPrerequisites::kRead),
                                       MODE_IS);

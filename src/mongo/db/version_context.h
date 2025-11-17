@@ -74,7 +74,8 @@ public:
 
     /**
      * Sets the VersionContext decoration over the OperationContext over a given scope.
-     * At the end of the scope, the VersionContext decoration is reset to the uninitialized state.
+     * At the end of the scope, the VersionContext decoration is reset to its default state
+     * (i.e. operation without Operation FCV).
      * The Client lock over the opCtx's client is automatically taken on creation and destruction.
      */
     class ScopedSetDecoration {
@@ -83,6 +84,23 @@ public:
         ScopedSetDecoration(const ScopedSetDecoration&) = delete;
         ScopedSetDecoration(ScopedSetDecoration&&) = delete;
         ~ScopedSetDecoration();
+
+    private:
+        OperationContext* _opCtx;
+    };
+
+    /**
+     * Sets the current FCV as the VersionContext decoration over the passed in operation context
+     * (unless an OFCV is already set, in that case the scoped object has no effect). While the
+     * object is in scope, the operation context will have a stable view of feature flags. The
+     * Client lock over the opCtx's client is automatically taken on creation and destruction.
+     */
+    class FixedOperationFCVRegion {
+    public:
+        FixedOperationFCVRegion(OperationContext* opCtx);
+        FixedOperationFCVRegion(const FixedOperationFCVRegion&) = delete;
+        FixedOperationFCVRegion(FixedOperationFCVRegion&&) = delete;
+        ~FixedOperationFCVRegion();
 
     private:
         OperationContext* _opCtx;
@@ -108,14 +126,14 @@ public:
 
     void resetToOperationWithoutOFCV();
 
-    inline bool isInitialized() const {
-        return !std::holds_alternative<OperationWithoutOFCVTag>(_metadataOrTag);
+    inline bool hasOperationFCV() const {
+        return std::holds_alternative<VersionContextMetadata>(_metadataOrTag);
     }
 
     class Passkey {
     private:
         friend class VersionContextTest;
-        friend class FCVGatedFeatureFlag;
+        friend class FCVGatedFeatureFlagBase;
         friend class ShardingDDLCoordinator;
         Passkey() = default;
         ~Passkey() = default;
@@ -163,7 +181,7 @@ public:
     }
 
 private:
-    void _assertOFCVNotInitialized() const;
+    void _assertHasNoOperationFCV() const;
 
     bool _isMatchingOFCV(FCV fcv) const;
 
@@ -185,5 +203,20 @@ inline const VersionContext kNoVersionContext{VersionContext::OutsideOperationTa
  * of your current or future callers acts incorrectly due to ignoring their Operation FCV.
  */
 inline const VersionContext kVersionContextIgnored_UNSAFE{VersionContext::IgnoreOFCVTag{}};
+
+/**
+ * Synchronously wait for all operations associated with a stale version context to drain.
+ * It makes sense to call this function only when it is guaranteed that no new operations
+ * with a different version context can start (e.g. following an FCV transition).
+ *
+ * It does NOT wait for operations that are:
+ * - Associated with the passed in version context
+ * - Not associated with a version context at all
+ * - Associated with a stale version context, but that have been already killed
+ *
+ */
+void waitForOperationsNotMatchingVersionContextToComplete(OperationContext* opCtx,
+                                                          const VersionContext& vCtx,
+                                                          Date_t deadline = Date_t::max());
 
 }  // namespace mongo

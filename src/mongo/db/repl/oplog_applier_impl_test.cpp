@@ -137,7 +137,7 @@ CollectionAcquisition acquireCollForRead(OperationContext* opCtx, const Namespac
     return acquireCollection(
         opCtx,
         CollectionAcquisitionRequest(nss,
-                                     PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                     PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                      repl::ReadConcernArgs::get(opCtx),
                                      AcquisitionPrerequisites::kRead),
         MODE_IS);
@@ -870,7 +870,7 @@ TEST_F(OplogApplierImplTest, applyOplogEntryToInvalidateChangeStreamPreImages) {
         auto sideCollection = acquireCollection(
             _opCtx.get(),
             CollectionAcquisitionRequest(NamespaceString::kConfigImagesNamespace,
-                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                          repl::ReadConcernArgs::get(_opCtx.get()),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);
@@ -898,7 +898,7 @@ TEST_F(OplogApplierImplTest, applyOplogEntryToInvalidateChangeStreamPreImages) {
     auto sideCollection = acquireCollection(
         _opCtx.get(),
         CollectionAcquisitionRequest(NamespaceString::kConfigImagesNamespace,
-                                     PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                     PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                      repl::ReadConcernArgs::get(_opCtx.get()),
                                      AcquisitionPrerequisites::kRead),
         MODE_IS);
@@ -939,7 +939,7 @@ TEST_F(OplogApplierImplTest, applyOplogEntryToInvalidateNonModPreImages) {
         auto sideCollection = acquireCollection(
             _opCtx.get(),
             CollectionAcquisitionRequest(NamespaceString::kConfigImagesNamespace,
-                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                          repl::ReadConcernArgs::get(_opCtx.get()),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);
@@ -974,7 +974,7 @@ TEST_F(OplogApplierImplTest, applyOplogEntryToInvalidateNonModPreImages) {
     auto sideCollection = acquireCollection(
         _opCtx.get(),
         CollectionAcquisitionRequest(NamespaceString::kConfigImagesNamespace,
-                                     PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                     PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                      repl::ReadConcernArgs::get(_opCtx.get()),
                                      AcquisitionPrerequisites::kRead),
         MODE_IS);
@@ -1019,7 +1019,7 @@ TEST_F(OplogApplierImplTest, ImageCollectionInvalidationInInitialSyncHandlesConf
         auto sideCollection = acquireCollection(
             _opCtx.get(),
             CollectionAcquisitionRequest(NamespaceString::kConfigImagesNamespace,
-                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                          repl::ReadConcernArgs::get(_opCtx.get()),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);
@@ -1050,7 +1050,7 @@ TEST_F(OplogApplierImplTest, ImageCollectionInvalidationInInitialSyncHandlesConf
         auto sideCollection = acquireCollection(
             _opCtx.get(),
             CollectionAcquisitionRequest(NamespaceString::kConfigImagesNamespace,
-                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                          repl::ReadConcernArgs::get(_opCtx.get()),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);
@@ -1083,7 +1083,7 @@ TEST_F(OplogApplierImplTest, ImageCollectionInvalidationInInitialSyncHandlesConf
     auto sideCollection = acquireCollection(
         _opCtx.get(),
         CollectionAcquisitionRequest(NamespaceString::kConfigImagesNamespace,
-                                     PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                     PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                                      repl::ReadConcernArgs::get(_opCtx.get()),
                                      AcquisitionPrerequisites::kRead),
         MODE_IS);
@@ -2027,15 +2027,42 @@ TEST_F(OplogApplierImplTest, ApplyApplyOpsContainerOperations) {
     auto k = BSONBinData("K", 1, BinDataGeneral);
     auto v = BSONBinData("V", 1, BinDataGeneral);
 
-    BSONArray innerOps = BSON_ARRAY(BSON("op" << "ci"
-                                              << "ns" << nss.ns_forTest() << "container" << ident
-                                              << "o" << BSON("k" << k << "v" << v))
-                                    << BSON("op" << "cd"
-                                                 << "ns" << nss.ns_forTest() << "container" << ident
-                                                 << "o" << BSON("k" << k)));
+    const auto entryOpTime = nextOpTime();
+    ASSERT(!entryOpTime.isNull());
 
+    const BSONObj containerInsertOp =
+        BSON("op" << "ci"
+                  << "ns" << nss.ns_forTest() << "container" << ident << "o"
+                  << BSON("k" << k << "v" << v) << "ts" << entryOpTime.getTimestamp());
+    const BSONObj containerDeleteOp =
+        BSON("op" << "cd"
+                  << "ns" << nss.ns_forTest() << "container" << ident << "o" << BSON("k" << k)
+                  << "ts" << entryOpTime.getTimestamp());
+
+    BSONArray innerOps = BSON_ARRAY(containerInsertOp << containerDeleteOp);
+
+    /**
+     * o: {
+     *   applyOps: [
+     *     {
+     *       op: "ci",
+     *       ns: "<db>.<coll>",
+     *       container: "<ident>",
+     *       o: {k: <BinData>, v: <BinData>},
+     *       ts: <entryOpTime>
+     *     },
+     *     {
+     *       op: "cd",
+     *       ns: "<db>.<coll>",
+     *       container: "<ident>",
+     *       o: {k: <BinData>},
+     *       ts: <entryOpTime>
+     *     }
+     *   ]
+     * }
+     */
     BSONObj applyOpsCmd = BSON("applyOps" << innerOps);
-    auto entry = makeCommandOplogEntry(nextOpTime(), nss, applyOpsCmd, boost::none, boost::none);
+    auto entry = makeCommandOplogEntry(entryOpTime, nss, applyOpsCmd, boost::none, boost::none);
 
     ASSERT_OK(_applyOplogEntryOrGroupedInsertsWrapper(
         _opCtx.get(), ApplierOperation{&entry}, OplogApplication::Mode::kSecondary));

@@ -54,9 +54,11 @@ void optimizeEachStage(DocumentSourceContainer* container);
 
 /**
  * Modifies the container, optimizing it by combining, swapping, dropping and/or inserting
- * stages.
+ * stages. If 'itr' is given, optimizes the pipeline starting from the stage that 'itr' points to.
  */
-void optimizeContainer(DocumentSourceContainer* container);
+void optimizeContainer(const ExpressionContext&,
+                       DocumentSourceContainer* container,
+                       boost::optional<DocumentSourceContainer::iterator> itr = {});
 
 /**
  * Optimize the given pipeline after the stage that 'itr' points to.
@@ -64,7 +66,8 @@ void optimizeContainer(DocumentSourceContainer* container);
  * Returns a valid iterator that points to the new "end of the pipeline": i.e., the stage that
  * comes after 'itr' in the newly optimized pipeline.
  */
-DocumentSourceContainer::iterator optimizeEndOfPipeline(DocumentSourceContainer::iterator itr,
+DocumentSourceContainer::iterator optimizeEndOfPipeline(const ExpressionContext&,
+                                                        DocumentSourceContainer::iterator itr,
                                                         DocumentSourceContainer* container);
 
 /*

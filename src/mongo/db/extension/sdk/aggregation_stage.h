@@ -30,9 +30,13 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/extension/public/api.h"
 #include "mongo/db/extension/sdk/assert_util.h"
+#include "mongo/db/extension/sdk/operation_metrics_adapter.h"
+#include "mongo/db/extension/sdk/query_execution_context_handle.h"
+#include "mongo/db/extension/sdk/raii_vector_to_abi_array.h"
 #include "mongo/db/extension/shared/byte_buf.h"
 #include "mongo/db/extension/shared/extension_status.h"
 #include "mongo/db/extension/shared/get_next_result.h"
+#include "mongo/db/extension/shared/handle/aggregation_stage/parse_node.h"
 #include "mongo/util/modules.h"
 
 #include <memory>
@@ -41,6 +45,12 @@
 
 namespace mongo::extension::sdk {
 
+// Explicit template instantiations are provided in aggregation_stage.cpp.
+extern template void raiiVectorToAbiArray<VariantNodeHandle>(
+    std::vector<VariantNodeHandle> inputVector, ::MongoExtensionExpandedArray& outputArray);
+extern template void raiiVectorToAbiArray<VariantDPLHandle>(
+    std::vector<VariantDPLHandle> inputVector, ::MongoExtensionDPLArray& outputArray);
+
 /**
  * LogicalAggStage is the base class for implementing the
  * ::MongoExtensionLogicalAggStage interface by an extension.
@@ -48,12 +58,15 @@ namespace mongo::extension::sdk {
  * An extension must provide a specialization of this base class, and
  * expose it to the host as a ExtensionLogicalAggStage.
  */
+class ExecAggStage;
 class LogicalAggStage {
 public:
     LogicalAggStage() = default;
+    virtual ~LogicalAggStage() = default;
+
     virtual BSONObj serialize() const = 0;
     virtual BSONObj explain(::MongoExtensionExplainVerbosity verbosity) const = 0;
-    virtual ~LogicalAggStage() = default;
+    virtual std::unique_ptr<ExecAggStage> compile() const = 0;
 };
 
 /**
@@ -111,8 +124,14 @@ private:
         });
     };
 
-    static constexpr ::MongoExtensionLogicalAggStageVTable VTABLE = {
-        .destroy = &_extDestroy, .serialize = &_extSerialize, .explain = &_extExplain};
+    static ::MongoExtensionStatus* _extCompile(
+        const ::MongoExtensionLogicalAggStage* extLogicalStage,
+        ::MongoExtensionExecAggStage** output) noexcept;
+
+    static constexpr ::MongoExtensionLogicalAggStageVTable VTABLE = {.destroy = &_extDestroy,
+                                                                     .serialize = &_extSerialize,
+                                                                     .explain = &_extExplain,
+                                                                     .compile = &_extCompile};
     std::unique_ptr<LogicalAggStage> _stage;
 };
 
@@ -132,6 +151,10 @@ public:
         return _name;
     }
 
+    virtual BSONObj getProperties() const {
+        return BSONObj();
+    }
+
     virtual std::unique_ptr<LogicalAggStage> bind() const = 0;
 
 protected:
@@ -139,7 +162,7 @@ protected:
     explicit AggStageAstNode(std::string_view name) : _name(name) {}
 
 private:
-    const std::string_view _name;
+    const std::string _name;
 };
 
 /**
@@ -179,6 +202,19 @@ private:
             static_cast<const ExtensionAggStageAstNode*>(astNode)->getImpl().getName());
     }
 
+    static ::MongoExtensionStatus* _extGetProperties(
+        const ::MongoExtensionAggStageAstNode* astNode,
+        ::MongoExtensionByteBuf** properties) noexcept {
+        return wrapCXXAndConvertExceptionToStatus([&] {
+            *properties = nullptr;
+
+            const auto& impl = static_cast<const ExtensionAggStageAstNode*>(astNode)->getImpl();
+
+            // Allocate a buffer on the heap. Ownership is transferred to the caller.
+            *properties = new VecByteBuf(impl.getProperties());
+        });
+    }
+
     static ::MongoExtensionStatus* _extBind(
         const ::MongoExtensionAggStageAstNode* astNode,
         ::MongoExtensionLogicalAggStage** logicalStage) noexcept {
@@ -190,28 +226,13 @@ private:
         });
     }
 
-    static constexpr ::MongoExtensionAggStageAstNodeVTable VTABLE = {
-        .destroy = &_extDestroy, .get_name = &_extGetName, .bind = &_extBind};
+    static constexpr ::MongoExtensionAggStageAstNodeVTable VTABLE = {.destroy = &_extDestroy,
+                                                                     .get_name = &_extGetName,
+                                                                     .get_properties =
+                                                                         &_extGetProperties,
+                                                                     .bind = &_extBind};
     std::unique_ptr<AggStageAstNode> _astNode;
 };
-
-/**
- * Represents the possible types of nodes created during expansion.
- *
- * Expansion can result in four types of nodes:
- * 1. Host-defined parse node
- * 2. Extension-defined parse node
- * 3. Host-defined AST node
- * 4. Extension-defined AST node
- *
- * This variant allows extension developers to return both host- and extension-defined nodes in
- * AggStageParseNode::expand() without knowing the underlying implementation of host-defined
- * nodes.
- *
- * The host is responsible for differentiating between host- and extension-defined nodes later on.
- */
-using VariantNode =
-    std::variant<::MongoExtensionAggStageParseNode*, ::MongoExtensionAggStageAstNode*>;
 
 /**
  * AggStageParseNode is the base class for implementing the
@@ -232,14 +253,14 @@ public:
 
     virtual size_t getExpandedSize() const = 0;
 
-    virtual std::vector<VariantNode> expand() const = 0;
+    virtual std::vector<VariantNodeHandle> expand() const = 0;
 
 protected:
     AggStageParseNode() = delete;  // No default constructor.
     explicit AggStageParseNode(std::string_view name) : _name(name) {}
 
 private:
-    const std::string_view _name;
+    const std::string _name;
 };
 
 /**
@@ -297,67 +318,6 @@ private:
         return static_cast<const ExtensionAggStageParseNode*>(parseNode)
             ->getImpl()
             .getExpandedSize();
-    }
-
-    /**
-     * Converts an SDK VariantNode into a tagged union of ABI objects and writes the raw pointers
-     * into the host-allocated ExpandedArray element.
-     */
-    struct ConsumeVariantNodeToAbi {
-        ::MongoExtensionExpandedArrayElement& dst;
-
-        void operator()(::MongoExtensionAggStageParseNode* parseNode) const {
-            dst.type = kParseNode;
-            dst.parse = parseNode;
-        }
-
-        void operator()(::MongoExtensionAggStageAstNode* astNode) const {
-            dst.type = kAstNode;
-            dst.ast = astNode;
-        }
-    };
-
-    /*
-     * Invokes the destructor for a ::MongoExtensionAggStageParseNode and sets the element
-     * to null.
-     */
-    static void destroyAbiNode(::MongoExtensionAggStageParseNode*& node) noexcept {
-        if (node && node->vtable && node->vtable->destroy) {
-            node->vtable->destroy(node);
-        }
-        node = nullptr;
-    }
-
-    /*
-     * Invokes the destructor for a ::MongoExtensionAggStageAstNode and sets the element
-     * to null.
-     */
-    static void destroyAbiNode(::MongoExtensionAggStageAstNode*& node) noexcept {
-        if (node && node->vtable && node->vtable->destroy) {
-            node->vtable->destroy(node);
-        }
-        node = nullptr;
-    }
-
-    /*
-     * Invokes the destructor for a MongoExtensionExpandedArrayElement and sets the element to null.
-     */
-    static void destroyArrayElement(MongoExtensionExpandedArrayElement& node) noexcept {
-        switch (node.type) {
-            case kParseNode: {
-                destroyAbiNode(node.parse);
-                break;
-            }
-            case kAstNode: {
-                destroyAbiNode(node.ast);
-                break;
-            }
-            default: {
-                // Memory is leaked if the type tag is invalid, but this only happens if the
-                // extension violates the API contract.
-                break;
-            }
-        }
     }
 
     /**
@@ -464,18 +424,43 @@ private:
 };
 
 /**
- * ExecAggStage is the base class for implementing the
- * ::MongoExtensionExecAggStage interface by an extension.
+ * ExecAggStage is the base class for implementing the ::MongoExtensionExecAggStage interface by an
+ * extension.
  *
  * An extension executable agg stage must provide a specialization of this base class, and
  * expose it to the host as an ExtensionExecAggStage.
  */
 class ExecAggStage {
 public:
-    ExecAggStage() = default;
     virtual ~ExecAggStage() = default;
 
-    virtual ExtensionGetNextResult getNext() = 0;
+    virtual ExtensionGetNextResult getNext(const QueryExecutionContextHandle& execCtx,
+                                           const MongoExtensionExecAggStage* execStage) = 0;
+
+    std::string_view getName() const {
+        return _name;
+    }
+
+    // Extensions are not required to provide metrics if they do not need to.
+    virtual std::unique_ptr<OperationMetricsBase> createMetrics() const {
+        return nullptr;
+    }
+
+    virtual void open() = 0;
+
+    virtual void reopen() = 0;
+
+    virtual void close() = 0;
+
+    virtual void attach(::MongoExtensionOpCtx* ctx) = 0;
+
+    virtual void detach() = 0;
+
+protected:
+    ExecAggStage(std::string_view name) : _name(name) {}
+
+private:
+    const std::string _name;
 };
 
 /**
@@ -561,21 +546,90 @@ private:
     }
 
     static ::MongoExtensionStatus* _extGetNext(::MongoExtensionExecAggStage* execAggStage,
+                                               ::MongoExtensionQueryExecutionContext* execCtxPtr,
                                                ::MongoExtensionGetNextResult* apiResult) noexcept {
         return wrapCXXAndConvertExceptionToStatus([&]() {
             apiResult->code = ::MongoExtensionGetNextResultCode::kPauseExecution;
             apiResult->result = nullptr;
 
+            QueryExecutionContextHandle execCtx(execCtxPtr);
+
             auto& impl = static_cast<ExtensionExecAggStage*>(execAggStage)->getImpl();
 
             // Allocate a buffer on the heap. Ownership is transferred to the caller.
-            ExtensionGetNextResult extensionResult = impl.getNext();
+            ExtensionGetNextResult extensionResult = impl.getNext(execCtx, execAggStage);
             convertExtensionGetNextResultToCRepresentation(apiResult, extensionResult);
         });
     };
 
+    static ::MongoExtensionByteView _extGetName(
+        const ::MongoExtensionExecAggStage* execAggStage) noexcept {
+        const auto& impl = static_cast<const ExtensionExecAggStage*>(execAggStage)->getImpl();
+        return stringViewAsByteView(impl.getName());
+    }
+
+    static ::MongoExtensionStatus* _extCreateMetrics(
+        const ::MongoExtensionExecAggStage* execAggStage,
+        MongoExtensionOperationMetrics** metrics) noexcept {
+        return wrapCXXAndConvertExceptionToStatus([&]() {
+            const auto& impl = static_cast<const ExtensionExecAggStage*>(execAggStage)->getImpl();
+            auto result = impl.createMetrics();
+
+            auto adapter = new OperationMetricsAdapter(std::move(result));
+            *metrics = adapter;
+        });
+    }
+
+    static ::MongoExtensionStatus* _extOpen(::MongoExtensionExecAggStage* execAggStage) noexcept {
+        return wrapCXXAndConvertExceptionToStatus(
+            [&]() { static_cast<ExtensionExecAggStage*>(execAggStage)->getImpl().open(); });
+    }
+
+    static ::MongoExtensionStatus* _extReopen(::MongoExtensionExecAggStage* execAggStage) noexcept {
+        return wrapCXXAndConvertExceptionToStatus(
+            [&]() { static_cast<ExtensionExecAggStage*>(execAggStage)->getImpl().reopen(); });
+    }
+
+    static ::MongoExtensionStatus* _extClose(::MongoExtensionExecAggStage* execAggStage) noexcept {
+        return wrapCXXAndConvertExceptionToStatus(
+            [&]() { static_cast<ExtensionExecAggStage*>(execAggStage)->getImpl().close(); });
+    }
+
+    static ::MongoExtensionStatus* _extAttach(::MongoExtensionExecAggStage* execAggStage,
+                                              ::MongoExtensionOpCtx* ctx) noexcept {
+        return wrapCXXAndConvertExceptionToStatus(
+            [&]() { static_cast<ExtensionExecAggStage*>(execAggStage)->getImpl().attach(ctx); });
+    }
+
+    static ::MongoExtensionStatus* _extDetach(::MongoExtensionExecAggStage* execAggStage) noexcept {
+        return wrapCXXAndConvertExceptionToStatus(
+            [&]() { static_cast<ExtensionExecAggStage*>(execAggStage)->getImpl().detach(); });
+    }
+
     static constexpr ::MongoExtensionExecAggStageVTable VTABLE = {.destroy = &_extDestroy,
-                                                                  .get_next = &_extGetNext};
+                                                                  .get_next = &_extGetNext,
+                                                                  .get_name = &_extGetName,
+                                                                  .create_metrics =
+                                                                      &_extCreateMetrics,
+                                                                  .open = &_extOpen,
+                                                                  .reopen = &_extReopen,
+                                                                  .close = &_extClose,
+                                                                  .attach = &_extAttach,
+                                                                  .detach = &_extDetach};
     std::unique_ptr<ExecAggStage> _execAggStage;
 };
+
+inline ::MongoExtensionStatus* ExtensionLogicalAggStage::_extCompile(
+    const ::MongoExtensionLogicalAggStage* extLogicalStage,
+    ::MongoExtensionExecAggStage** output) noexcept {
+    return wrapCXXAndConvertExceptionToStatus([&]() {
+        *output = nullptr;
+
+        const auto& impl = static_cast<const ExtensionLogicalAggStage*>(extLogicalStage)->getImpl();
+
+        // TODO (SERVER-109572): Add parameter called input to hold the input stage.
+        *output = new ExtensionExecAggStage(impl.compile());
+    });
+};
+
 }  // namespace mongo::extension::sdk

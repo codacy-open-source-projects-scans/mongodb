@@ -237,7 +237,7 @@ __txn_get_snapshot_int(WT_SESSION_IMPL *session, bool update_shared_state)
 
     /* Walk the array of concurrent transactions. */
     WT_ACQUIRE_READ_WITH_BARRIER(session_cnt, conn->session_array.cnt);
-    WT_STAT_CONN_INCR(session, txn_walk_sessions);
+    WT_STAT_CONN_INCR_ATOMIC(session, txn_walk_sessions);
     for (i = 0, s = txn_global->txn_shared_list; i < session_cnt; i++, s++) {
         /*
          * Build our snapshot of any concurrent transaction IDs.
@@ -278,7 +278,7 @@ __txn_get_snapshot_int(WT_SESSION_IMPL *session, bool update_shared_state)
             WT_PAUSE();
         }
     }
-    WT_STAT_CONN_INCRV(session, txn_sessions_walked, i);
+    WT_STAT_CONN_INCRV_ATOMIC(session, txn_sessions_walked, i);
 
     /*
      * If we got a new snapshot, update the published pinned ID for this session.
@@ -399,7 +399,7 @@ __txn_oldest_scan(WT_SESSION_IMPL *session, uint64_t *oldest_idp, uint64_t *last
 
     /* Walk the array of concurrent transactions. */
     WT_ACQUIRE_READ_WITH_BARRIER(session_cnt, conn->session_array.cnt);
-    WT_STAT_CONN_INCR(session, txn_walk_sessions);
+    WT_STAT_CONN_INCR_ATOMIC(session, txn_walk_sessions);
     for (i = 0, s = txn_global->txn_shared_list; i < session_cnt; i++, s++) {
         /* Update the last running transaction ID. */
         while ((id = __wt_atomic_load_uint64_v_relaxed(&s->id)) != WT_TXN_NONE &&
@@ -444,7 +444,7 @@ __txn_oldest_scan(WT_SESSION_IMPL *session, uint64_t *oldest_idp, uint64_t *last
             oldest_session = &WT_CONN_SESSIONS_GET(conn)[i];
         }
     }
-    WT_STAT_CONN_INCRV(session, txn_sessions_walked, i);
+    WT_STAT_CONN_INCRV_ATOMIC(session, txn_sessions_walked, i);
 
     if (last_running < oldest_id)
         oldest_id = last_running;
@@ -1287,20 +1287,6 @@ __txn_resolve_prepared_op(WT_SESSION_IMPL *session, WT_TXN_OP *op, bool commit, 
         }
         break;
     case RESOLVE_IN_MEMORY:
-        /*
-         * For in-memory configurations of WiredTiger if a prepared update is reconciled and then
-         * rolled back, the on-page value will not be marked as aborted until the next eviction. In
-         * the special case where this rollback operation results in the update chain being entirely
-         * comprised of aborted updates, other transactions attempting to write to the same key will
-         * look at the on-page value, think the prepared transaction is still active, and falsely
-         * report a write conflict. To prevent this scenario, prepend a tombstone to the update
-         * chain.
-         */
-        if (!commit && first_committed_upd == NULL) {
-            tw_found = __wt_read_cell_time_window(cbt, &tw);
-            if (tw_found && WT_TIME_WINDOW_HAS_PREPARE(&tw))
-                WT_ERR(__txn_prepare_rollback_delete_key(session, op, cbt));
-        }
         break;
     default:
         WT_ERR_PANIC(
@@ -2325,6 +2311,7 @@ __wt_txn_stats_update(WT_SESSION_IMPL *session)
     wt_timestamp_t checkpoint_timestamp;
     wt_timestamp_t durable_timestamp;
     wt_timestamp_t oldest_active_read_timestamp;
+    wt_timestamp_t oldest_timestamp;
     wt_timestamp_t pinned_timestamp;
     uint64_t checkpoint_pinned;
 
@@ -2338,16 +2325,17 @@ __wt_txn_stats_update(WT_SESSION_IMPL *session)
       __wt_atomic_load_uint64_v_relaxed(&txn_global->current) -
         __wt_atomic_load_uint64_v_relaxed(&txn_global->oldest_id));
 
-    checkpoint_timestamp = txn_global->checkpoint_timestamp;
-    durable_timestamp = txn_global->durable_timestamp;
+    checkpoint_timestamp = __wt_atomic_load_uint64_relaxed(&txn_global->checkpoint_timestamp);
+    durable_timestamp = __wt_atomic_load_uint64_relaxed(&txn_global->durable_timestamp);
+    oldest_timestamp = __wt_atomic_load_uint64_relaxed(&txn_global->oldest_timestamp);
     pinned_timestamp = txn_global->pinned_timestamp;
     if (checkpoint_timestamp != WT_TS_NONE && checkpoint_timestamp < pinned_timestamp)
         pinned_timestamp = checkpoint_timestamp;
     WT_STATP_CONN_SET(session, stats, txn_pinned_timestamp, durable_timestamp - pinned_timestamp);
     WT_STATP_CONN_SET(
       session, stats, txn_pinned_timestamp_checkpoint, durable_timestamp - checkpoint_timestamp);
-    WT_STATP_CONN_SET(session, stats, txn_pinned_timestamp_oldest,
-      durable_timestamp - txn_global->oldest_timestamp);
+    WT_STATP_CONN_SET(
+      session, stats, txn_pinned_timestamp_oldest, durable_timestamp - oldest_timestamp);
 
     __wti_txn_get_pinned_timestamp(session, &oldest_active_read_timestamp, 0);
     if (oldest_active_read_timestamp == 0) {

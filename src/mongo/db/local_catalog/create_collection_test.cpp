@@ -165,7 +165,7 @@ CollectionAcquisition acquireCollForRead(OperationContext* opCtx, const Namespac
     return acquireCollection(
         opCtx,
         CollectionAcquisitionRequest(nss,
-                                     PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                     PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                      repl::ReadConcernArgs::get(opCtx),
                                      AcquisitionPrerequisites::kRead),
         MODE_IS);
@@ -498,7 +498,7 @@ TEST_F(CreateCollectionTest, ValidationDisabledForTemporaryReshardingCollection)
     const auto collection = acquireCollection(
         opCtx.get(),
         CollectionAcquisitionRequest(reshardingNss,
-                                     PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                     PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                      repl::ReadConcernArgs::get(opCtx.get()),
                                      AcquisitionPrerequisites::kWrite),
         MODE_IX);
@@ -735,6 +735,89 @@ TEST_F(CreateVirtualCollectionTest, InvalidVirtualCollectionOptions) {
         ASSERT_TRUE(exceptionOccurred)
             << fmt::format("Unknown 'fileType': {} must fail but succeeded",
                            stdx::to_underlying(kInvalidFileTypeEnum));
+    }
+}
+TEST_F(CreateCollectionTest,
+       CreateCollectionForApplyOpsCannotCreateViewWithSpecifiedCatalogIdentifiers) {
+    NamespaceString newNss = NamespaceString::createNamespaceString_forTest("test.coll");
+
+    auto opCtx = makeOpCtx();
+    auto uuid = UUID::gen();
+    Lock::DBLock lock(opCtx.get(), newNss.dbName(), MODE_IX);
+    ASSERT_THROWS_CODE(
+        createCollectionForApplyOps(
+            opCtx.get(),
+            newNss.dbName(),
+            uuid,
+            fromjson("{create: 'view', viewOn: 'coll', pipeline: []}"),
+            /*allowRenameOutOfTheWay*/ false,
+            /*idIndex=*/boost::none,
+            CreateCollCatalogIdentifier{.ident = "collection-1", .idIndexIdent = "index-1"s}),
+        DBException,
+        ErrorCodes::InvalidOptions);
+}
+
+TEST_F(CreateCollectionTest, TestCollectionCreationChecks) {
+    auto createCollectionTestCase = [&](OperationContext* opCtx,
+                                        const NamespaceString& nss,
+                                        const CollectionOptions& options,
+                                        const int expectedErrorCode) {
+        ASSERT(!collectionExists(opCtx, nss));
+        Lock::DBLock lock(opCtx, nss.dbName(), MODE_IX);
+        ASSERT_THROWS_CODE(createCollection(opCtx, nss, options, /*idIndex=*/boost::none),
+                           DBException,
+                           expectedErrorCode);
+    };
+
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.coll");
+
+    // CollectionOptions cannot have recordIdsReplicated set to true without the feature flag
+    // enabled.
+    {
+        RAIIServerParameterControllerForTest featureFlagController("featureFlagRecordIdsReplicated",
+                                                                   false);
+        auto opCtx = makeOpCtx();
+        CollectionOptions options;
+        options.recordIdsReplicated = true;
+        createCollectionTestCase(opCtx.get(), nss, options, ErrorCodes::CommandNotSupported);
+    };
+    // CollectionOptions cannot have validator set when creating a viewless timeseries collection.
+    {
+        RAIIServerParameterControllerForTest featureFlagController(
+            "featureFlagCreateViewlessTimeseriesCollections", true);
+        auto opCtx = makeOpCtx();
+        CollectionOptions options;
+        options.timeseries = TimeseriesOptions("ts");
+        options.validator = fromjson("{ts: {$type: 'date'}}");
+        createCollectionTestCase(opCtx.get(), nss, options, ErrorCodes::InvalidOptions);
+    }
+    // Cannot create a time-series collection within a multi-document transaction.
+    {
+        auto opCtx = makeOpCtx();
+        opCtx->setInMultiDocumentTransaction();
+        CollectionOptions options;
+        options.timeseries = TimeseriesOptions("ts");
+        createCollectionTestCase(
+            opCtx.get(), nss, options, ErrorCodes::OperationNotSupportedInTransaction);
+    };
+    // Cannot create the system.profile collection as a time-series collection.
+    {
+        auto opCtx = makeOpCtx();
+        CollectionOptions options;
+        options.timeseries = TimeseriesOptions("ts");
+        NamespaceString profileNss =
+            NamespaceString::createNamespaceString_forTest("test.system.profile");
+        createCollectionTestCase(opCtx.get(), profileNss, options, ErrorCodes::IllegalOperation);
+    };
+    // Cannot create a system collection within a transaction.
+    {
+        auto opCtx = makeOpCtx();
+        opCtx->setInMultiDocumentTransaction();
+        CollectionOptions options;
+        NamespaceString systemNss =
+            NamespaceString::createNamespaceString_forTest("test.system.profile");
+        createCollectionTestCase(
+            opCtx.get(), systemNss, options, ErrorCodes::OperationNotSupportedInTransaction);
     }
 }
 }  // namespace

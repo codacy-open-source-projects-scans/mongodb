@@ -160,6 +160,7 @@ mongo_cc_library(
         "//src/mongo/db/pipeline:pipeline.h",
         "//src/mongo/db/pipeline:pipeline_split_state.h",
         "//src/mongo/db/pipeline:resume_token.h",
+        "//src/mongo/db/pipeline:shard_role_transaction_resources_stasher_for_pipeline.h",
         "//src/mongo/db/pipeline:stage_constraints.h",
         "//src/mongo/db/pipeline:storage_stats_spec_gen",
         "//src/mongo/db/pipeline:transformer_interface.h",
@@ -268,7 +269,6 @@ mongo_cc_library(
         "//src/mongo/scripting:engine.h",
         "//src/mongo/util:elapsed_tracker.h",
         "//src/mongo/util:histogram.h",
-        "//src/mongo/util:id_generator.h",
         "//src/mongo/util:lazily_initialized.h",
         "//src/mongo/util:pcre.h",
         "//src/mongo/util:processinfo.h",
@@ -293,6 +293,7 @@ mongo_cc_library(
     }),
     deps = [
         "//src/mongo/db:profile_settings",
+        "//src/mongo/db/extension/host:extension_operation_metrics_registry",
         "//src/mongo/db/query/algebra",
         "//src/mongo/db/sorter:sorter_base",
         "//src/mongo/db/storage:container",

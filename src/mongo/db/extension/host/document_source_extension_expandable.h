@@ -37,19 +37,25 @@ namespace mongo::extension::host {
 class DocumentSourceExtensionExpandable : public DocumentSourceExtension {
 public:
     static boost::intrusive_ptr<DocumentSourceExtensionExpandable> create(
-        StringData name,
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         BSONObj rawStage,
         AggStageDescriptorHandle staticDescriptor) {
         return boost::intrusive_ptr<DocumentSourceExtensionExpandable>(
-            new DocumentSourceExtensionExpandable(name, expCtx, rawStage, staticDescriptor));
+            new DocumentSourceExtensionExpandable(expCtx, rawStage, staticDescriptor));
     }
 
     Value serialize(const SerializationOptions& opts) const override;
 
-    std::list<boost::intrusive_ptr<DocumentSource>> expand() {
+    std::list<boost::intrusive_ptr<DocumentSource>> expand() const {
         return expandImpl(getExpCtx(), _parseNode);
     }
+
+    static const Id& id;
+
+    Id getId() const override;
+
+    // Define how to desugar a DocumentSourceExtensionExpandable.
+    static Desugarer::StageExpander stageExpander;
 
 private:
     const AggStageParseNodeHandle _parseNode;
@@ -59,11 +65,11 @@ private:
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         const AggStageParseNodeHandle& parseNodeHandle);
 
-    DocumentSourceExtensionExpandable(StringData name,
-                                      const boost::intrusive_ptr<ExpressionContext>& expCtx,
+    DocumentSourceExtensionExpandable(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                       BSONObj rawStage,
                                       extension::AggStageDescriptorHandle staticDescriptor)
-        : DocumentSourceExtension(name, expCtx), _parseNode(staticDescriptor.parse(rawStage)) {}
+        : DocumentSourceExtension(staticDescriptor.getName(), expCtx),
+          _parseNode(staticDescriptor.parse(rawStage)) {}
 };
 
 }  // namespace mongo::extension::host

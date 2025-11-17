@@ -29,12 +29,17 @@
 
 #include "mongo/db/extension/host/document_source_extension_expandable.h"
 
+#include "mongo/base/init.h"  // IWYU pragma: keep
+#include "mongo/db/extension/host/aggregation_stage/ast_node.h"
 #include "mongo/db/extension/host/aggregation_stage/parse_node.h"
+#include "mongo/db/extension/host/document_source_extension.h"
 #include "mongo/db/extension/host/document_source_extension_optimizable.h"
 #include "mongo/db/extension/host_connector/query_shape_opts_adapter.h"
 #include "mongo/db/extension/shared/handle/aggregation_stage/ast_node.h"
 
 namespace mongo::extension::host {
+
+ALLOCATE_DOCUMENT_SOURCE_ID(extensionExpandable, DocumentSourceExtensionExpandable::id);
 
 std::list<boost::intrusive_ptr<DocumentSource>> DocumentSourceExtensionExpandable::expandImpl(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -42,57 +47,67 @@ std::list<boost::intrusive_ptr<DocumentSource>> DocumentSourceExtensionExpandabl
     std::list<boost::intrusive_ptr<DocumentSource>> outExpanded;
     std::vector<VariantNodeHandle> expanded = parseNodeHandle.expand();
 
-    for (auto& variantNodeHandle : expanded) {
-        std::visit(
-            [&](auto&& handle) {
-                using H = std::decay_t<decltype(handle)>;
-
-                // Case 1: Parse node handle.
-                //   a) Host-allocated parse node: convert directly to a host
-                //      DocumentSource using the host-provided BSON spec. No recursion
-                //      in this branch.
-                //   b) Extension-allocated parse node: Recurse on the parse node
-                //      handle, splicing the results of its expansion.
-                if constexpr (std::is_same_v<H, AggStageParseNodeHandle>) {
-                    if (HostAggStageParseNode::isHostAllocated(*handle.get())) {
-                        const BSONObj& bsonSpec =
-                            static_cast<host::HostAggStageParseNode*>(handle.get())->getBsonSpec();
-                        outExpanded.splice(outExpanded.end(),
-                                           DocumentSource::parse(expCtx, bsonSpec));
-                    } else {
-                        std::list<boost::intrusive_ptr<DocumentSource>> children =
-                            expandImpl(expCtx, handle);
-                        outExpanded.splice(outExpanded.end(), children);
-                    }
-                }
-                // Case 2: AST node handle. Construct a DocumentSourceExtensionOptimizable and
-                // release the AST node handle.
-                else if constexpr (std::is_same_v<H, AggStageAstNodeHandle>) {
-                    StringData stageName = handle.getName();
-                    outExpanded.emplace_back(DocumentSourceExtensionOptimizable::create(
-                        stageName, expCtx, std::move(handle)));
-                }
-            },
-            variantNodeHandle);
-    }
+    helper::visitExpandedNodes(
+        expanded,
+        [&](const HostAggStageParseNode& host) {
+            const BSONObj& bsonSpec = host.getBsonSpec();
+            outExpanded.splice(outExpanded.end(), DocumentSource::parse(expCtx, bsonSpec));
+        },
+        [&](const AggStageParseNodeHandle& handle) {
+            std::list<boost::intrusive_ptr<DocumentSource>> children = expandImpl(expCtx, handle);
+            outExpanded.splice(outExpanded.end(), children);
+        },
+        [&](const HostAggStageAstNode& hostAst) {
+            const BSONObj& bsonSpec = hostAst.getIdLookupSpec();
+            outExpanded.splice(outExpanded.end(), DocumentSource::parse(expCtx, bsonSpec));
+        },
+        [&](AggStageAstNodeHandle handle) {
+            outExpanded.emplace_back(
+                DocumentSourceExtensionOptimizable::create(expCtx, std::move(handle)));
+        });
 
     return outExpanded;
 }
 
 Value DocumentSourceExtensionExpandable::serialize(const SerializationOptions& opts) const {
-    // TODO SERVER-109780: Remove this block and add an assert to check that only the query shape is
-    // requested at this point.
-    if (opts.isKeepingLiteralsUnchanged()) {
-        // Convert to Optimizable representation to get the non-query shape serialization.
-        auto expanded = expandImpl(getExpCtx(), _parseNode);
-
-        std::vector<Value> tmp;
-        expanded.front()->serializeToArray(tmp, opts);
-        return std::move(tmp.front());
-    }
+    tassert(10978000,
+            "SerializationOptions should change literals while represented as a "
+            "DocumentSourceExtensionExpandable",
+            !opts.isKeepingLiteralsUnchanged());
 
     host_connector::QueryShapeOptsAdapter adapter{&opts};
     return Value(_parseNode.getQueryShape(adapter));
+}
+
+DocumentSource::Id DocumentSourceExtensionExpandable::getId() const {
+    return id;
+}
+
+Desugarer::StageExpander DocumentSourceExtensionExpandable::stageExpander =
+    [](Desugarer* desugarer, DocumentSourceContainer::iterator itr, const DocumentSource& stage) {
+        tassert(10978001, "Desugarer iterator does not match current stage", itr->get() == &stage);
+
+        const auto& expandable = static_cast<const DocumentSourceExtensionExpandable&>(stage);
+        std::list<boost::intrusive_ptr<DocumentSource>> expandedExtension = expandable.expand();
+        tassert(10978002, "Expanded extension pipeline is empty", !expandedExtension.empty());
+
+        // Replaces the extension stage with its expanded form and moves the iterator to *after* the
+        // new stages added.
+        return desugarer->replaceStageWith(itr, std::move(expandedExtension));
+    };
+
+/**
+ * Register the stage expander only after DocumentSource ID allocation is complete. This ensures
+ * that the expander is not registered under kUnallocatedId (0).
+ */
+MONGO_INITIALIZER_WITH_PREREQUISITES(RegisterStageExpanderForExtensionExpandable,
+                                     ("EndDocumentSourceIdAllocation"))
+(InitializerContext*) {
+    tassert(11368000,
+            "DocumentSourceExtensionExpandable::id must be allocated before registering expander",
+            DocumentSourceExtensionExpandable::id != DocumentSource::kUnallocatedId);
+    Desugarer::registerStageExpander(DocumentSourceExtensionExpandable::id,
+                                     DocumentSourceExtensionExpandable::stageExpander);
 }
 
 }  // namespace mongo::extension::host

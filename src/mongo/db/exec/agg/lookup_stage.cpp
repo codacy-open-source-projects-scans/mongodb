@@ -36,6 +36,7 @@
 #include "mongo/db/pipeline/optimization/optimize.h"
 #include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
+#include "mongo/db/raw_data_operation.h"
 #include "mongo/db/views/resolved_view.h"
 #include "mongo/logv2/log.h"
 
@@ -82,13 +83,13 @@ void addCacheStageAndOptimize(boost::intrusive_ptr<DocumentSource> source,
     // optimizeContainer on the pipeline to ensure the rest of the pipeline is in its correct
     // order before optimizing the cache.
     // TODO SERVER-84113: We will no longer have separate logic based on if a cache is present
-    // in doOptimizeAt(), so we can instead only add and optimize the cache after
+    // in optimizeAt(), so we can instead only add and optimize the cache after
     // optimizeContainer is called.
     pipeline.addFinalSource(std::move(source));
 
     auto& container = pipeline.getSources();
 
-    pipeline_optimization::optimizeContainer(&container);
+    pipeline_optimization::optimizeContainer(*pipeline.getContext(), &container);
 
     // We want to ensure the cache has been optimized prior to any calls to optimize().
     auto itr = (&container)->begin();
@@ -262,7 +263,7 @@ GetNextResult LookUpStage::doGetNext() {
         // throw a custom exception.
         if (auto staleInfo = ex.extraInfo<StaleConfigInfo>(); staleInfo &&
             staleInfo->getVersionWanted() &&
-            staleInfo->getVersionWanted() != ShardVersion::UNSHARDED()) {
+            staleInfo->getVersionWanted() != ShardVersion::UNTRACKED()) {
             uassert(3904800,
                     "Cannot run $lookup with a sharded foreign collection in a transaction",
                     foreignShardedLookupAllowed());
@@ -398,7 +399,7 @@ void LookUpStage::prepareStateToBuildPipeline(
 
     if (!foreignShardedLookupAllowed() && !fromExpCtx->getInRouter()) {
         // Enforce that the foreign collection must be unsharded for lookup.
-        fromExpCtx->getMongoProcessInterface()->expectUnshardedCollectionInScope(
+        fromExpCtx->getMongoProcessInterface()->expectUntrackedCollectionInScope(
             fromExpCtx->getOperationContext(), fromExpCtx->getNamespaceString(), boost::none);
     }
 }
@@ -455,7 +456,9 @@ std::unique_ptr<mongo::Pipeline> LookUpStage::buildPipeline(
             return buildPipelineFromViewDefinition(
                 fromExpCtx,
                 e->getNamespace(),
-                e->getPipeline(),
+                isRawDataOperation(pExpCtx->getOperationContext()) && e->timeseries()
+                    ? std::vector<BSONObj>{}
+                    : e->getPipeline(),
                 true /* attachCursorAfterOptimizing */,
                 shardTargetingPolicy,
                 pipeline_optimization::optimizeAndValidatePipeline);
@@ -469,10 +472,15 @@ std::unique_ptr<mongo::Pipeline> LookUpStage::buildPipeline(
     const auto& optimizePipeline = [this](mongo::Pipeline* pipeline) {
         tassert(11028105, "Expected pipeline to optimize", pipeline);
         // We've already validated above the cache exists and is not abandoned, so we should
-        // always apply the optimization here. We do not validate the pipeline after adding the
-        // cache stage optimization.
+        // always apply the optimization here.
         addCacheStageAndOptimize(DocumentSourceSequentialDocumentCache::create(_fromExpCtx, _cache),
                                  *pipeline);
+
+        // We perform pipeline validation again after adding the cache stage, given that stages with
+        // a stage constraint of PositionRequirement::kCustom will only perform validation checks
+        // when 'alreadyOptimized' is true. If we avoid this check we could potentially try to
+        // execute invalid pipelines.
+        pipeline->validateCommon(true /* alreadyOptimized */);
     };
 
     try {
@@ -485,12 +493,15 @@ std::unique_ptr<mongo::Pipeline> LookUpStage::buildPipeline(
     } catch (const ExceptionFor<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>& e) {
         // This exception returns the information we need to resolve a sharded view. Update the
         // pipeline with the resolved view definition and retry to attach the cursor.
-        pipeline = buildPipelineFromViewDefinition(fromExpCtx,
-                                                   e->getNamespace(),
-                                                   e->getPipeline(),
-                                                   !cacheIsServing,
-                                                   shardTargetingPolicy,
-                                                   optimizePipeline);
+        pipeline = buildPipelineFromViewDefinition(
+            fromExpCtx,
+            e->getNamespace(),
+            isRawDataOperation(pExpCtx->getOperationContext()) && e->timeseries()
+                ? std::vector<BSONObj>{}
+                : e->getPipeline(),
+            !cacheIsServing,
+            shardTargetingPolicy,
+            optimizePipeline);
     }
 
     // If the cache has been abandoned, release it.

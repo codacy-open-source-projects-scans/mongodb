@@ -14,6 +14,18 @@ exports_files(
     ]),
 )
 
+# Note that this is a standalone library such that it doesn't need to have any server dependencies like the rest of the extension_host target does.
+mongo_cc_library(
+    name = "extension_operation_metrics_registry",
+    hdrs = [
+        "operation_metrics_registry.h",
+    ],
+    deps = [
+        "//src/mongo:base",
+        "//src/mongo/db/extension/shared/handle/aggregation_stage",
+    ],
+)
+
 mongo_cc_library(
     name = "extension_host",
     srcs = [
@@ -28,14 +40,19 @@ mongo_cc_library(
         "document_source_extension_optimizable.h",
         "extension_stage.h",
         "host_portal.h",
+        "query_execution_context.h",
+        "static_properties_util.h",
     ],
     deps = [
+        ":extension_operation_metrics_registry",
         "//src/mongo:base",
+        "//src/mongo/db:commands",
         "//src/mongo/db/extension/host/aggregation_stage",
         "//src/mongo/db/extension/host_connector:extensions_host_connector",
         "//src/mongo/db/extension/host_connector:host_services_adapter",
         "//src/mongo/db/extension/shared/handle/aggregation_stage",
         "//src/mongo/db/pipeline",
+        "//src/mongo/db/pipeline:desugarer",
     ],
 )
 
@@ -48,6 +65,7 @@ mongo_cc_library(
     ],
     hdrs = [
         "load_extension.h",
+        "load_extension_test_util.h",
         "load_stub_parsers.h",
     ],
     deps = [
@@ -63,6 +81,7 @@ mongo_cc_unit_test(
     name = "extensions_api_test",
     srcs = [
         "load_extension_test.cpp",
+        "load_native_vector_search_test.cpp",
     ],
     # Data lists the targets that must be built to generate extension shared libraries, which are
     # loaded in the unit tests.
@@ -82,7 +101,9 @@ mongo_cc_unit_test(
         "//src/mongo/db/extension/test_examples:major_version_max_int_bad_extension",
         "//src/mongo/db/extension/test_examples:major_version_too_high_bad_extension",
         "//src/mongo/db/extension/test_examples:major_version_too_low_bad_extension",
+        "//src/mongo/db/extension/test_examples:match_topN_mongo_extension",
         "//src/mongo/db/extension/test_examples:minor_version_too_high_bad_extension",
+        "//src/mongo/db/extension/test_examples:native_vector_search_mongo_extension",
         "//src/mongo/db/extension/test_examples:no_compatible_version_bad_extension",
         "//src/mongo/db/extension/test_examples:no_symbol_bad_extension",
         "//src/mongo/db/extension/test_examples:null_initialize_function_bad_extension",
@@ -106,14 +127,5 @@ mongo_cc_unit_test(
         "//src/mongo/db/pipeline:aggregation_context_fixture",
         "//src/mongo/idl:server_parameter_test_controller",
         "//src/mongo/unittest",
-    ],
-)
-
-mongo_cc_library(
-    name = "host_test_helpers",
-    hdrs = ["test_stage_id_registrar.h"],
-    deps = [
-        ":extension_host",
-        "//src/mongo:base",
     ],
 )

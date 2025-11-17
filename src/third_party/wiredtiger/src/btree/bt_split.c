@@ -814,12 +814,21 @@ __split_parent(WT_SESSION_IMPL *session, WT_REF *ref, WT_REF **ref_new, uint32_t
     split_gen = __wt_gen(session, WT_GEN_SPLIT);
     parent->pg_intl_split_gen = split_gen;
 
+    /*
+     * Mark the page ref's rec_state as dirty. We cannot race with checkpoint as internal page
+     * cannot split during checkpoint.
+     */
+    if (WT_DELTA_INT_ENABLED(btree, S2C(session)))
+        __wt_atomic_store_uint8_v_release(&ref->rec_state, WT_REF_REC_DIRTY);
+
+    /* Disable building delta for the parent page if we split. */
+    F_SET_ATOMIC_16(parent, WT_PAGE_INTL_PINDEX_UPDATE);
+
     if (EXTRA_DIAGNOSTICS_ENABLED(session, WT_DIAGNOSTIC_KEY_OUT_OF_ORDER))
         WT_WITH_PAGE_INDEX(session, __split_verify_intl_key_order(session, parent));
 
     /* The split is complete and verified, ignore benign errors. */
     complete = WT_ERR_IGNORE;
-    F_SET_ATOMIC_16(parent, WT_PAGE_INTL_PINDEX_UPDATE);
 
     /*
      * The new page index is in place. Threads cursoring in the tree are blocked because the WT_REF
@@ -1026,6 +1035,10 @@ __split_internal(WT_SESSION_IMPL *session, WT_PAGE *parent, WT_PAGE *page)
         } else
             ref->ref_recno = (*page_refp)->ref_recno;
         F_SET(ref, WT_REF_FLAG_INTERNAL);
+
+        if (WT_DELTA_INT_ENABLED(btree, S2C(session)))
+            __wt_atomic_store_uint8_v_relaxed(&ref->rec_state, WT_REF_REC_DIRTY);
+
         WT_REF_SET_STATE(ref, WT_REF_MEM);
 
         /*
@@ -1432,7 +1445,7 @@ __split_multi_inmem(WT_SESSION_IMPL *session, WT_PAGE *orig, WT_MULTI *multi, WT
     size_t free_size;
     uint64_t recno, txnid;
     uint32_t i, slot;
-    bool free_updates, instantiate_upd;
+    bool instantiate_upd;
 
     /*
      * This code re-creates an in-memory page from a disk image, and adds references to any
@@ -1488,12 +1501,6 @@ __split_multi_inmem(WT_SESSION_IMPL *session, WT_PAGE *orig, WT_MULTI *multi, WT
         return (0);
 
     free_size = 0;
-    /*
-     * We can't truncate the updates for an in-memory database or an in-memory btree as we cannot
-     * insert the older updates to the history store.
-     */
-    free_updates =
-      !F_ISSET(S2C(session), WT_CONN_IN_MEMORY) && !F_ISSET(S2BT(session), WT_BTREE_IN_MEMORY);
 
     if (orig->type == WT_PAGE_ROW_LEAF)
         WT_RET(__wt_scr_alloc(session, 0, &key));
@@ -1522,7 +1529,7 @@ __split_multi_inmem(WT_SESSION_IMPL *session, WT_PAGE *orig, WT_MULTI *multi, WT
          * we may still fail. If we fail, we will append them back to their original update chains.
          * Truncate before we restore them to ensure the size of the page is correct.
          */
-        if (free_updates && supd->onpage_upd != NULL) {
+        if (supd->onpage_upd != NULL) {
             /*
              * If we have written a prepared update, we need to retain the next update that is not a
              * tombstone. Otherwise, we don't have anything to write in the next reconciliation if
@@ -1921,6 +1928,9 @@ __wt_multi_to_ref(WT_SESSION_IMPL *session, WT_REF *old_ref, WT_PAGE *page, WT_M
         }
     }
 
+    if (WT_DELTA_INT_ENABLED(S2BT(session), S2C(session)))
+        __wt_atomic_store_uint8_v_relaxed(&ref->rec_state, WT_REF_REC_DIRTY);
+
     /*
      * If we have a disk image and we're not closing the file, re-instantiate the page.
      *
@@ -2027,6 +2037,10 @@ __split_insert(WT_SESSION_IMPL *session, WT_REF *ref)
     child = split_ref[1];
     child->page = right;
     F_SET(child, WT_REF_FLAG_LEAF);
+
+    if (WT_DELTA_INT_ENABLED(S2BT(session), S2C(session)))
+        __wt_atomic_store_uint8_v_relaxed(&child->rec_state, WT_REF_REC_DIRTY);
+
     WT_REF_SET_STATE(child, WT_REF_MEM); /* Visible as soon as the split completes. */
     if (type == WT_PAGE_ROW_LEAF) {
         WT_ERR(__wti_row_ikey(
@@ -2481,7 +2495,7 @@ __wt_split_rewrite(WT_SESSION_IMPL *session, WT_REF *ref, WT_MULTI *multi, bool 
 
     /* If there's an address, copy it. */
     if (multi->addr.block_cookie != NULL) {
-        WT_ASSERT(session, WT_DELTA_LEAF_ENABLED(session));
+        WT_ASSERT(session, page->disagg_info != NULL);
         WT_ERR(__wt_calloc_one(session, &addr));
         WT_TIME_AGGREGATE_COPY(&addr->ta, &multi->addr.ta);
         WT_ERR(__wt_memdup(

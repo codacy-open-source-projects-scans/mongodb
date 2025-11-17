@@ -33,14 +33,17 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/exec/agg/document_source_to_stage_registry.h"
-#include "mongo/db/exec/agg/mock_stage.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/extension/host/aggregation_stage/parse_node.h"
+#include "mongo/db/extension/host/document_source_extension_optimizable.h"
 #include "mongo/db/extension/host/host_portal.h"
+#include "mongo/db/extension/host_connector/host_services_adapter.h"
 #include "mongo/db/extension/sdk/aggregation_stage.h"
+#include "mongo/db/extension/sdk/host_services.h"
 #include "mongo/db/extension/sdk/tests/shared_test_stages.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
 #include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/pipeline/search/document_source_internal_search_id_lookup.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 
@@ -53,6 +56,12 @@ public:
     DocumentSourceExtensionTest() : DocumentSourceExtensionTest(nss) {}
     explicit DocumentSourceExtensionTest(NamespaceString nsString)
         : AggregationContextFixture(std::move(nsString)) {};
+
+    void setUp() override {
+        AggregationContextFixture::setUp();
+        extension::sdk::HostServicesHandle::setHostServices(
+            extension::host_connector::HostServicesAdapter::get());
+    }
 
     /**
      * Helper to create test pipeline.
@@ -89,7 +98,7 @@ protected:
         BSON(sdk::shared_test_stages::NoOpAggStageDescriptor::kStageName << BSONObj());
 };
 
-TEST_F(DocumentSourceExtensionTest, parseNoOpSuccess) {
+TEST_F(DocumentSourceExtensionTest, ParseNoOpSuccess) {
     // Try to parse pipeline with custom extension stage before registering the extension,
     // should fail.
     std::vector<BSONObj> testPipeline{kValidSpec};
@@ -112,29 +121,9 @@ TEST_F(DocumentSourceExtensionTest, parseNoOpSuccess) {
     auto serializedPipeline =
         parsedPipeline->serializeToBson(SerializationOptions::kDebugQueryShapeSerializeOptions);
     ASSERT_EQUALS(serializedPipeline.size(), 1u);
-    // The extensions is in the form of DocumentSourceExtensionExpandable at this point, which
+    // The extension is in the form of DocumentSourceExtensionExpandable at this point, which
     // serializes to its query shape. There is no query shape for the no-op extension.
     ASSERT_BSONOBJ_EQ(serializedPipeline[0], BSONObj());
-
-    const auto* documentSourceExtension =
-        dynamic_cast<const host::DocumentSourceExtension*>(stagePtr);
-    ASSERT_TRUE(documentSourceExtension != nullptr);
-    auto extensionStage =
-        exec::agg::buildStage(const_cast<host::DocumentSourceExtension*>(documentSourceExtension));
-    // Ensure our stage is indeed a NoOp.
-    ASSERT_TRUE(extensionStage->getNext().isEOF());
-    Document inputDoc = Document{{"foo", 1}};
-    auto mock = exec::agg::MockStage::createForTest(inputDoc, getExpCtx());
-    extensionStage->setSource(mock.get());
-    auto next = extensionStage->getNext();
-    ASSERT(next.isAdvanced());
-    ASSERT_DOCUMENT_EQ(next.releaseDocument(), inputDoc);
-
-    {
-        // Test that a parsing failure correctly rethrows the uassert.
-        std::vector<BSONObj> testPipeline{kInvalidSpec};
-        ASSERT_THROWS_CODE(buildTestPipeline(testPipeline), AssertionException, 10596407);
-    }
 }
 
 TEST_F(DocumentSourceExtensionTest, ExpandToExtAst) {
@@ -154,7 +143,7 @@ TEST_F(DocumentSourceExtensionTest, ExpandToExtAst) {
     auto* first =
         dynamic_cast<host::DocumentSourceExtension::LiteParsedExpanded*>(expanded.front().get());
     ASSERT_TRUE(first != nullptr);
-    ASSERT_EQ(first->getParseTimeName(), std::string(sdk::shared_test_stages::kSourceName));
+    ASSERT_EQ(first->getParseTimeName(), std::string(sdk::shared_test_stages::kNoOpName));
 }
 
 TEST_F(DocumentSourceExtensionTest, ExpandToExtParse) {
@@ -213,11 +202,12 @@ TEST_F(DocumentSourceExtensionTest, ExpandToMixed) {
         LiteParserOptions{});
 
     const auto& expanded = lp.getExpandedPipeline();
-    ASSERT_EQUALS(expanded.size(), 3);
+    ASSERT_EQUALS(expanded.size(), 4);
 
     const auto it0 = expanded.begin();
     const auto it1 = std::next(expanded.begin(), 1);
     const auto it2 = std::next(expanded.begin(), 2);
+    const auto it3 = std::next(expanded.begin(), 3);
 
     auto* first = dynamic_cast<host::DocumentSourceExtension::LiteParsedExpanded*>(it0->get());
     ASSERT_TRUE(first != nullptr);
@@ -231,10 +221,16 @@ TEST_F(DocumentSourceExtensionTest, ExpandToMixed) {
         dynamic_cast<host::DocumentSourceExtension::LiteParsedExpanded*>(it2->get());
     ASSERT_TRUE(notExpanded == nullptr);
 
+    auto* fourth = dynamic_cast<LiteParsedDocumentSource*>(it3->get());
+    ASSERT_TRUE(fourth != nullptr);
+
     ASSERT_EQ(first->getParseTimeName(), std::string(sdk::shared_test_stages::kNoOpName));
     ASSERT_EQ(second->getParseTimeName(), std::string(sdk::shared_test_stages::kNoOpName));
     ASSERT_EQ(third->getParseTimeName(), std::string(DocumentSourceMatch::kStageName));
+    ASSERT_EQ(fourth->getParseTimeName(),
+              std::string(DocumentSourceInternalSearchIdLookUp::kStageName));
 }
+
 TEST_F(DocumentSourceExtensionTest, ExpandedPipelineIsComputedOnce) {
     sdk::shared_test_stages::ExpandToExtParseParseNode::expandCalls = 0;
 
@@ -273,8 +269,8 @@ public:
         return kExpansionSize;
     }
 
-    std::vector<sdk::VariantNode> expand() const override {
-        std::vector<sdk::VariantNode> out;
+    std::vector<VariantNodeHandle> expand() const override {
+        std::vector<VariantNodeHandle> out;
         out.reserve(kExpansionSize);
         // $querySettings stage expects a document as argument
         out.emplace_back(new host::HostAggStageParseNode(
@@ -287,6 +283,27 @@ public:
     }
 };
 }  // namespace
+
+TEST_F(DocumentSourceExtensionTest, ExpandToHostAst) {
+    auto rootParseNode = new sdk::ExtensionAggStageParseNode(
+        std::make_unique<sdk::shared_test_stages::ExpandToHostAstParseNode>());
+    AggStageParseNodeHandle rootHandle{rootParseNode};
+
+    host::DocumentSourceExtension::LiteParsedExpandable lp(
+        std::string(sdk::shared_test_stages::kExpandToHostAstName),
+        std::move(rootHandle),
+        _nss,
+        LiteParserOptions{});
+
+    const auto& expanded = lp.getExpandedPipeline();
+    ASSERT_EQUALS(expanded.size(), 1);
+
+    // Expanded pipeline contains LiteParsedDocumentSource.
+    auto* lpds = dynamic_cast<LiteParsedDocumentSource*>(expanded.front().get());
+    ASSERT_TRUE(lpds != nullptr);
+    ASSERT_EQ(lpds->getParseTimeName(),
+              std::string(DocumentSourceInternalSearchIdLookUp::kStageName));
+}
 
 TEST_F(DocumentSourceExtensionTest, ExpandPropagatesHostLiteParseFailure) {
     auto* rootParseNode =
@@ -372,8 +389,8 @@ public:
         return 1;
     }
 
-    std::vector<sdk::VariantNode> expand() const override {
-        std::vector<sdk::VariantNode> out;
+    std::vector<VariantNodeHandle> expand() const override {
+        std::vector<VariantNodeHandle> out;
         out.reserve(1);
         if (_remaining > 0) {
             out.emplace_back(new sdk::ExtensionAggStageParseNode(
@@ -402,8 +419,8 @@ public:
         return 1;
     }
 
-    std::vector<sdk::VariantNode> expand() const override {
-        std::vector<sdk::VariantNode> out;
+    std::vector<VariantNodeHandle> expand() const override {
+        std::vector<VariantNodeHandle> out;
         out.reserve(1);
         out.emplace_back(
             new sdk::ExtensionAggStageParseNode(std::make_unique<AdjacentCycleParseNode>()));
@@ -424,7 +441,7 @@ public:
         return 1;
     }
 
-    std::vector<sdk::VariantNode> expand() const override;
+    std::vector<VariantNodeHandle> expand() const override;
 
     BSONObj getQueryShape(const ::MongoExtensionHostQueryShapeOpts*) const override {
         return {};
@@ -439,22 +456,22 @@ public:
         return 1;
     }
 
-    std::vector<sdk::VariantNode> expand() const override;
+    std::vector<VariantNodeHandle> expand() const override;
 
     BSONObj getQueryShape(const ::MongoExtensionHostQueryShapeOpts*) const override {
         return {};
     }
 };
 
-std::vector<sdk::VariantNode> NodeAParseNode::expand() const {
-    std::vector<sdk::VariantNode> out;
+std::vector<VariantNodeHandle> NodeAParseNode::expand() const {
+    std::vector<VariantNodeHandle> out;
     out.reserve(1);
     out.emplace_back(new sdk::ExtensionAggStageParseNode(std::make_unique<NodeBParseNode>()));
     return out;
 }
 
-std::vector<sdk::VariantNode> NodeBParseNode::expand() const {
-    std::vector<sdk::VariantNode> out;
+std::vector<VariantNodeHandle> NodeBParseNode::expand() const {
+    std::vector<VariantNodeHandle> out;
     out.reserve(1);
     out.emplace_back(new sdk::ExtensionAggStageParseNode(std::make_unique<NodeAParseNode>()));
     return out;
@@ -470,8 +487,8 @@ public:
         return 2;
     }
 
-    std::vector<sdk::VariantNode> expand() const override {
-        std::vector<sdk::VariantNode> out;
+    std::vector<VariantNodeHandle> expand() const override {
+        std::vector<VariantNodeHandle> out;
         out.reserve(2);
         out.emplace_back(new sdk::ExtensionAggStageParseNode(
             std::make_unique<sdk::shared_test_stages::NoOpAggStageParseNode>()));
@@ -588,50 +605,74 @@ TEST_F(DocumentSourceExtensionTest, ExpandSameStageOnDifferentBranchesSucceeds) 
     ASSERT_EQ(second->getParseTimeName(), std::string(sdk::shared_test_stages::kNoOpName));
 }
 
-DEATH_TEST_F(DocumentSourceExtensionTest, FindStageIdThrowsForUnknownStage, "11250700") {
-    [[maybe_unused]] auto stageId = host::DocumentSourceExtension::findStageId("$unknownStage");
-}
-
-TEST_F(DocumentSourceExtensionTest, FindStageIdMatchesRegisteredStage) {
-    std::unique_ptr<host::HostPortal> hostPortal = std::make_unique<host::HostPortal>();
-    host_connector::HostPortalAdapter portal{
-        MONGODB_EXTENSION_API_VERSION, 1, "", std::move(hostPortal)};
-    portal.getImpl().registerStageDescriptor(&_noOpStaticDescriptor);
-
-    // Build a pipeline that contains the registered stage.
-    std::vector<BSONObj> testPipeline{kValidSpec};
-    auto pipeline = buildTestPipeline(testPipeline);
-    ASSERT(pipeline);
-
-    const auto* stagePtr = pipeline->peekFront();
-    ASSERT_TRUE(stagePtr != nullptr);
-
-    const auto* documentSourceExtension =
-        dynamic_cast<const host::DocumentSourceExtension*>(stagePtr);
-    ASSERT_TRUE(documentSourceExtension != nullptr);
-
-    // Compare the id returned by the constructed stage against the id resolved via findStageId().
-    auto stageId = documentSourceExtension->getId();
-    auto mapId = host::DocumentSourceExtension::findStageId(
-        sdk::shared_test_stages::NoOpAggStageDescriptor::kStageName);
-    ASSERT_EQUALS(stageId, mapId);
-}
-
 namespace {
-static constexpr std::string_view kNoOp2Name = "$noOp2";
+static constexpr std::string_view kExpandToSearchName = "$expandToSearch";
+static const BSONObj kSearchSpec = BSON(
+    "$search" << BSON("index" << "default" << "text" << BSON("query" << "foo" << "path" << "a")));
 
-class NoOp2AggStageAstNode : public sdk::AggStageAstNode {
+class TransformAggStageParseNode : public sdk::AggStageParseNode {
 public:
-    NoOp2AggStageAstNode() : sdk::AggStageAstNode(kNoOp2Name) {}
+    TransformAggStageParseNode()
+        : sdk::AggStageParseNode(sdk::shared_test_stages::kTransformName) {}
 
-    std::unique_ptr<sdk::LogicalAggStage> bind() const override {
-        return std::make_unique<sdk::shared_test_stages::NoOpLogicalAggStage>();
+    static constexpr size_t kExpansionSize = 2;
+
+    size_t getExpandedSize() const override {
+        return kExpansionSize;
+    }
+
+    std::vector<VariantNodeHandle> expand() const override {
+        std::vector<VariantNodeHandle> expanded;
+        expanded.reserve(kExpansionSize);
+        expanded.emplace_back(new sdk::ExtensionAggStageAstNode(
+            std::make_unique<sdk::shared_test_stages::TransformAggStageAstNode>()));
+        expanded.emplace_back(new sdk::ExtensionAggStageAstNode(
+            std::make_unique<sdk::shared_test_stages::SearchLikeSourceAggStageAstNode>()));
+        return expanded;
+    }
+
+    BSONObj getQueryShape(const ::MongoExtensionHostQueryShapeOpts* ctx) const override {
+        return BSONObj();
+    }
+
+    static inline std::unique_ptr<sdk::AggStageParseNode> make() {
+        return std::make_unique<TransformAggStageParseNode>();
     }
 };
 
-class NoOp2AggStageParseNode : public sdk::AggStageParseNode {
+class SearchLikeSourceAggStageParseNode : public sdk::AggStageParseNode {
 public:
-    NoOp2AggStageParseNode() : sdk::AggStageParseNode(kNoOp2Name) {}
+    SearchLikeSourceAggStageParseNode()
+        : sdk::AggStageParseNode(sdk::shared_test_stages::kSearchLikeSourceStageName) {}
+
+    static constexpr size_t kExpansionSize = 2;
+
+    size_t getExpandedSize() const override {
+        return kExpansionSize;
+    }
+
+    std::vector<VariantNodeHandle> expand() const override {
+        std::vector<VariantNodeHandle> expanded;
+        expanded.reserve(kExpansionSize);
+        expanded.emplace_back(new sdk::ExtensionAggStageAstNode(
+            std::make_unique<sdk::shared_test_stages::SearchLikeSourceAggStageAstNode>()));
+        expanded.emplace_back(new sdk::ExtensionAggStageAstNode(
+            std::make_unique<sdk::shared_test_stages::TransformAggStageAstNode>()));
+        return expanded;
+    }
+
+    BSONObj getQueryShape(const ::MongoExtensionHostQueryShapeOpts* ctx) const override {
+        return BSONObj();
+    }
+
+    static inline std::unique_ptr<sdk::AggStageParseNode> make() {
+        return std::make_unique<SearchLikeSourceAggStageParseNode>();
+    }
+};
+
+class ExpandToSearchAggStageParseNode : public sdk::AggStageParseNode {
+public:
+    ExpandToSearchAggStageParseNode() : sdk::AggStageParseNode(kExpandToSearchName) {}
 
     static constexpr size_t kExpansionSize = 1;
 
@@ -639,67 +680,463 @@ public:
         return kExpansionSize;
     }
 
-    std::vector<sdk::VariantNode> expand() const override {
-        std::vector<sdk::VariantNode> expanded;
+    std::vector<VariantNodeHandle> expand() const override {
+        std::vector<VariantNodeHandle> expanded;
         expanded.reserve(kExpansionSize);
-        expanded.emplace_back(
-            new sdk::ExtensionAggStageAstNode(std::make_unique<NoOp2AggStageAstNode>()));
+        expanded.emplace_back(new host::HostAggStageParseNode(
+            sdk::shared_test_stages::NoOpHostParseNode::make(kSearchSpec)));
         return expanded;
     }
 
-    BSONObj getQueryShape(const ::MongoExtensionHostQueryShapeOpts*) const override {
+    BSONObj getQueryShape(const ::MongoExtensionHostQueryShapeOpts* ctx) const override {
         return BSONObj();
+    }
+
+    static inline std::unique_ptr<sdk::AggStageParseNode> make() {
+        return std::make_unique<ExpandToSearchAggStageParseNode>();
     }
 };
 
-class NoOp2AggStageDescriptor : public sdk::AggStageDescriptor {
+class SingleActionRequiredPrivilegesAggStageAstNode : public sdk::AggStageAstNode {
 public:
-    static inline const std::string kStageName = std::string(kNoOp2Name);
+    static constexpr std::string_view kName = "$singleAction";
 
-    NoOp2AggStageDescriptor() : sdk::AggStageDescriptor(kStageName) {}
+    SingleActionRequiredPrivilegesAggStageAstNode() : sdk::AggStageAstNode(kName) {}
 
-    std::unique_ptr<sdk::AggStageParseNode> parse(BSONObj stageBson) const override {
-        return std::make_unique<NoOp2AggStageParseNode>();
+    BSONObj getProperties() const override {
+        return BSON("requiredPrivileges" << BSON_ARRAY(BSON(
+                        "resourcePattern" << "namespace"
+                                          << "actions" << BSON_ARRAY(BSON("action" << "find")))));
+    }
+
+    std::unique_ptr<sdk::LogicalAggStage> bind() const override {
+        return std::make_unique<sdk::shared_test_stages::NoOpLogicalAggStage>();
+    }
+
+    static inline std::unique_ptr<sdk::AggStageAstNode> make() {
+        return std::make_unique<SingleActionRequiredPrivilegesAggStageAstNode>();
+    }
+};
+
+class MultipleActionsRequiredPrivilegesAggStageAstNode : public sdk::AggStageAstNode {
+public:
+    static constexpr std::string_view kName = "$multipleActions";
+
+    MultipleActionsRequiredPrivilegesAggStageAstNode() : sdk::AggStageAstNode(kName) {}
+
+    BSONObj getProperties() const override {
+        return BSON("requiredPrivileges" << BSON_ARRAY(BSON(
+                        "resourcePattern" << "namespace"
+                                          << "actions"
+                                          << BSON_ARRAY(BSON("action" << "listIndexes")
+                                                        << BSON("action" << "planCacheRead")))));
+    }
+
+    std::unique_ptr<sdk::LogicalAggStage> bind() const override {
+        return std::make_unique<sdk::shared_test_stages::NoOpLogicalAggStage>();
+    }
+
+    static inline std::unique_ptr<sdk::AggStageAstNode> make() {
+        return std::make_unique<MultipleActionsRequiredPrivilegesAggStageAstNode>();
+    }
+};
+
+class MultipleRequiredPrivilegesAggStageAstNode : public sdk::AggStageAstNode {
+public:
+    static constexpr std::string_view kName = "$multiplePrivileges";
+
+    MultipleRequiredPrivilegesAggStageAstNode() : sdk::AggStageAstNode(kName) {}
+
+    BSONObj getProperties() const override {
+        return BSON("requiredPrivileges" << BSON_ARRAY(
+                        BSON("resourcePattern" << "namespace"
+                                               << "actions" << BSON_ARRAY(BSON("action" << "find")))
+                        << BSON("resourcePattern" << "namespace"
+                                                  << "actions"
+                                                  << BSON_ARRAY(BSON("action" << "indexStats")))));
+    }
+
+    std::unique_ptr<sdk::LogicalAggStage> bind() const override {
+        return std::make_unique<sdk::shared_test_stages::NoOpLogicalAggStage>();
+    }
+
+    static inline std::unique_ptr<sdk::AggStageAstNode> make() {
+        return std::make_unique<MultipleRequiredPrivilegesAggStageAstNode>();
+    }
+};
+
+class MultipleChildrenRequiredPrivilegesAggStageParseNode : public sdk::AggStageParseNode {
+public:
+    static constexpr std::string_view kName = "$multipleChildrenRequiredPrivileges";
+
+    MultipleChildrenRequiredPrivilegesAggStageParseNode() : sdk::AggStageParseNode(kName) {}
+
+    static constexpr size_t kExpansionSize = 6;
+
+    size_t getExpandedSize() const override {
+        return kExpansionSize;
+    }
+
+    std::vector<VariantNodeHandle> expand() const override {
+        std::vector<VariantNodeHandle> expanded;
+        expanded.reserve(kExpansionSize);
+        expanded.emplace_back(new host::HostAggStageParseNode(
+            sdk::shared_test_stages::NoOpHostParseNode::make(kSearchSpec)));
+        expanded.emplace_back(new sdk::ExtensionAggStageAstNode(
+            std::make_unique<SingleActionRequiredPrivilegesAggStageAstNode>()));
+        expanded.emplace_back(new sdk::ExtensionAggStageAstNode(
+            std::make_unique<sdk::shared_test_stages::NoOpAggStageAstNode>()));
+        expanded.emplace_back(new sdk::ExtensionAggStageAstNode(
+            std::make_unique<MultipleActionsRequiredPrivilegesAggStageAstNode>()));
+        expanded.emplace_back(new sdk::ExtensionAggStageAstNode(
+            std::make_unique<MultipleRequiredPrivilegesAggStageAstNode>()));
+        expanded.emplace_back(new sdk::ExtensionAggStageAstNode(
+            std::make_unique<sdk::shared_test_stages::NonePosAggStageAstNode>()));
+        return expanded;
+    }
+
+    BSONObj getQueryShape(const ::MongoExtensionHostQueryShapeOpts* ctx) const override {
+        return BSONObj();
+    }
+
+    static inline std::unique_ptr<sdk::AggStageParseNode> make() {
+        return std::make_unique<MultipleChildrenRequiredPrivilegesAggStageParseNode>();
+    }
+};
+
+class EmptyActionsArrayRequiredPrivilegesAggStageAstNode : public sdk::AggStageAstNode {
+public:
+    static constexpr std::string_view kName = "$emptyActions";
+
+    EmptyActionsArrayRequiredPrivilegesAggStageAstNode() : sdk::AggStageAstNode(kName) {}
+
+    BSONObj getProperties() const override {
+        return BSON("requiredPrivileges"
+                    << BSON_ARRAY(BSON("resourcePattern" << "namespace"
+                                                         << "actions" << BSONArray())));
+    }
+
+    std::unique_ptr<sdk::LogicalAggStage> bind() const override {
+        return std::make_unique<sdk::shared_test_stages::NoOpLogicalAggStage>();
+    }
+
+    static inline std::unique_ptr<sdk::AggStageAstNode> make() {
+        return std::make_unique<EmptyActionsArrayRequiredPrivilegesAggStageAstNode>();
+    }
+};
+
+class EmptyRequiredPrivilegesAggStageAstNode : public sdk::AggStageAstNode {
+public:
+    static constexpr std::string_view kName = "$emptyRequiredPrivileges";
+
+    EmptyRequiredPrivilegesAggStageAstNode() : sdk::AggStageAstNode(kName) {}
+
+    BSONObj getProperties() const override {
+        return BSON("requiredPrivileges" << BSONArray());
+    }
+
+    std::unique_ptr<sdk::LogicalAggStage> bind() const override {
+        return std::make_unique<sdk::shared_test_stages::NoOpLogicalAggStage>();
+    }
+
+    static inline std::unique_ptr<sdk::AggStageAstNode> make() {
+        return std::make_unique<EmptyRequiredPrivilegesAggStageAstNode>();
     }
 };
 }  // namespace
 
-TEST_F(DocumentSourceExtensionTest, FindStageIdsMatchRegisteredStagesMultiple) {
-    // Register two different NoOp descriptors.
-    std::unique_ptr<host::HostPortal> hostPortal = std::make_unique<host::HostPortal>();
-    host_connector::HostPortalAdapter portal{
-        MONGODB_EXTENSION_API_VERSION, 1, "", std::move(hostPortal)};
-    portal.getImpl().registerStageDescriptor(&_noOpStaticDescriptor);
+TEST_F(DocumentSourceExtensionTest, NoOpAstNodeWithDefaultGetPropertiesSucceeds) {
+    auto astNode =
+        new sdk::ExtensionAggStageAstNode(sdk::shared_test_stages::NoOpAggStageAstNode::make());
+    auto handle = AggStageAstNodeHandle{astNode};
 
-    sdk::ExtensionAggStageDescriptor noOp2StaticDescriptor{
-        std::make_unique<NoOp2AggStageDescriptor>()};
-    portal.getImpl().registerStageDescriptor(&noOp2StaticDescriptor);
+    host::DocumentSourceExtension::LiteParsedExpanded lp(
+        std::string(sdk::shared_test_stages::kNoOpName), std::move(handle), _nss);
+    ASSERT_FALSE(lp.isInitialSource());
+    ASSERT_FALSE(lp.requiresAuthzChecks());
+    ASSERT_EQUALS(lp.requiredPrivileges(/*isMongos*/ false, /*bypassDocumentValidation*/ false),
+                  PrivilegeVector{});
+}
 
-    // Build a pipeline with both stages.
-    BSONObj secondValidSpec = BSON(NoOp2AggStageDescriptor::kStageName << BSON("bar" << true));
-    std::vector<BSONObj> testPipeline{kValidSpec, secondValidSpec};
-    auto pipeline = buildTestPipeline(testPipeline);
-    ASSERT(pipeline);
+TEST_F(DocumentSourceExtensionTest, NoOpParseNodeInheritsDefaultGetPropertiesFromAstNode) {
+    auto parseNode =
+        new sdk::ExtensionAggStageParseNode(sdk::shared_test_stages::NoOpAggStageParseNode::make());
+    auto handle = AggStageParseNodeHandle{parseNode};
 
-    ASSERT_EQUALS(pipeline->getSources().size(), 2U);
+    host::DocumentSourceExtension::LiteParsedExpandable lp(
+        std::string(sdk::shared_test_stages::kNoOpName),
+        std::move(handle),
+        _nss,
+        LiteParserOptions{});
+    ASSERT_FALSE(lp.isInitialSource());
+    ASSERT_FALSE(lp.requiresAuthzChecks());
+    ASSERT_EQUALS(lp.requiredPrivileges(/*isMongos*/ false, /*bypassDocumentValidation*/ false),
+                  PrivilegeVector{});
+}
 
-    // First stage should match $noOp id.
-    auto firstIt = pipeline->getSources().begin();
-    const auto* firstStage = dynamic_cast<const host::DocumentSourceExtension*>(firstIt->get());
-    ASSERT_TRUE(firstStage != nullptr);
-    auto firstStageId = firstStage->getId();
-    auto firstMapId = host::DocumentSourceExtension::findStageId(
-        sdk::shared_test_stages::NoOpAggStageDescriptor::kStageName);
-    ASSERT_EQUALS(firstStageId, firstMapId);
+TEST_F(DocumentSourceExtensionTest, TransformAggStageAstNodeSucceeds) {
+    auto astNode = new sdk::ExtensionAggStageAstNode(
+        sdk::shared_test_stages::TransformAggStageAstNode::make());
+    auto handle = AggStageAstNodeHandle{astNode};
 
-    // Second stage should match $noOp2 id.
-    auto secondIt = std::next(firstIt);
-    const auto* secondStage = dynamic_cast<const host::DocumentSourceExtension*>(secondIt->get());
-    ASSERT_TRUE(secondStage != nullptr);
-    auto secondStageId = secondStage->getId();
-    auto secondMapId =
-        host::DocumentSourceExtension::findStageId(NoOp2AggStageDescriptor::kStageName);
-    ASSERT_EQUALS(secondStageId, secondMapId);
+    host::DocumentSourceExtension::LiteParsedExpanded lp(
+        std::string(sdk::shared_test_stages::kTransformName), std::move(handle), _nss);
+    ASSERT_FALSE(lp.isInitialSource());
+}
+
+TEST_F(DocumentSourceExtensionTest, SearchLikeSourceAggStageAstNode) {
+    auto astNode = new sdk::ExtensionAggStageAstNode(
+        sdk::shared_test_stages::SearchLikeSourceAggStageAstNode::make());
+    auto handle = AggStageAstNodeHandle{astNode};
+
+    host::DocumentSourceExtension::LiteParsedExpanded lp(
+        std::string(sdk::shared_test_stages::kSearchLikeSourceStageName), std::move(handle), _nss);
+    ASSERT_TRUE(lp.isInitialSource());
+}
+
+TEST_F(DocumentSourceExtensionTest,
+       TransformAggStageParseNodeInheritsInitialSourceFromFirstAstNode) {
+    auto parseNode = new sdk::ExtensionAggStageParseNode(TransformAggStageParseNode::make());
+    auto handle = AggStageParseNodeHandle{parseNode};
+
+    host::DocumentSourceExtension::LiteParsedExpandable lp(
+        std::string(sdk::shared_test_stages::kTransformName),
+        std::move(handle),
+        _nss,
+        LiteParserOptions{});
+    ASSERT_FALSE(lp.isInitialSource());
+}
+
+TEST_F(DocumentSourceExtensionTest,
+       SearchLikeSourceAggStageParseNodeInheritsInitialSourceFromFirstAstNode) {
+    auto parseNode = new sdk::ExtensionAggStageParseNode(SearchLikeSourceAggStageParseNode::make());
+    auto handle = AggStageParseNodeHandle{parseNode};
+
+    host::DocumentSourceExtension::LiteParsedExpandable lp(
+        std::string(sdk::shared_test_stages::kSearchLikeSourceStageName),
+        std::move(handle),
+        _nss,
+        LiteParserOptions{});
+    ASSERT_TRUE(lp.isInitialSource());
+}
+
+TEST_F(DocumentSourceExtensionTest, ExpandToMatchParseNodeInheritsPropertiesFromMatch) {
+    auto parseNode = new sdk::ExtensionAggStageParseNode(
+        std::make_unique<sdk::shared_test_stages::ExpandToHostParseParseNode>());
+    auto handle = AggStageParseNodeHandle{parseNode};
+
+    host::DocumentSourceExtension::LiteParsedExpandable lp(
+        std::string(sdk::shared_test_stages::kExpandToHostParseName),
+        std::move(handle),
+        _nss,
+        LiteParserOptions{});
+    ASSERT_FALSE(lp.isInitialSource());
+    ASSERT_FALSE(lp.requiresAuthzChecks());
+    ASSERT_EQUALS(lp.requiredPrivileges(/*isMongos*/ false, /*bypassDocumentValidation*/ false),
+                  PrivilegeVector{});
+}
+
+TEST_F(DocumentSourceExtensionTest, ExpandToSearchParseNodeInheritsPropertiesFromSearch) {
+    auto parseNode =
+        new sdk::ExtensionAggStageParseNode(std::make_unique<ExpandToSearchAggStageParseNode>());
+    auto handle = AggStageParseNodeHandle{parseNode};
+
+    host::DocumentSourceExtension::LiteParsedExpandable lp(
+        std::string(kExpandToSearchName), std::move(handle), _nss, LiteParserOptions{});
+    ASSERT_TRUE(lp.isInitialSource());
+
+    auto privileges = lp.requiredPrivileges(/*isMongos*/ false, /*bypassDocumentValidation*/ false);
+    ASSERT_EQ(privileges.size(), 1);
+
+    const auto& privilege = privileges.front();
+    ASSERT_TRUE(privilege.getResourcePattern().isExactNamespacePattern());
+    ASSERT_EQ(privilege.getResourcePattern().ns(), _nss);
+
+    const auto& actions = privilege.getActions();
+    ASSERT_EQ(actions.getActionsAsStringDatas().size(), 1);
+    ASSERT_TRUE(actions.contains(ActionType::find));
+
+    ASSERT_TRUE(lp.requiresAuthzChecks());
+}
+
+TEST_F(DocumentSourceExtensionTest, EmptyRequiredPrivilegesAstNodeSucceeds) {
+    auto astNode =
+        new sdk::ExtensionAggStageAstNode(EmptyRequiredPrivilegesAggStageAstNode::make());
+    auto handle = AggStageAstNodeHandle{astNode};
+
+    host::DocumentSourceExtension::LiteParsedExpanded lp(
+        std::string(EmptyRequiredPrivilegesAggStageAstNode::kName), std::move(handle), _nss);
+
+    ASSERT_EQUALS(lp.requiredPrivileges(/*isMongos*/ false, /*bypassDocumentValidation*/ false),
+                  PrivilegeVector{});
+    ASSERT_FALSE(lp.requiresAuthzChecks());
+}
+
+TEST_F(DocumentSourceExtensionTest, SingleRequiredPrivilegesAstNodeProducesFindPrivilege) {
+    auto astNode =
+        new sdk::ExtensionAggStageAstNode(SingleActionRequiredPrivilegesAggStageAstNode::make());
+    auto handle = AggStageAstNodeHandle{astNode};
+
+    host::DocumentSourceExtension::LiteParsedExpanded lp(
+        std::string(SingleActionRequiredPrivilegesAggStageAstNode::kName), std::move(handle), _nss);
+
+    auto privileges = lp.requiredPrivileges(/*isMongos*/ false, /*bypassDocumentValidation*/ false);
+    ASSERT_EQ(privileges.size(), 1);
+
+    const auto& privilege = privileges.front();
+    ASSERT_TRUE(privilege.getResourcePattern().isExactNamespacePattern());
+    ASSERT_EQ(privilege.getResourcePattern().ns(), _nss);
+
+    const auto& actions = privilege.getActions();
+    ASSERT_EQ(actions.getActionsAsStringDatas().size(), 1);
+    ASSERT_TRUE(actions.contains(ActionType::find));
+
+    ASSERT_TRUE(lp.requiresAuthzChecks());
+}
+
+TEST_F(DocumentSourceExtensionTest,
+       MultipleActionsRequiredPrivilegesAstNodeProducesUnionOfActions) {
+    auto astNode =
+        new sdk::ExtensionAggStageAstNode(MultipleActionsRequiredPrivilegesAggStageAstNode::make());
+    auto handle = AggStageAstNodeHandle{astNode};
+
+    host::DocumentSourceExtension::LiteParsedExpanded lp(
+        std::string(MultipleActionsRequiredPrivilegesAggStageAstNode::kName),
+        std::move(handle),
+        _nss);
+
+    auto privileges = lp.requiredPrivileges(/*isMongos*/ false, /*bypassDocumentValidation*/ false);
+    ASSERT_EQ(privileges.size(), 1);
+
+    const auto& privilege = privileges.front();
+    ASSERT_TRUE(privilege.getResourcePattern().isExactNamespacePattern());
+    ASSERT_EQ(privilege.getResourcePattern().ns(), _nss);
+
+    const auto& actions = privilege.getActions();
+    ASSERT_EQ(actions.getActionsAsStringDatas().size(), 2);
+    ASSERT_TRUE(actions.contains(ActionType::listIndexes));
+    ASSERT_TRUE(actions.contains(ActionType::planCacheRead));
+
+    ASSERT_TRUE(lp.requiresAuthzChecks());
+}
+
+TEST_F(DocumentSourceExtensionTest, MultipleRequiredPrivilegesAstNodeProducesUnionOfPrivileges) {
+    auto astNode =
+        new sdk::ExtensionAggStageAstNode(MultipleRequiredPrivilegesAggStageAstNode::make());
+    auto handle = AggStageAstNodeHandle{astNode};
+
+    host::DocumentSourceExtension::LiteParsedExpanded lp(
+        std::string(MultipleRequiredPrivilegesAggStageAstNode::kName), std::move(handle), _nss);
+
+    auto privileges = lp.requiredPrivileges(/*isMongos*/ false, /*bypassDocumentValidation*/ false);
+    ASSERT_EQ(privileges.size(), 1);
+
+    const auto& privilege = privileges.front();
+    ASSERT_TRUE(privilege.getResourcePattern().isExactNamespacePattern());
+    ASSERT_EQ(privilege.getResourcePattern().ns(), _nss);
+
+    const auto& actions = privilege.getActions();
+    ASSERT_EQ(actions.getActionsAsStringDatas().size(), 2);
+    ASSERT_TRUE(actions.contains(ActionType::find));
+    ASSERT_TRUE(actions.contains(ActionType::indexStats));
+
+    ASSERT_TRUE(lp.requiresAuthzChecks());
+}
+
+TEST_F(DocumentSourceExtensionTest, ExpandableToMultipleMixedChildrenUnionsRequiredPrivileges) {
+    // Build the parse node that expands to:
+    //   1) Host node (e.g., $search via NoOpHostParseNode(kSearchSpec)) -> find
+    //   2) SingleActionRequiredPrivilegesAggStageAstNode -> find
+    //   3) NoOpAggStageAstNode -> no privileges
+    //   4) MultipleActionsRequiredPrivilegesAggStageAstNode -> find, listIndexes, planCacheRead
+    //   6) MultipleChildrenRequiredPrivilegesAggStageParseNode -> find, indexStats
+    //   6) NonePosAggStageAstNode -> no privileges
+    auto parseNode = new sdk::ExtensionAggStageParseNode(
+        MultipleChildrenRequiredPrivilegesAggStageParseNode::make());
+    auto handle = AggStageParseNodeHandle{parseNode};
+
+    host::DocumentSourceExtension::LiteParsedExpandable lp(
+        std::string(MultipleChildrenRequiredPrivilegesAggStageParseNode::kName),
+        std::move(handle),
+        _nss,
+        LiteParserOptions{});
+
+    auto privileges = lp.requiredPrivileges(/*isMongos*/ false, /*bypassDocumentValidation*/ false);
+
+    ASSERT_EQ(privileges.size(), 1);
+
+    const auto& privilege = privileges.front();
+    ASSERT_TRUE(privilege.getResourcePattern().isExactNamespacePattern());
+    ASSERT_EQ(privilege.getResourcePattern().ns(), _nss);
+
+    const auto& actions = privilege.getActions();
+    ASSERT_EQ(actions.getActionsAsStringDatas().size(), 4);
+    ASSERT_TRUE(actions.contains(ActionType::find));
+    ASSERT_TRUE(actions.contains(ActionType::listIndexes));
+    ASSERT_TRUE(actions.contains(ActionType::planCacheRead));
+    ASSERT_TRUE(actions.contains(ActionType::indexStats));
+
+    ASSERT_TRUE(lp.requiresAuthzChecks());
+}
+
+DEATH_TEST_F(DocumentSourceExtensionTest,
+             EmptyActionsArrayRequiredPrivilegesAggStageAstNodeFails,
+             "11350600") {
+    auto astNode = new sdk::ExtensionAggStageAstNode(
+        EmptyActionsArrayRequiredPrivilegesAggStageAstNode::make());
+    auto handle = AggStageAstNodeHandle{astNode};
+
+    host::DocumentSourceExtension::LiteParsedExpanded lp(
+        std::string(EmptyActionsArrayRequiredPrivilegesAggStageAstNode::kName),
+        std::move(handle),
+        _nss);
+
+    [[maybe_unused]] auto privileges =
+        lp.requiredPrivileges(/*isMongos*/ false, /*bypassDocumentValidation*/ false);
+}
+
+TEST_F(DocumentSourceExtensionTest, ShouldPropagateValidGetNextResultsForSourceExtensionStage) {
+    auto astNode =
+        new sdk::ExtensionAggStageAstNode(sdk::shared_test_stages::SourceAggStageAstNode::make());
+    auto astHandle = AggStageAstNodeHandle(astNode);
+
+    auto optimizable =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(astHandle));
+
+    auto extensionStage = exec::agg::buildStage(optimizable);
+
+    // See sdk::shared_test_stages::SourceExecAggStage for the full test document suite.
+    {
+        auto next = extensionStage->getNext();
+        ASSERT_TRUE(next.isAdvanced());
+        ASSERT_DOCUMENT_EQ(next.releaseDocument(),
+                           (Document{BSON("_id" << 1 << "apples" << "red")}));
+    }
+    {
+        auto next = extensionStage->getNext();
+        ASSERT_TRUE(next.isAdvanced());
+        ASSERT_DOCUMENT_EQ(next.releaseDocument(), (Document{BSON("_id" << 2 << "oranges" << 5)}));
+    }
+    {
+        auto next = extensionStage->getNext();
+        ASSERT_TRUE(next.isAdvanced());
+        ASSERT_DOCUMENT_EQ(next.releaseDocument(),
+                           (Document{BSON("_id" << 3 << "bananas" << false)}));
+    }
+    {
+        auto next = extensionStage->getNext();
+        ASSERT_TRUE(next.isAdvanced());
+        ASSERT_DOCUMENT_EQ(
+            next.releaseDocument(),
+            (Document{BSON("_id" << 4 << "tropical fruits"
+                                 << BSON_ARRAY("rambutan" << "durian" << "lychee"))}));
+    }
+    {
+        auto next = extensionStage->getNext();
+        ASSERT_TRUE(next.isAdvanced());
+        ASSERT_DOCUMENT_EQ(next.releaseDocument(),
+                           (Document{BSON("_id" << 5 << "pie" << 3.14159)}));
+    }
 }
 
 }  // namespace mongo::extension

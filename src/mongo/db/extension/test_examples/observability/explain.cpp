@@ -33,10 +33,33 @@
 #include "mongo/db/extension/sdk/extension_factory.h"
 #include "mongo/db/extension/sdk/test_extension_util.h"
 
+#include <memory>
+
 namespace sdk = mongo::extension::sdk;
 using namespace mongo;
 
 static constexpr std::string kExplainStageName = "$explain";
+
+class ExplainExecAggStage : public sdk::ExecAggStage {
+public:
+    ExplainExecAggStage() : sdk::ExecAggStage(kExplainStageName) {}
+
+    mongo::extension::ExtensionGetNextResult getNext(
+        const sdk::QueryExecutionContextHandle& execCtx,
+        const MongoExtensionExecAggStage* execStage) override {
+        return mongo::extension::ExtensionGetNextResult::pauseExecution();
+    }
+
+    void open() override {}
+
+    void reopen() override {}
+
+    void close() override {}
+
+    void attach(::MongoExtensionOpCtx* /*ctx*/) override {}
+
+    void detach() override {}
+};
 
 class ExplainLogicalStage : public sdk::LogicalAggStage {
 public:
@@ -75,6 +98,10 @@ public:
         return builder.obj();
     }
 
+    std::unique_ptr<extension::sdk::ExecAggStage> compile() const override {
+        return std::make_unique<ExplainExecAggStage>();
+    }
+
 private:
     std::string _input;
 };
@@ -99,8 +126,8 @@ public:
         return 1;
     }
 
-    std::vector<sdk::VariantNode> expand() const override {
-        std::vector<sdk::VariantNode> expanded;
+    std::vector<mongo::extension::VariantNodeHandle> expand() const override {
+        std::vector<mongo::extension::VariantNodeHandle> expanded;
         expanded.reserve(getExpandedSize());
         expanded.emplace_back(
             new sdk::ExtensionAggStageAstNode(std::make_unique<ExplainAstNode>(_input)));

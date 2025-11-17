@@ -67,7 +67,7 @@
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/topology/shard_registry.h"
 #include "mongo/otel/telemetry_context_holder.h"
-#include "mongo/otel/telemetry_context_serialization.h"
+#include "mongo/otel/traces/telemetry_context_serialization.h"
 #include "mongo/s/resharding/common_types_gen.h"
 #include "mongo/s/resharding/resharding_feature_flag_gen.h"
 #include "mongo/stdx/unordered_set.h"
@@ -516,6 +516,10 @@ bool isUnshardCollection(const boost::optional<ReshardingProvenanceEnum>& proven
     return provenance && provenance.get() == ReshardingProvenanceEnum::kUnshardCollection;
 }
 
+bool isRewriteCollection(const boost::optional<ReshardingProvenanceEnum>& provenance) {
+    return provenance && provenance.get() == ReshardingProvenanceEnum::kRewriteCollection;
+}
+
 std::shared_ptr<ThreadPool> makeThreadPoolForMarkKilledExecutor(const std::string& poolName) {
     return std::make_shared<ThreadPool>([&] {
         ThreadPool::Options options;
@@ -623,10 +627,10 @@ ReshardingCoordinatorDocument createReshardingCoordinatorDoc(
     }
     coordinatorDoc.setNumSamplesPerChunk(request.getNumSamplesPerChunk());
     coordinatorDoc.setDemoMode(request.getDemoMode());
-    auto& telemetryContextHolder = otel::TelemetryContextHolder::get(opCtx);
-    if (telemetryContextHolder.get()) {
-        auto telemetryCtxBSON =
-            otel::TelemetryContextSerializer::toBSON(telemetryContextHolder.get());
+    auto telemetryContext =
+        otel::TelemetryContextHolder::getDecoration(opCtx).getTelemetryContext();
+    if (telemetryContext) {
+        auto telemetryCtxBSON = otel::traces::TelemetryContextSerializer::toBSON(telemetryContext);
         coordinatorDoc.setTelemetryContext(telemetryCtxBSON);
     }
     return coordinatorDoc;
@@ -720,6 +724,11 @@ Milliseconds getMajorityReplicationLag(OperationContext* opCtx) {
     const auto& replCoord = repl::ReplicationCoordinator::get(opCtx);
     const auto lastAppliedWallTime = replCoord->getMyLastAppliedOpTimeAndWallTime().wallTime;
     const auto lastCommittedWallTime = replCoord->getLastCommittedOpTimeAndWallTime().wallTime;
+    // TODO SERVER-113571 Remove this if block and adjust the replication lag calculation (if
+    // needed).
+    if (lastCommittedWallTime == Date_t()) {
+        return Milliseconds(0);
+    }
 
     if (!lastAppliedWallTime.isFormattable() || !lastCommittedWallTime.isFormattable()) {
         return Milliseconds(0);

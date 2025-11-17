@@ -285,15 +285,6 @@ boost::intrusive_ptr<DocumentSourceGroup> createBucketGroupForReorder(
     return newGroup;
 }
 
-// Optimize the section of the pipeline before the $_internalUnpackBucket stage.
-void optimizePrefix(DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
-    auto prefix = DocumentSourceContainer(container->begin(), itr);
-    pipeline_optimization::optimizeContainer(&prefix);
-    pipeline_optimization::optimizeEachStage(&prefix);
-    container->erase(container->begin(), itr);
-    container->splice(itr, prefix);
-}
-
 boost::intrusive_ptr<Expression> handleDateTruncRewrite(
     boost::intrusive_ptr<ExpressionContext> pExpCtx,
     boost::intrusive_ptr<Expression> expr,
@@ -1642,26 +1633,14 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::optimizeAt
         return itr;
     }
 
-    invariant(*itr == this);
-    DocumentSourceContainer::iterator unpackBucket = itr;
+    tassert(11282989, "Expecting DocumentSource iterator pointing to this stage", *itr == this);
 
-    itr = std::next(itr);
+    _optimizingRestOfPipeline = true;
+    ON_BLOCK_EXIT([this] { _optimizingRestOfPipeline = false; });
 
-    try {
-        while (itr != container->end()) {
-            if (itr == unpackBucket) {
-                itr = std::next(itr);
-                if (itr == container->end())
-                    break;
-            }
-            itr = (*itr).get()->optimizeAt(itr, container);
-        }
-    } catch (DBException& ex) {
-        ex.addContext("Failed to optimize pipeline");
-        throw;
-    }
+    pipeline_optimization::optimizeContainer(*getExpCtx(), container, std::next(itr));
 
-    return itr;
+    return container->end();
 }
 
 DepsTracker DocumentSourceInternalUnpackBucket::getRestPipelineDependencies(
@@ -1722,10 +1701,14 @@ bool DocumentSourceInternalUnpackBucket::tryToAbsorbTopKSortIntoGroup(
         prospectiveSort, /*prospectiveSortItr=*/std::next(itr), container);
 }
 
-DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimizeAt(
+DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::optimizeAt(
     DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
 
-    invariant(*itr == this);
+    tassert(11282988, "Expecting DocumentSource iterator pointing to this stage", *itr == this);
+
+    if (_optimizingRestOfPipeline) {
+        return std::next(itr);
+    }
 
     // See ../query/timeseries/README.md for a description of all the rewrites implemented in this
     // function. The order of optimizations in this function is important, since some optimizations
@@ -1871,7 +1854,7 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
             }
             // We want to optimize the rest of the pipeline to ensure the stages are in their
             // optimal position and expressions have been optimized to allow for certain rewrites.
-            pipeline_optimization::optimizeEndOfPipeline(itr, container);
+            pipeline_optimization::optimizeEndOfPipeline(*getExpCtx(), itr, container);
         }
 
         if (std::next(itr) == container->end()) {
@@ -1953,7 +1936,7 @@ DocumentSourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimize
         auto itrToMatch = std::next(itr);
         while (std::next(itrToMatch) != container->end() &&
                dynamic_cast<DocumentSourceMatch*>(std::next(itrToMatch)->get())) {
-            nextMatch->doOptimizeAt(itrToMatch, container);
+            nextMatch->optimizeAt(itrToMatch, container);
         }
 
         auto predicates = createPredicatesOnBucketLevelField(nextMatch->getMatchExpression());

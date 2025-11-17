@@ -40,22 +40,37 @@ public:
     // does not hold a parse node and therefore has no concept of a query shape. Its shape
     // responsibility comes from the desugar stage it expanded from.
     static boost::intrusive_ptr<DocumentSourceExtensionOptimizable> create(
-        StringData name,
-        const boost::intrusive_ptr<ExpressionContext>& expCtx,
-        AggStageAstNodeHandle astNode) {
+        const boost::intrusive_ptr<ExpressionContext>& expCtx, AggStageAstNodeHandle astNode) {
         return boost::intrusive_ptr<DocumentSourceExtensionOptimizable>(
-            new DocumentSourceExtensionOptimizable(name, expCtx, std::move(astNode)));
+            new DocumentSourceExtensionOptimizable(expCtx, std::move(astNode)));
     }
 
     Value serialize(const SerializationOptions& opts) const override;
 
+    StageConstraints constraints(PipelineSplitState pipeState) const override;
+
+    static const Id& id;
+
+    Id getId() const override;
+
+    const MongoExtensionStaticProperties& getStaticProperties() const {
+        return _properties;
+    }
+
+    // Wrapper around the LogicalAggStageHandle::compile() method. Returns an ExecAggStageHandle.
+    ExecAggStageHandle compile() {
+        return _logicalStage.compile();
+    }
+
 protected:
+    const MongoExtensionStaticProperties _properties;
     const LogicalAggStageHandle _logicalStage;
 
-    DocumentSourceExtensionOptimizable(StringData name,
-                                       const boost::intrusive_ptr<ExpressionContext>& expCtx,
+    DocumentSourceExtensionOptimizable(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                        AggStageAstNodeHandle astNode)
-        : DocumentSourceExtension(name, expCtx), _logicalStage(astNode.bind()) {}
+        : DocumentSourceExtension(astNode.getName(), expCtx),
+          _properties(astNode.getProperties()),
+          _logicalStage(astNode.bind()) {}
 };
 
 }  // namespace mongo::extension::host

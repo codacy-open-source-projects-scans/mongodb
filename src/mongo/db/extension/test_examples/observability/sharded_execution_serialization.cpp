@@ -38,6 +38,28 @@ using namespace mongo;
 
 inline constexpr std::string_view kShardedExecutionSerializationStageName =
     "$shardedExecutionSerialization";
+
+class ShardedExecutionExecAggStage : public sdk::ExecAggStage {
+public:
+    ShardedExecutionExecAggStage() : sdk::ExecAggStage(kShardedExecutionSerializationStageName) {}
+
+    mongo::extension::ExtensionGetNextResult getNext(
+        const sdk::QueryExecutionContextHandle& execCtx,
+        const MongoExtensionExecAggStage* execStage) override {
+        return mongo::extension::ExtensionGetNextResult::pauseExecution();
+    }
+
+    void open() override {}
+
+    void reopen() override {}
+
+    void close() override {}
+
+    void attach(::MongoExtensionOpCtx* /*ctx*/) override {}
+
+    void detach() override {}
+};
+
 class ShardedExecutionSerializationLogicalStage : public sdk::LogicalAggStage {
 public:
     static constexpr StringData kShardedAssertFlagFieldName = "assertFlag";
@@ -50,6 +72,10 @@ public:
 
     BSONObj explain(::MongoExtensionExplainVerbosity verbosity) const override {
         return BSONObj();
+    }
+
+    std::unique_ptr<extension::sdk::ExecAggStage> compile() const override {
+        return std::make_unique<ShardedExecutionExecAggStage>();
     }
 };
 
@@ -72,8 +98,8 @@ public:
         return 1;
     }
 
-    std::vector<sdk::VariantNode> expand() const override {
-        std::vector<sdk::VariantNode> expanded;
+    std::vector<mongo::extension::VariantNodeHandle> expand() const override {
+        std::vector<mongo::extension::VariantNodeHandle> expanded;
         expanded.reserve(getExpandedSize());
         expanded.emplace_back(new sdk::ExtensionAggStageAstNode(
             std::make_unique<ShardedExecutionSerializationAstNode>()));

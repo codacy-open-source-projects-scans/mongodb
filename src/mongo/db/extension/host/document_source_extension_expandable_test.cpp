@@ -31,11 +31,13 @@
 
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/extension/host/document_source_extension_optimizable.h"
-#include "mongo/db/extension/host/test_stage_id_registrar.h"
+#include "mongo/db/extension/host_connector/host_services_adapter.h"
 #include "mongo/db/extension/sdk/aggregation_stage.h"
+#include "mongo/db/extension/sdk/host_services.h"
 #include "mongo/db/extension/sdk/tests/shared_test_stages.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
 #include "mongo/db/pipeline/document_source_match.h"
+#include "mongo/db/pipeline/search/document_source_internal_search_id_lookup.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 
@@ -49,6 +51,12 @@ public:
     explicit DocumentSourceExtensionExpandableTest(NamespaceString nsString)
         : AggregationContextFixture(std::move(nsString)) {};
 
+    void setUp() override {
+        AggregationContextFixture::setUp();
+        extension::sdk::HostServicesHandle::setHostServices(
+            extension::host_connector::HostServicesAdapter::get());
+    }
+
 protected:
     static inline NamespaceString _nss = NamespaceString::createNamespaceString_forTest(
         boost::none, "document_source_extension_expandable_test");
@@ -61,20 +69,11 @@ protected:
         sdk::shared_test_stages::ExpandToExtParseDescriptor::make()};
     sdk::ExtensionAggStageDescriptor _expandToHostParseDescriptor{
         sdk::shared_test_stages::ExpandToHostParseDescriptor::make()};
+    sdk::ExtensionAggStageDescriptor _expandToHostAstDescriptor{
+        sdk::shared_test_stages::ExpandToHostAstDescriptor::make()};
     sdk::ExtensionAggStageDescriptor _expandToMixedDescriptor{
         sdk::shared_test_stages::ExpandToMixedDescriptor::make()};
     sdk::ExtensionAggStageDescriptor _topDescriptor{sdk::shared_test_stages::TopDescriptor::make()};
-
-    TestStageIdRegistrar _id{sdk::shared_test_stages::NoOpAggStageDescriptor::kStageName,
-                             sdk::shared_test_stages::ExpandToExtAstDescriptor::kStageName,
-                             sdk::shared_test_stages::ExpandToExtParseDescriptor::kStageName,
-                             sdk::shared_test_stages::ExpandToHostParseDescriptor::kStageName,
-                             sdk::shared_test_stages::ExpandToMixedDescriptor::kStageName,
-                             sdk::shared_test_stages::TopDescriptor::kStageName,
-                             std::string(sdk::shared_test_stages::kLeafAName),
-                             std::string(sdk::shared_test_stages::kLeafBName),
-                             std::string(sdk::shared_test_stages::kLeafCName),
-                             std::string(sdk::shared_test_stages::kLeafDName)};
 };
 
 TEST_F(DocumentSourceExtensionExpandableTest, ExpandToExtAst) {
@@ -82,10 +81,7 @@ TEST_F(DocumentSourceExtensionExpandableTest, ExpandToExtAst) {
         BSON(sdk::shared_test_stages::NoOpAggStageDescriptor::kStageName << BSON("foo" << true));
 
     auto expandable = host::DocumentSourceExtensionExpandable::create(
-        sdk::shared_test_stages::NoOpAggStageDescriptor::kStageName,
-        getExpCtx(),
-        rawStage,
-        AggStageDescriptorHandle(&_noOpStageDescriptor));
+        getExpCtx(), rawStage, AggStageDescriptorHandle(&_noOpStageDescriptor));
 
     auto expanded = expandable->expand();
 
@@ -100,10 +96,7 @@ TEST_F(DocumentSourceExtensionExpandableTest, ExpandToExtAst) {
 TEST_F(DocumentSourceExtensionExpandableTest, FullParseExpandToHostParse) {
     auto rawStage = BSON(std::string(sdk::shared_test_stages::kExpandToHostParseName) << BSONObj());
     auto expandable = host::DocumentSourceExtensionExpandable::create(
-        std::string(sdk::shared_test_stages::kExpandToHostParseName),
-        getExpCtx(),
-        rawStage,
-        AggStageDescriptorHandle(&_expandToHostParseDescriptor));
+        getExpCtx(), rawStage, AggStageDescriptorHandle(&_expandToHostParseDescriptor));
 
     auto expanded = expandable->expand();
     ASSERT_EQ(expanded.size(), 1UL);
@@ -111,20 +104,29 @@ TEST_F(DocumentSourceExtensionExpandableTest, FullParseExpandToHostParse) {
     ASSERT(match != nullptr);
 }
 
+TEST_F(DocumentSourceExtensionExpandableTest, FullParseExpandToHostAst) {
+    auto rawStage = BSON(std::string(sdk::shared_test_stages::kExpandToHostAstName) << BSONObj());
+    auto expandable = host::DocumentSourceExtensionExpandable::create(
+        getExpCtx(), rawStage, AggStageDescriptorHandle(&_expandToHostAstDescriptor));
+
+    auto expanded = expandable->expand();
+    ASSERT_EQ(expanded.size(), 1UL);
+    auto* idLookup = dynamic_cast<DocumentSourceInternalSearchIdLookUp*>(expanded.front().get());
+    ASSERT(idLookup != nullptr);
+}
+
 TEST_F(DocumentSourceExtensionExpandableTest, FullParseExpandToMixed) {
     auto rawStage = BSON(std::string(sdk::shared_test_stages::kExpandToMixedName) << BSONObj());
     auto expandable = host::DocumentSourceExtensionExpandable::create(
-        std::string(sdk::shared_test_stages::kExpandToMixedName),
-        getExpCtx(),
-        rawStage,
-        AggStageDescriptorHandle(&_expandToMixedDescriptor));
+        getExpCtx(), rawStage, AggStageDescriptorHandle(&_expandToMixedDescriptor));
 
     auto expanded = expandable->expand();
-    ASSERT_EQ(expanded.size(), 3UL);
+    ASSERT_EQ(expanded.size(), 4UL);
 
     const auto it0 = expanded.begin();
     const auto it1 = std::next(expanded.begin(), 1);
     const auto it2 = std::next(expanded.begin(), 2);
+    const auto it3 = std::next(expanded.begin(), 3);
 
     auto* first = dynamic_cast<host::DocumentSourceExtensionOptimizable*>(it0->get());
     ASSERT(first != nullptr);
@@ -137,15 +139,15 @@ TEST_F(DocumentSourceExtensionExpandableTest, FullParseExpandToMixed) {
 
     auto* third = dynamic_cast<DocumentSourceMatch*>(it2->get());
     ASSERT(third != nullptr);
+
+    auto* fourth = dynamic_cast<DocumentSourceInternalSearchIdLookUp*>(it3->get());
+    ASSERT(fourth != nullptr);
 }
 
 TEST_F(DocumentSourceExtensionExpandableTest, FullParseExpandRecursesMultipleLevels) {
     auto rawStage = BSON(std::string(sdk::shared_test_stages::kTopName) << BSONObj());
     auto expandable = host::DocumentSourceExtensionExpandable::create(
-        std::string(sdk::shared_test_stages::kTopName),
-        getExpCtx(),
-        rawStage,
-        AggStageDescriptorHandle(&_topDescriptor));
+        getExpCtx(), rawStage, AggStageDescriptorHandle(&_topDescriptor));
 
     auto expanded = expandable->expand();
     ASSERT_EQ(expanded.size(), 4UL);
@@ -174,6 +176,16 @@ TEST_F(DocumentSourceExtensionExpandableTest, FullParseExpandRecursesMultipleLev
     ASSERT(fourth != nullptr);
     ASSERT_EQ(std::string(fourth->getSourceName()),
               std::string(sdk::shared_test_stages::kLeafDName));
+}
+
+DEATH_TEST_F(DocumentSourceExtensionExpandableTest, SerializeWithWrongOptsFails, "10978000") {
+    auto rawStage =
+        BSON(sdk::shared_test_stages::NoOpAggStageDescriptor::kStageName << BSON("foo" << true));
+
+    auto expandable = host::DocumentSourceExtensionExpandable::create(
+        getExpCtx(), rawStage, AggStageDescriptorHandle(&_noOpStageDescriptor));
+
+    [[maybe_unused]] auto serialized = expandable->serialize(SerializationOptions{});
 }
 
 }  // namespace mongo::extension

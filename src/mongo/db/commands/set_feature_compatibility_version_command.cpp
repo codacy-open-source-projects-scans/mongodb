@@ -282,9 +282,12 @@ void handleDropPendingDBsGarbage(OperationContext* parentOpCtx) {
         };
         request.setReadConcern(repl::ReadConcernArgs::kMajority);
 
+        // TODO(SERVER-113504): Consider using kIdempotent since onRetry allows read only
+        // aggregation processes to be restarted.
         uassertStatusOK(configShard->runAggregation(
             opCtx,
             request,
+            Shard::RetryPolicy::kStrictlyNotIdempotent,
             [&](const std::vector<BSONObj>& batch, const boost::optional<BSONObj>&) {
                 invariant(batch.size() == 1);
                 const auto bsonVersion = batch[0][DatabaseType::kVersionFieldName];
@@ -297,7 +300,8 @@ void handleDropPendingDBsGarbage(OperationContext* parentOpCtx) {
                         bsonTimestamp.type() == BSONType::timestamp);
                 timestamp = bsonTimestamp.timestamp();
                 return true;
-            }));
+            },
+            [&](const Status&) { timestamp.reset(); }));
 
         return timestamp;
     };
@@ -400,10 +404,52 @@ void _resetPlacementHistory(OperationContext* opCtx, const FCV requestedVersion)
     uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(response));
 }
 
+void cloneAuthoritativeDatabaseMetadataOnShards(OperationContext* opCtx) {
+    // No shards should be added until we have forwarded the clone command to all shards. We use the
+    // DDL lock here to serialize with all of add shard and to avoid deadlocks with the DDL blocking
+    // used by add/remove shard.
+    DDLLockManager::ScopedCollectionDDLLock ddlLock(opCtx,
+                                                    NamespaceString::kConfigsvrShardsNamespace,
+                                                    "CloneAuthoritativeDatabaseMetadata",
+                                                    LockMode::MODE_S);
+
+    // We do a direct read of the shards collection with local readConcern so no shards are missed,
+    // but don't go through the ShardRegistry to prevent it from caching data that may be rolled
+    // back.
+    const auto opTimeWithShards =
+        ShardingCatalogManager::get(opCtx)->localCatalogClient()->getAllShards(
+            opCtx, repl::ReadConcernLevel::kLocalReadConcern);
+
+    for (const auto& shardType : opTimeWithShards.value) {
+        const auto shardStatus =
+            Grid::get(opCtx)->shardRegistry()->getShard(opCtx, shardType.getName());
+        if (!shardStatus.isOK()) {
+            continue;
+        }
+        const auto shard = shardStatus.getValue();
+
+        ShardsvrCloneAuthoritativeMetadata request;
+        request.setWriteConcern(defaultMajorityWriteConcernDoNotUse());
+        request.setDbName(DatabaseName::kAdmin);
+
+        auto response = shard->runCommand(opCtx,
+                                          ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                                          DatabaseName::kAdmin,
+                                          request.toBSON(),
+                                          Shard::RetryPolicy::kIdempotent);
+
+        uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(response));
+    }
+}
+
 void dropAuthoritativeDatabaseCollectionOnShards(OperationContext* opCtx) {
-    // No shards should be added until we have forwarded the command to all shards.
-    Lock::SharedLock stableTopologyRegion =
-        ShardingCatalogManager::get(opCtx)->enterStableTopologyRegion(opCtx);
+    // No shards should be added until we have forwarded the command to all shards. We use the DDL
+    // lock here to serialize with all of add shard and to avoid deadlocks with the DDL blocking
+    // used by add/remove shard.
+    DDLLockManager::ScopedCollectionDDLLock ddlLock(opCtx,
+                                                    NamespaceString::kConfigsvrShardsNamespace,
+                                                    "DropAuthoritativeDatabaseMetadata",
+                                                    LockMode::MODE_S);
 
     const auto opTimeWithShards = Grid::get(opCtx)->catalogClient()->getAllShards(
         opCtx, repl::ReadConcernLevel::kSnapshotReadConcern);
@@ -1270,20 +1316,15 @@ private:
     void _prepareToUpgrade(OperationContext* opCtx,
                            const SetFeatureCompatibilityVersion& request,
                            boost::optional<Timestamp> changeTimestamp) {
-        {
-            // Take the global lock in S mode to create a barrier for operations taking the global
-            // IX or X locks. This ensures that either:
-            //   - The global IX/X locked operation will start after the FCV change, see the
-            //     upgrading to the latest FCV and act accordingly.
-            //   - The global IX/X locked operation began prior to the FCV change, is acting on that
-            //     assumption and will finish before upgrade procedures begin right after this.
-            Lock::GlobalLock lk(opCtx, MODE_S);
-        }
-
         const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
         invariant(fcvSnapshot.isUpgradingOrDowngrading());
         const auto originalVersion = getTransitionFCVInfo(fcvSnapshot.getVersion()).from;
         const auto requestedVersion = request.getCommandParameter();
+
+        // This wait serves as a barrier to guarantee that, from now on:
+        // - No operations with an OFCV lower than the upgrading OFCV will be running
+        // - All operations acquiring the global lock in X/IX mode see the 'kUpgrading' FCV state
+        _waitForOperationsRelyingOnStaleFcvToComplete(opCtx, fcvSnapshot.getVersion());
 
         _userCollectionsUassertsForUpgrade(opCtx, requestedVersion, originalVersion);
 
@@ -1303,9 +1344,7 @@ private:
             if (feature_flags::gShardAuthoritativeDbMetadataDDL
                     .isEnabledOnTargetFCVButDisabledOnOriginalFCV(requestedVersion,
                                                                   originalVersion)) {
-                uassertStatusOK(
-                    ShardingCatalogManager::get(opCtx)->runCloneAuthoritativeMetadataOnShards(
-                        opCtx));
+                cloneAuthoritativeDatabaseMetadataOnShards(opCtx);
             }
         }
 
@@ -1354,7 +1393,7 @@ private:
                         opCtx,
                         CollectionAcquisitionRequest(
                             NamespaceString::kServerConfigurationNamespace,
-                            PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                            PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                             repl::ReadConcernArgs::get(opCtx),
                             AcquisitionPrerequisites::kRead),
                         LockMode::MODE_IS);
@@ -1386,6 +1425,26 @@ private:
         if (role && role->has(ClusterRole::ShardServer)) {
             // Shard server role actions.
         }
+    }
+
+    /**
+     * This function:
+     * - Waits for operations using a stale OFCV to complete
+     * - Acquires the global lock in shared mode to make sure that:
+     * --- All operations that may potentially have started on an old FCV complete
+     * --- All new operations are guaranteed to see at least the current FCV state
+     */
+    void _waitForOperationsRelyingOnStaleFcvToComplete(OperationContext* opCtx, FCV version) {
+        waitForOperationsNotMatchingVersionContextToComplete(opCtx, VersionContext(version));
+
+        // Take the global lock in S mode to create a barrier for operations taking the global
+        // IX or X locks. This ensures that either:
+        //   - The global IX/X locked operation will start after the FCV change, see the
+        //     updated server FCV value and act accordingly.
+        //   - The global IX/X locked operation began prior to the FCV change, is acting on that
+        //     assumption and will finish before upgrade/downgrade metadata cleanup procedures done
+        //     right after this barrier.
+        Lock::GlobalLock lk(opCtx, MODE_S);
     }
 
     // Tell the shards to enter phase-1 or phase-2 of setFCV.
@@ -1541,7 +1600,7 @@ private:
                 opCtx,
                 CollectionAcquisitionRequest{
                     NamespaceString::kAdminUsersNamespace,
-                    PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                    PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                     repl::ReadConcernArgs::get(opCtx),
                     AcquisitionPrerequisites::kRead});
             hasUserDocs = Helpers::findOne(opCtx, userColl, BSONObj(), userDoc);
@@ -1552,7 +1611,7 @@ private:
                 opCtx,
                 CollectionAcquisitionRequest{
                     NamespaceString::kAdminRolesNamespace,
-                    PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                    PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
                     repl::ReadConcernArgs::get(opCtx),
                     AcquisitionPrerequisites::kRead});
             hasRoleDocs = Helpers::findOne(opCtx, rolesColl, BSONObj(), roleDoc);
@@ -1688,15 +1747,13 @@ private:
         // this function.
         _prepareToDowngradeActions(opCtx, requestedVersion);
 
-        {
-            // Take the global lock in S mode to create a barrier for operations taking the global
-            // IX or X locks. This ensures that either:
-            //   - The global IX/X locked operation will start after the FCV change, see the
-            //     upgrading to the latest FCV and act accordingly.
-            //   - The global IX/X locked operation began prior to the FCV change, is acting on that
-            //     assumption and will finish before upgrade procedures begin right after this.
-            Lock::GlobalLock lk(opCtx, MODE_S);
-        }
+        const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+        invariant(fcvSnapshot.isUpgradingOrDowngrading());
+
+        // This wait serves as a barrier to gurantee that, from now on:
+        // - No operations with an OFCV greater than the downgrading OFCV will be running
+        // - All operations acquiring the global lock in X/IX mode see the 'kDowngrading' FCV state
+        _waitForOperationsRelyingOnStaleFcvToComplete(opCtx, fcvSnapshot.getVersion());
 
         uassert(ErrorCodes::Error(549181),
                 "Failing downgrade due to 'failDowngrading' failpoint set",
@@ -1715,10 +1772,7 @@ private:
         // this helper function can only have the CannotDowngrade error code indicating that the
         // user must manually clean up some user data in order to retry the FCV downgrade.
 
-        const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
-        invariant(fcvSnapshot.isUpgradingOrDowngrading());
         const auto originalVersion = getTransitionFCVInfo(fcvSnapshot.getVersion()).from;
-
         _userCollectionsUassertsForDowngrade(opCtx, requestedVersion, originalVersion);
     }
 
@@ -1948,6 +2002,11 @@ private:
                     });
         }
 
+        // This wait serves as a barrier to gurantee that, from now on:
+        // - No operations with OFCV lower than the target version will be running
+        // - All operations acquiring the global lock in X/IX mode see the fully upgraded FCV state
+        _waitForOperationsRelyingOnStaleFcvToComplete(opCtx, requestedVersion);
+
         // TODO (SERVER-100309): Remove once 9.0 becomes last lts.
         if (isConfigsvr &&
             feature_flags::gSessionsCollectionCoordinatorOnConfigServer.isEnabledOnVersion(
@@ -2022,6 +2081,12 @@ private:
                         return ofcv != expectedOfcv;
                     });
         }
+
+        // This wait serves as a barrier to guarantee that, from now on:
+        // - No operations with OFCV higher than the target version will be running
+        // - All operations acquiring the global lock in X/IX mode see the fully downgraded FCV
+        // state
+        _waitForOperationsRelyingOnStaleFcvToComplete(opCtx, requestedVersion);
 
         // TODO (SERVER-98118): remove once 9.0 becomes last LTS.
         if (isConfigsvr &&

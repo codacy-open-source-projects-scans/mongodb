@@ -29,7 +29,6 @@
 
 #include "mongo/db/extension/host/document_source_extension_optimizable.h"
 
-#include "mongo/db/extension/host/test_stage_id_registrar.h"
 #include "mongo/db/extension/sdk/aggregation_stage.h"
 #include "mongo/db/extension/sdk/tests/shared_test_stages.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
@@ -50,8 +49,6 @@ protected:
 
     sdk::ExtensionAggStageDescriptor _noOpAggregationStageDescriptor{
         sdk::shared_test_stages::NoOpAggStageDescriptor::make()};
-
-    TestStageIdRegistrar _ids{sdk::shared_test_stages::NoOpAggStageDescriptor::kStageName};
 };
 
 TEST_F(DocumentSourceExtensionOptimizableTest, noOpConstructionSucceeds) {
@@ -59,10 +56,8 @@ TEST_F(DocumentSourceExtensionOptimizableTest, noOpConstructionSucceeds) {
         new sdk::ExtensionAggStageAstNode(sdk::shared_test_stages::NoOpAggStageAstNode::make());
     auto astHandle = AggStageAstNodeHandle(astNode);
 
-    auto optimizable = host::DocumentSourceExtensionOptimizable::create(
-        sdk::shared_test_stages::NoOpAggStageDescriptor::kStageName,
-        getExpCtx(),
-        std::move(astHandle));
+    auto optimizable =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(astHandle));
 
     ASSERT_EQ(std::string(optimizable->getSourceName()),
               sdk::shared_test_stages::NoOpAggStageDescriptor::kStageName);
@@ -73,13 +68,11 @@ TEST_F(DocumentSourceExtensionOptimizableTest, stageCanSerializeForQueryExecutio
         new sdk::ExtensionAggStageAstNode(sdk::shared_test_stages::NoOpAggStageAstNode::make());
     auto astHandle = AggStageAstNodeHandle(astNode);
 
-    auto optimizable = host::DocumentSourceExtensionOptimizable::create(
-        sdk::shared_test_stages::NoOpAggStageDescriptor::kStageName,
-        getExpCtx(),
-        std::move(astHandle));
+    auto optimizable =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(astHandle));
 
-    // Test that an extension can provide its own implementation of serialize, that might change the
-    // raw spec provided.
+    // Test that an extension can provide its own implementation of serialize, that might change
+    // the raw spec provided.
     ASSERT_BSONOBJ_EQ(optimizable->serialize(SerializationOptions()).getDocument().toBson(),
                       BSON(sdk::shared_test_stages::NoOpAggStageDescriptor::kStageName
                            << "serializedForExecution"));
@@ -90,13 +83,53 @@ DEATH_TEST_F(DocumentSourceExtensionOptimizableTest, serializeWithWrongOptsFails
         new sdk::ExtensionAggStageAstNode(sdk::shared_test_stages::NoOpAggStageAstNode::make());
     auto astHandle = AggStageAstNodeHandle(astNode);
 
-    auto optimizable = host::DocumentSourceExtensionOptimizable::create(
-        sdk::shared_test_stages::NoOpAggStageDescriptor::kStageName,
-        getExpCtx(),
-        std::move(astHandle));
+    auto optimizable =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(astHandle));
 
     [[maybe_unused]] auto serialized =
         optimizable->serialize(SerializationOptions::kDebugQueryShapeSerializeOptions);
 }
 
+TEST_F(DocumentSourceExtensionOptimizableTest, stageWithDefaultStaticProperties) {
+    // These should also be the default static properties for Transform stages.
+    auto astNode =
+        new sdk::ExtensionAggStageAstNode(sdk::shared_test_stages::NoOpAggStageAstNode::make());
+    auto astHandle = AggStageAstNodeHandle(astNode);
+
+    auto optimizable =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(astHandle));
+
+    const auto& staticProperties = optimizable->getStaticProperties();
+    ASSERT_TRUE(staticProperties.getRequiresInputDocSource());
+    ASSERT_EQ(staticProperties.getPosition(), MongoExtensionPositionRequirementEnum::kNone);
+    ASSERT_EQ(staticProperties.getHostType(), MongoExtensionHostTypeRequirementEnum::kNone);
+
+    auto constraints = optimizable->constraints(PipelineSplitState::kUnsplit);
+
+    ASSERT_EQ(constraints.requiredPosition, StageConstraints::PositionRequirement::kNone);
+    ASSERT_EQ(constraints.hostRequirement, StageConstraints::HostTypeRequirement::kNone);
+    ASSERT_TRUE(constraints.requiresInputDocSource);
+    ASSERT_TRUE(constraints.consumesLogicalCollectionData);
+}
+
+TEST_F(DocumentSourceExtensionOptimizableTest, searchLikeStageWithSourceStageStaticProperties) {
+    auto astNode = new sdk::ExtensionAggStageAstNode(
+        sdk::shared_test_stages::SearchLikeSourceAggStageAstNode::make());
+    auto astHandle = AggStageAstNodeHandle(astNode);
+
+    auto optimizable =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(astHandle));
+
+    const auto& staticProperties = optimizable->getStaticProperties();
+    ASSERT_FALSE(staticProperties.getRequiresInputDocSource());
+    ASSERT_EQ(staticProperties.getPosition(), MongoExtensionPositionRequirementEnum::kFirst);
+    ASSERT_EQ(staticProperties.getHostType(), MongoExtensionHostTypeRequirementEnum::kAnyShard);
+
+    auto constraints = optimizable->constraints(PipelineSplitState::kUnsplit);
+
+    ASSERT_EQ(constraints.requiredPosition, StageConstraints::PositionRequirement::kFirst);
+    ASSERT_EQ(constraints.hostRequirement, StageConstraints::HostTypeRequirement::kAnyShard);
+    ASSERT_FALSE(constraints.requiresInputDocSource);
+    ASSERT_FALSE(constraints.consumesLogicalCollectionData);
+}
 }  // namespace mongo::extension

@@ -39,6 +39,7 @@
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
+#include "mongo/db/raw_data_operation.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/views/resolved_view.h"
 #include "mongo/logv2/log.h"
@@ -291,7 +292,7 @@ void GraphLookUpStage::performSearch() {
         // sharded, throw a custom exception.
         if (auto staleInfo = ex.extraInfo<StaleConfigInfo>(); staleInfo &&
             staleInfo->getVersionWanted() &&
-            staleInfo->getVersionWanted() != ShardVersion::UNSHARDED()) {
+            staleInfo->getVersionWanted() != ShardVersion::UNTRACKED()) {
             uassert(3904801,
                     "Cannot run $graphLookup with a sharded foreign collection in a transaction",
                     foreignShardedGraphLookupAllowed());
@@ -319,14 +320,14 @@ void GraphLookUpStage::spillDuringVisitedUnwinding() {
 
 void GraphLookUpStage::doBreadthFirstSearch() {
     while (!_queue.empty()) {
-        std::unique_ptr<MongoProcessInterface::ScopedExpectUnshardedCollection>
-            expectUnshardedCollectionInScope;
+        std::unique_ptr<MongoProcessInterface::ScopedExpectUntrackedCollection>
+            expectUntrackedCollectionInScope;
 
         const auto allowForeignSharded = foreignShardedGraphLookupAllowed();
         if (!allowForeignSharded && !_fromExpCtx->getInRouter()) {
             // Enforce that the foreign collection must be unsharded for $graphLookup.
-            expectUnshardedCollectionInScope =
-                _fromExpCtx->getMongoProcessInterface()->expectUnshardedCollectionInScope(
+            expectUntrackedCollectionInScope =
+                _fromExpCtx->getMongoProcessInterface()->expectUntrackedCollectionInScope(
                     _fromExpCtx->getOperationContext(),
                     _fromExpCtx->getNamespaceString(),
                     boost::none);
@@ -563,9 +564,13 @@ std::unique_ptr<mongo::Pipeline> GraphLookUpStage::makePipeline(BSONObj match,
         pipeline_factory::MakePipelineOptions opts;
         opts.optimize = false;
         opts.attachCursorSource = false;
+        const std::vector<BSONObj>& resolvedPipe =
+            (e->timeseries() && isRawDataOperation(pExpCtx->getOperationContext()))
+            ? std::vector<BSONObj>{}
+            : e->getPipeline();
         pipeline = pipeline_factory::makePipelineFromViewDefinition(
             _fromExpCtx,
-            ResolvedNamespace{e->getNamespace(), e->getPipeline()},
+            ResolvedNamespace{e->getNamespace(), resolvedPipe},
             _fromPipeline,
             opts,
             _params.from);
@@ -576,7 +581,7 @@ std::unique_ptr<mongo::Pipeline> GraphLookUpStage::makePipeline(BSONObj match,
 
         // Update the expression context with any new namespaces the resolved pipeline has
         // introduced.
-        LiteParsedPipeline liteParsedPipeline(e->getNamespace(), e->getPipeline());
+        LiteParsedPipeline liteParsedPipeline(e->getNamespace(), resolvedPipe);
         _fromExpCtx = makeCopyFromExpressionContext(_fromExpCtx, e->getNamespace());
         _fromExpCtx->addResolvedNamespaces(liteParsedPipeline.getInvolvedNamespaces());
 

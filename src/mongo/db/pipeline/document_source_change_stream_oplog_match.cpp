@@ -178,7 +178,7 @@ StageConstraints DocumentSourceChangeStreamOplogMatch::constraints(
     return constraints;
 }
 
-DocumentSourceContainer::iterator DocumentSourceChangeStreamOplogMatch::doOptimizeAt(
+DocumentSourceContainer::iterator DocumentSourceChangeStreamOplogMatch::optimizeAt(
     DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
     tassert(5687203, "Iterator mismatch during optimization", *itr == this);
 
@@ -205,7 +205,7 @@ DocumentSourceContainer::iterator DocumentSourceChangeStreamOplogMatch::doOptimi
         return itr;
     }
 
-    itr = pipeline_optimization::optimizeEndOfPipeline(std::prev(itr), container);
+    itr = pipeline_optimization::optimizeEndOfPipeline(*getExpCtx(), std::prev(itr), container);
     _optimizedEndOfPipeline = true;
 
     if (itr == container->end()) {

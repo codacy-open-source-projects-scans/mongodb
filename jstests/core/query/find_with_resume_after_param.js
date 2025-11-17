@@ -15,6 +15,8 @@
  *   # Transactions do not support writes on capped collections
  *   does_not_support_transactions,
  *   requires_capped,
+ *   # TODO(SERVER-113809): Check query error on replicaset running as --shardsvr
+ *   transitioning_replicaset_incompatible,
  * ]
  */
 

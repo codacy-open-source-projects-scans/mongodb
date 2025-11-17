@@ -66,6 +66,7 @@
 #include "mongo/db/pipeline/aggregation_hint_translation.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/pipeline/change_stream_invalidation_info.h"
+#include "mongo/db/pipeline/desugarer.h"
 #include "mongo/db/pipeline/document_source_exchange.h"
 #include "mongo/db/pipeline/document_source_geo_near.h"
 #include "mongo/db/pipeline/expression_context.h"
@@ -665,26 +666,35 @@ std::vector<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> prepareExecuto
                                                       pipeline.get(),
                                                       catalogResourceHandle);
 
-        std::vector<std::unique_ptr<Pipeline>> pipelines;
-        // Any pipeline that relies on calls to mongot requires additional setup.
-        if (search_helpers::isMongotPipeline(pipeline.get())) {
-            // Release locks early, before we generate the search pipeline, so that we don't hold
-            // them during network calls to mongot. This is fine for search pipelines since they are
-            // not reading any local (lock-protected) data in the main pipeline.
-            // Stash the ShardRole TransactionResources on the 'sharedStasher' we shared with the
-            // pipeline stages.
-            aggCatalogState.stashResources(sharedStasher.get());
-
-            pipelines.push_back(std::move(pipeline));
-
+        // We split up mongot setup as bindCatalogInfo() should be called on
+        // a desugared search pipeline and requires catalog locks.
+        bool isMongotPipeline = search_helpers::isMongotPipeline(pipeline.get());
+        DocsNeededBounds mongotBounds;
+        if (isMongotPipeline) {
             // TODO SERVER-89546 extractDocsNeededBounds should be called internally within
             // DocumentSourceSearch optimization; that also means we'd be skipping that step when
             // optimization is off.
-            auto bounds = extractDocsNeededBounds(*pipelines.back().get());
+            mongotBounds = extractDocsNeededBounds(*pipeline.get());
+            search_helpers::desugarSearchPipeline(pipeline.get());
+        }
+
+        pipeline->bindCatalogInfo(aggCatalogState.getCollections(), sharedStasher);
+
+        std::vector<std::unique_ptr<Pipeline>> pipelines;
+
+        // Any pipeline that relies on calls to mongot requires additional setup.
+        if (isMongotPipeline) {
+            pipelines.push_back(std::move(pipeline));
+            // Release locks early, before we make network calls to mongot. This is fine for search
+            // setup since they are not reading any local (lock-protected) data in the main
+            // pipeline. Stash the ShardRole TransactionResources on the 'sharedStasher' we shared
+            // with the pipeline stages.
+            aggCatalogState.stashResources(sharedStasher.get());
+
             auto metadataPipe = search_helpers::prepareSearchForTopLevelPipelineLegacyExecutor(
                 pipelines.back()->getContext(),
                 pipelines.back().get(),
-                bounds,
+                mongotBounds,
                 aggExState.getRequest().getCursor().getBatchSize());
             if (metadataPipe) {
                 pipelines.push_back(std::move(metadataPipe));
@@ -1039,6 +1049,10 @@ std::unique_ptr<Pipeline> parsePipelineAndRegisterQueryStats(
 
     // Report usage statistics for each stage in the pipeline.
     aggExState.tickGlobalStageCounters();
+
+    // Find stages with stage expanders and desugar. We desugar after registering query stats to
+    // ensure that the query shape is representative of the user's original query.
+    Desugarer(pipeline.get())();
 
     return pipeline;
 }

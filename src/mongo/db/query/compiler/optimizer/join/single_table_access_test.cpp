@@ -35,60 +35,11 @@
 #include "mongo/db/query/compiler/optimizer/join/unit_test_helpers.h"
 #include "mongo/unittest/unittest.h"
 
-namespace mongo::optimizer {
+namespace mongo::join_ordering {
 
 using namespace mongo::cost_based_ranker;
 
-class SingleTableAccessTestFixture : public CatalogTestFixture {
-public:
-    std::unique_ptr<ce::SamplingEstimator> samplingEstimator(const MultipleCollectionAccessor& mca,
-                                                             NamespaceString nss) {
-        auto collPtr = mca.lookupCollection(nss);
-        auto size = collPtr->getRecordStore()->numRecords();
-        // Sample 10% of the collection
-        auto sampleSize = static_cast<long>(size * 0.1);
-        auto samplingEstimator = std::make_unique<ce::SamplingEstimatorImpl>(
-            operationContext(),
-            mca,
-            PlanYieldPolicy::YieldPolicy::YIELD_MANUAL,
-            sampleSize,
-            ce::SamplingEstimatorImpl::SamplingStyle::kRandom,
-            boost::none,
-            CardinalityEstimate{CardinalityType{static_cast<double>(size)},
-                                EstimationSource::Code});
-        samplingEstimator->generateSample(ce::NoProjection{});
-        return samplingEstimator;
-    }
-
-    std::unique_ptr<CanonicalQuery> makeCanonicalQuery(NamespaceString nss, BSONObj filter) {
-        auto expCtx = ExpressionContextBuilder{}.opCtx(operationContext()).build();
-
-        auto swFindCmd = ParsedFindCommand::withExistingFilter(
-            expCtx,
-            nullptr,
-            std::move(MatchExpressionParser::parse(filter, expCtx).getValue()),
-            std::make_unique<FindCommandRequest>(nss),
-            ProjectionPolicies::aggregateProjectionPolicies());
-
-        auto swCq = CanonicalQuery::make(CanonicalQueryParams{
-            .expCtx = expCtx,
-            .parsedFind = std::move(swFindCmd.getValue()),
-        });
-        ASSERT_OK(swCq);
-        return std::move(swCq.getValue());
-    }
-
-    void createIndex(UUID collUUID, BSONObj spec, std::string name) {
-        auto indexBuildsCoord = IndexBuildsCoordinator::get(operationContext());
-        auto indexConstraints = IndexBuildsManager::IndexConstraints::kRelax;
-        ASSERT_DOES_NOT_THROW(indexBuildsCoord->createIndex(
-            operationContext(),
-            collUUID,
-            BSON("v" << int(IndexConfig::kLatestIndexVersion) << "key" << spec << "name" << name),
-            indexConstraints,
-            false));
-    }
-};
+using SingleTableAccessTestFixture = JoinOrderingTestFixture;
 
 void assertQuerySolutionHasEstimate(const QuerySolutionNode* qsn, const EstimateMap& estimates) {
     auto it = estimates.find(qsn);
@@ -114,7 +65,7 @@ TEST_F(SingleTableAccessTestFixture, EstimatesPopulated) {
     ce::createCollAndInsertDocuments(opCtx, nss2, docs);
 
     {
-        auto mca = join_ordering::multipleCollectionAccessor(opCtx, {nss1, nss2});
+        auto mca = multipleCollectionAccessor(opCtx, {nss1, nss2});
         auto nss1UUID = mca.lookupCollection(nss1)->uuid();
         auto nss2UUID = mca.lookupCollection(nss2)->uuid();
 
@@ -125,7 +76,7 @@ TEST_F(SingleTableAccessTestFixture, EstimatesPopulated) {
     }
 
     // Get new MultiCollectionAccessor after all DDLs are done.
-    auto mca = join_ordering::multipleCollectionAccessor(opCtx, {nss1, nss2});
+    auto mca = multipleCollectionAccessor(opCtx, {nss1, nss2});
 
     SamplingEstimatorMap estimators;
     estimators[nss1] = samplingEstimator(mca, nss1);
@@ -135,7 +86,7 @@ TEST_F(SingleTableAccessTestFixture, EstimatesPopulated) {
     auto filter2 = fromjson("{a: 1, b: 1}");
 
     // Mock a JoinGraph for testing purposes.
-    join_ordering::JoinGraph graph;
+    JoinGraph graph;
     graph.addNode(nss1, makeCanonicalQuery(nss1, filter1), boost::none);
     graph.addNode(nss2, makeCanonicalQuery(nss2, filter2), boost::none);
     auto swRes = singleTableAccessPlans(opCtx, mca, graph, estimators);
@@ -149,4 +100,4 @@ TEST_F(SingleTableAccessTestFixture, EstimatesPopulated) {
     }
 }
 
-}  // namespace mongo::optimizer
+}  // namespace mongo::join_ordering

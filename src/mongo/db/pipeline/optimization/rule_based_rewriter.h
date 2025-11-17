@@ -48,7 +48,7 @@ namespace mongo::rule_based_rewrites::pipeline {
  *                {"SOME_OTHER_RULE", precondition, transform, 1.0});
  */
 #define REGISTER_RULES(DS, ...)                                                                  \
-    const ServiceContext::ConstructorActionRegisterer documentSourcePrereqsRegisterer_##DS{      \
+    const ServiceContext::ConstructorActionRegisterer documentSourcePrereqsRegisterer_##DS {     \
         "PipelineOptimizationContext" #DS, [](ServiceContext* service) {                         \
             registration_detail::enforceUniqueRuleNames(service, {__VA_ARGS__});                 \
             auto& registry = getDocumentSourceVisitorRegistry(service);                          \
@@ -57,7 +57,27 @@ namespace mongo::rule_based_rewrites::pipeline {
                     static_cast<registration_detail::RuleRegisteringVisitorCtx*>(ctx)->addRules( \
                         {__VA_ARGS__});                                                          \
                 });                                                                              \
-        }};
+        }                                                                                        \
+    }
+
+/**
+ * Helper for defining a rule that calls optimizeAt() for a given document source.
+ */
+#define OPTIMIZE_AT_RULE(DS)                              \
+    {                                                     \
+        .name = "OPTIMIZE_AT_" #DS,                       \
+        .precondition = alwaysTrue,                       \
+        .transform = Transforms::optimizeAtWrapper<DS>,   \
+        .priority = kDefaultOptimizeAtPriority,           \
+        .tags = PipelineRewriteContext::Tags::Reordering, \
+    }
+
+// For high priority rules that e.g. attempt to push a $match as early as possible.
+constexpr double kDefaultPushdownPriority = 100.0;
+// For rules that e.g. attempt to swap with or absorb an adjacent stage.
+constexpr double kDefaultOptimizeAtPriority = 10.0;
+// For rules that optimize a stage in place.
+constexpr double kDefaultOptimizeInPlacePriority = 1.0;
 
 /**
  * Provides methods for walking and modifying a pipeline. Treats the pipeline as a linked list. Uses
@@ -65,13 +85,31 @@ namespace mongo::rule_based_rewrites::pipeline {
  */
 class PipelineRewriteContext : public RewriteContext<PipelineRewriteContext, DocumentSource> {
 public:
+    enum Tags : TagSet {
+        None = 0,
+        // Rules that optimize the internals of a stage in place but never touch adjacent stages.
+        InPlace = 1 << 0,
+        // Rules that may e.g. reorder, combine or remove stages.
+        Reordering = 1 << 1,
+    };
+
     PipelineRewriteContext(Pipeline& pipeline)
-        : _container(pipeline.getSources()),
-          _itr(_container.begin()),
-          _oldItr(_itr),
-          _oldDocSource(_itr->get()),
-          _registry(getDocumentSourceVisitorRegistry(
-              pipeline.getContext()->getOperationContext()->getServiceContext())) {}
+        : PipelineRewriteContext(*pipeline.getContext(), pipeline.getSources()) {}
+
+    PipelineRewriteContext(const ExpressionContext& expCtx,
+                           DocumentSourceContainer& container,
+                           boost::optional<DocumentSourceContainer::iterator> startingPos = {})
+        : PipelineRewriteContext(
+              getDocumentSourceVisitorRegistry(expCtx.getOperationContext()->getServiceContext()),
+              container,
+              startingPos) {}
+
+    PipelineRewriteContext(const DocumentSourceVisitorRegistry& registry,
+                           DocumentSourceContainer& container,
+                           boost::optional<DocumentSourceContainer::iterator> startingPos = {})
+        : _container(container),
+          _itr(startingPos.value_or(_container.begin())),
+          _registry(registry) {}
 
     bool hasMore() const final {
         return _itr != _container.end();
@@ -86,14 +124,6 @@ public:
 
     void advance() final;
     void enqueueRules() final;
-
-    /**
-     * Returns true if the current stage has changed position or been replaced by another stage.
-     * Used to decide if previously applied rules could be reapplied.
-     */
-    bool didChangePosition() const {
-        return !hasMore() || _itr != _oldItr || _oldDocSource != _itr->get();
-    }
 
     template <size_t N>
     bool hasAtLeastNPrevStages() const {
@@ -133,12 +163,10 @@ public:
 private:
     DocumentSourceContainer& _container;
     DocumentSourceContainer::iterator _itr;
-    DocumentSourceContainer::iterator _oldItr;
-    DocumentSource* _oldDocSource;
 
     const DocumentSourceVisitorRegistry& _registry;
 
-    friend struct CommonTransforms;
+    friend struct Transforms;
 };
 
 using PipelineRewriteRule = Rule<PipelineRewriteContext>;
@@ -148,13 +176,21 @@ using PipelineRewriteEngine = RewriteEngine<PipelineRewriteContext>;
  * Provides a set of common transformations that can be used either directly as transforms or inside
  * transforms to manipulate the pipeline.
  */
-struct CommonTransforms {
+struct Transforms {
     static bool swapStageWithPrev(PipelineRewriteContext& ctx);
     static bool swapStageWithNext(PipelineRewriteContext& ctx);
     static bool insertBefore(PipelineRewriteContext& ctx, DocumentSource& d);
     static bool insertAfter(PipelineRewriteContext& ctx, DocumentSource& d);
-    static bool erase(PipelineRewriteContext& ctx);
+    static bool eraseCurrent(PipelineRewriteContext& ctx);
     static bool eraseNext(PipelineRewriteContext& ctx);
+
+    /**
+     * Pushes 'pushdownPart' before the previous stage. Assumes that 'ctx.current()' is the match
+     * we're pushing down.
+     */
+    static bool partialPushdown(PipelineRewriteContext& ctx,
+                                boost::intrusive_ptr<DocumentSource> pushdownPart,
+                                boost::intrusive_ptr<DocumentSource> remainingPart);
     /**
      * Convenience for "sentinel" rules that detect conditions and queue other rules, but may not
      * result in other transformations.
@@ -162,20 +198,42 @@ struct CommonTransforms {
     static inline bool noop(PipelineRewriteContext&) {
         return false;
     }
+
+    template <typename DS>
+    static bool optimizeAtWrapper(PipelineRewriteContext& ctx) {
+        const auto getAdjacentStages = [&](DocumentSourceContainer::iterator itr) {
+            auto prev = itr == ctx._container.begin() ? nullptr : *std::prev(itr);
+            auto curr = itr == ctx._container.end() ? nullptr : *itr;
+            auto next = !curr || std::next(itr) == ctx._container.end() ? nullptr : *std::next(itr);
+            return std::make_tuple(std::move(prev), std::move(curr), std::move(next));
+        };
+
+        auto stagesBefore = getAdjacentStages(ctx._itr);
+        auto resultItr = ctx.currentAs<DS>().optimizeAt(ctx._itr, &ctx._container);
+        // If nothing changed, resultItr points to the next position.
+        auto stagesAfter = getAdjacentStages(
+            resultItr == ctx._container.begin() ? resultItr : std::prev(resultItr));
+
+        // Try to detect if optimizeAt() did anything. Normally, std::next() indicates that no
+        // optimizations were performed. However, it's also possible that the current (or some
+        // other) stage was completely erased, which means comparisons involving the erased
+        // iterators would be undefined behavior.
+        if (stagesBefore == stagesAfter &&
+            (resultItr == ctx._container.end() || resultItr == std::next(ctx._itr))) {
+            // We know that optimizeAt() didn't do anything. Current position may still have been
+            // erased (and re-inserted) by optimizeAt(), so we need to re-set it just in case.
+            ctx._itr = std::prev(resultItr);
+            return false;
+        }
+
+        ctx._itr = resultItr;
+        return true;
+    }
 };
 
 inline bool alwaysTrue(PipelineRewriteContext&) {
     return true;
 }
-
-// TODO(SERVER-110107): Remove maybe_unused once these have real usages.
-[[maybe_unused]] static auto swapStageWithPrev = CommonTransforms::swapStageWithPrev;
-[[maybe_unused]] static auto swapStageWithNext = CommonTransforms::swapStageWithNext;
-[[maybe_unused]] static auto insertBefore = CommonTransforms::insertBefore;
-[[maybe_unused]] static auto insertAfter = CommonTransforms::insertAfter;
-[[maybe_unused]] static auto erase = CommonTransforms::erase;
-[[maybe_unused]] static auto eraseNext = CommonTransforms::eraseNext;
-[[maybe_unused]] static auto noop = CommonTransforms::noop;
 
 namespace registration_detail {
 /**

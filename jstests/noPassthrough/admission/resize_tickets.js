@@ -1,13 +1,13 @@
 /**
- * Tests that the 'storageEngineConcurrencyAdjustmentAlgorithm' can be changed at runtime, and that
- * the server's behavior regarding ticket resizing adjusts accordingly.
+ * Tests that the 'executionControlConcurrencyAdjustmentAlgorithm' can be changed at runtime, and
+ * that the server's behavior regarding ticket resizing adjusts accordingly.
  *
  * @tags: [
  *   requires_replication,  # Tickets can only be resized when using the WiredTiger engine.
- *   featureFlagMultipleTicketPoolsExecutionControl,
  *   requires_wiredtiger,
- *   # The test deploys replica sets with a storage engine concurrency adjustment configured by each
- *   # test case, which should not be overwritten and expect to have 'throughputProbing' as default.
+ *   # The test deploys replica sets with a execution control concurrency adjustment configured by
+ *   # each test case, which should not be overwritten and expect to have 'throughputProbing' as
+ *   # default.
  *   incompatible_with_execution_control_with_prioritization,
  * ]
  */
@@ -15,7 +15,7 @@
 import {afterEach, beforeEach, describe, it} from "jstests/libs/mochalite.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 
-describe("Storage engine concurrency adjustment algorithm", function () {
+describe("Execution control concurrency adjustment algorithm", function () {
     const kFixed = "fixedConcurrentTransactions";
     const kFixedWithPrio = "fixedConcurrentTransactionsWithPrioritization";
     const kThroughputProbing = "throughputProbing";
@@ -29,7 +29,7 @@ describe("Storage engine concurrency adjustment algorithm", function () {
      */
     function setAlgorithm(mongod, algorithm) {
         assert.commandWorked(
-            mongod.adminCommand({setParameter: 1, storageEngineConcurrencyAdjustmentAlgorithm: algorithm}),
+            mongod.adminCommand({setParameter: 1, executionControlConcurrencyAdjustmentAlgorithm: algorithm}),
         );
     }
 
@@ -57,10 +57,10 @@ describe("Storage engine concurrency adjustment algorithm", function () {
         const expectPrioritizationWarnings = options.expectPrioritizationWarnings || false;
 
         const ticketParams = {
-            storageEngineConcurrentReadTransactions: 25,
-            storageEngineConcurrentWriteTransactions: 25,
-            storageEngineConcurrentReadLowPriorityTransactions: 25,
-            storageEngineConcurrentWriteLowPriorityTransactions: 25,
+            executionControlConcurrentReadTransactions: 25,
+            executionControlConcurrentWriteTransactions: 25,
+            executionControlConcurrentReadLowPriorityTransactions: 25,
+            executionControlConcurrentWriteLowPriorityTransactions: 25,
         };
         for (const [param, value] of Object.entries(ticketParams)) {
             assert.commandWorked(mongod.adminCommand({setParameter: 1, [param]: value}));
@@ -114,8 +114,11 @@ describe("Storage engine concurrency adjustment algorithm", function () {
             const mongod = replTest.getPrimary();
 
             const algorithm = assert.commandWorked(
-                mongod.adminCommand({getParameter: 1, storageEngineConcurrencyAdjustmentAlgorithm: 1}),
-            ).storageEngineConcurrencyAdjustmentAlgorithm;
+                mongod.adminCommand({
+                    getParameter: 1,
+                    executionControlConcurrencyAdjustmentAlgorithm: 1,
+                }),
+            ).executionControlConcurrencyAdjustmentAlgorithm;
 
             if (algorithm === kThroughputProbing) {
                 assertTicketSizing(mongod, {expectDynamicAdjustmentWarnings: true, expectPrioritizationWarnings: true});
@@ -125,7 +128,7 @@ describe("Storage engine concurrency adjustment algorithm", function () {
         it("should allow ticket resizing when using the 'fixed' algorithm", function () {
             replTest = new ReplSetTest({
                 nodes: 1,
-                nodeOptions: {setParameter: {storageEngineConcurrencyAdjustmentAlgorithm: kFixed}},
+                nodeOptions: {setParameter: {executionControlConcurrencyAdjustmentAlgorithm: kFixed}},
             });
             replTest.startSet();
             replTest.initiate();
@@ -136,7 +139,7 @@ describe("Storage engine concurrency adjustment algorithm", function () {
         it("should implicitly use 'fixed' algorithm when tickets are set at startup", function () {
             replTest = new ReplSetTest({
                 nodes: 1,
-                nodeOptions: {setParameter: {storageEngineConcurrentReadTransactions: 20}},
+                nodeOptions: {setParameter: {executionControlConcurrentReadTransactions: 20}},
             });
             replTest.startSet();
             replTest.initiate();
@@ -144,10 +147,10 @@ describe("Storage engine concurrency adjustment algorithm", function () {
 
             const getParameterResult = mongod.adminCommand({
                 getParameter: 1,
-                storageEngineConcurrencyAdjustmentAlgorithm: 1,
+                executionControlConcurrencyAdjustmentAlgorithm: 1,
             });
             assert.commandWorked(getParameterResult);
-            assert.neq(getParameterResult.storageEngineConcurrencyAdjustmentAlgorithm, kThroughputProbing);
+            assert.neq(getParameterResult.executionControlConcurrencyAdjustmentAlgorithm, kThroughputProbing);
         });
 
         it("should not override to 'fixed' algorithm when prioritization is set at startup", function () {
@@ -155,8 +158,8 @@ describe("Storage engine concurrency adjustment algorithm", function () {
                 nodes: 1,
                 nodeOptions: {
                     setParameter: {
-                        storageEngineConcurrencyAdjustmentAlgorithm: kFixedWithPrio,
-                        storageEngineConcurrentReadTransactions: 20,
+                        executionControlConcurrencyAdjustmentAlgorithm: kFixedWithPrio,
+                        executionControlConcurrentReadTransactions: 20,
                     },
                 },
             });
@@ -166,10 +169,10 @@ describe("Storage engine concurrency adjustment algorithm", function () {
 
             const getParameterResult = mongod.adminCommand({
                 getParameter: 1,
-                storageEngineConcurrencyAdjustmentAlgorithm: 1,
+                executionControlConcurrencyAdjustmentAlgorithm: 1,
             });
             assert.commandWorked(getParameterResult);
-            assert.eq(getParameterResult.storageEngineConcurrencyAdjustmentAlgorithm, kFixedWithPrio);
+            assert.eq(getParameterResult.executionControlConcurrencyAdjustmentAlgorithm, kFixedWithPrio);
 
             assertTicketSizing(mongod);
         });
@@ -177,7 +180,9 @@ describe("Storage engine concurrency adjustment algorithm", function () {
         it(`should allow resizing all ticket types with '${kFixedWithPrio}'`, function () {
             replTest = new ReplSetTest({
                 nodes: 1,
-                nodeOptions: {setParameter: {storageEngineConcurrencyAdjustmentAlgorithm: kFixedWithPrio}},
+                nodeOptions: {
+                    setParameter: {executionControlConcurrencyAdjustmentAlgorithm: kFixedWithPrio},
+                },
             });
             replTest.startSet();
             replTest.initiate();
@@ -207,7 +212,7 @@ describe("Storage engine concurrency adjustment algorithm", function () {
             assert.commandFailedWithCode(
                 mongod.adminCommand({
                     setParameter: 1,
-                    storageEngineConcurrencyAdjustmentAlgorithm: "invalidAlgorithm",
+                    executionControlConcurrencyAdjustmentAlgorithm: "invalidAlgorithm",
                 }),
                 ErrorCodes.BadValue,
             );
@@ -215,8 +220,8 @@ describe("Storage engine concurrency adjustment algorithm", function () {
 
         it("should succeed when setting the algorithm to its current value", function () {
             const initialAlgorithm = assert.commandWorked(
-                mongod.adminCommand({getParameter: 1, storageEngineConcurrencyAdjustmentAlgorithm: 1}),
-            ).storageEngineConcurrencyAdjustmentAlgorithm;
+                mongod.adminCommand({getParameter: 1, executionControlConcurrencyAdjustmentAlgorithm: 1}),
+            ).executionControlConcurrencyAdjustmentAlgorithm;
             setAlgorithm(mongod, initialAlgorithm);
         });
     });
@@ -226,7 +231,7 @@ describe("Storage engine concurrency adjustment algorithm", function () {
             beforeEach(function () {
                 this.replTest = new ReplSetTest({
                     nodes: 1,
-                    nodeOptions: {setParameter: {storageEngineConcurrencyAdjustmentAlgorithm: kFixed}},
+                    nodeOptions: {setParameter: {executionControlConcurrencyAdjustmentAlgorithm: kFixed}},
                 });
                 this.replTest.startSet();
                 this.replTest.initiate();
@@ -262,7 +267,7 @@ describe("Storage engine concurrency adjustment algorithm", function () {
                 this.replTest = new ReplSetTest({
                     nodes: 1,
                     nodeOptions: {
-                        setParameter: {storageEngineConcurrencyAdjustmentAlgorithm: kFixedWithPrio},
+                        setParameter: {executionControlConcurrencyAdjustmentAlgorithm: kFixedWithPrio},
                     },
                 });
                 this.replTest.startSet();
@@ -299,7 +304,7 @@ describe("Storage engine concurrency adjustment algorithm", function () {
                 this.replTest = new ReplSetTest({
                     nodes: 1,
                     nodeOptions: {
-                        setParameter: {storageEngineConcurrencyAdjustmentAlgorithm: kThroughputProbing},
+                        setParameter: {executionControlConcurrencyAdjustmentAlgorithm: kThroughputProbing},
                     },
                 });
                 this.replTest.startSet();
@@ -341,7 +346,7 @@ describe("Storage engine concurrency adjustment algorithm", function () {
         beforeEach(function () {
             replTest = new ReplSetTest({
                 nodes: 1,
-                nodeOptions: {setParameter: {storageEngineConcurrencyAdjustmentAlgorithm: kFixed}},
+                nodeOptions: {setParameter: {executionControlConcurrencyAdjustmentAlgorithm: kFixed}},
             });
             replTest.startSet();
             replTest.initiate();
@@ -355,17 +360,20 @@ describe("Storage engine concurrency adjustment algorithm", function () {
         it("should preserve normal priority ticket values across algorithm changes", function () {
             const customTicketCount = 50;
             assert.commandWorked(
-                mongod.adminCommand({setParameter: 1, storageEngineConcurrentReadTransactions: customTicketCount}),
+                mongod.adminCommand({
+                    setParameter: 1,
+                    executionControlConcurrentReadTransactions: customTicketCount,
+                }),
             );
 
             setAlgorithm(mongod, kThroughputProbing);
             setAlgorithm(mongod, kFixed);
 
             const res = assert.commandWorked(
-                mongod.adminCommand({getParameter: 1, storageEngineConcurrentReadTransactions: 1}),
+                mongod.adminCommand({getParameter: 1, executionControlConcurrentReadTransactions: 1}),
             );
             assert.eq(
-                res.storageEngineConcurrentReadTransactions,
+                res.executionControlConcurrentReadTransactions,
                 customTicketCount,
                 "Normal priority ticket value was not preserved",
             );
@@ -377,7 +385,7 @@ describe("Storage engine concurrency adjustment algorithm", function () {
             assert.commandWorked(
                 mongod.adminCommand({
                     setParameter: 1,
-                    storageEngineConcurrentReadLowPriorityTransactions: customTicketCount,
+                    executionControlConcurrentReadLowPriorityTransactions: customTicketCount,
                 }),
             );
 
@@ -385,10 +393,10 @@ describe("Storage engine concurrency adjustment algorithm", function () {
             setAlgorithm(mongod, kFixedWithPrio);
 
             const res = assert.commandWorked(
-                mongod.adminCommand({getParameter: 1, storageEngineConcurrentReadLowPriorityTransactions: 1}),
+                mongod.adminCommand({getParameter: 1, executionControlConcurrentReadLowPriorityTransactions: 1}),
             );
             assert.eq(
-                res.storageEngineConcurrentReadLowPriorityTransactions,
+                res.executionControlConcurrentReadLowPriorityTransactions,
                 customTicketCount,
                 "Low priority ticket value was not preserved",
             );
@@ -412,6 +420,131 @@ describe("Storage engine concurrency adjustment algorithm", function () {
         });
     });
 
+    describe("Transition validation with zero low-priority tickets", function () {
+        let replTest, mongod;
+
+        beforeEach(function () {
+            replTest = new ReplSetTest({
+                nodes: 1,
+                nodeOptions: {
+                    setParameter: {executionControlConcurrencyAdjustmentAlgorithm: kFixedWithPrio},
+                },
+            });
+            replTest.startSet();
+            replTest.initiate();
+            mongod = replTest.getPrimary();
+        });
+
+        afterEach(function () {
+            assert.commandWorked(
+                mongod.adminCommand({
+                    setParameter: 1,
+                    executionControlConcurrentReadLowPriorityTransactions: 5,
+                }),
+            );
+
+            assert.commandWorked(
+                mongod.adminCommand({
+                    setParameter: 1,
+                    executionControlConcurrentWriteLowPriorityTransactions: 5,
+                }),
+            );
+
+            if (replTest) {
+                replTest.stopSet();
+            }
+        });
+
+        it("should fail to transition from prioritization when low-priority read tickets are 0", function () {
+            assert.commandWorked(
+                mongod.adminCommand({
+                    setParameter: 1,
+                    executionControlConcurrentReadLowPriorityTransactions: 0,
+                }),
+            );
+
+            // Attempt to transition to kFixed should fail.
+            assert.commandFailedWithCode(
+                mongod.adminCommand({setParameter: 1, executionControlConcurrencyAdjustmentAlgorithm: kFixed}),
+                ErrorCodes.IllegalOperation,
+            );
+
+            // Attempt to transition to kThroughputProbing should also fail.
+            assert.commandFailedWithCode(
+                mongod.adminCommand({
+                    setParameter: 1,
+                    executionControlConcurrencyAdjustmentAlgorithm: kThroughputProbing,
+                }),
+                ErrorCodes.IllegalOperation,
+            );
+        });
+
+        it("should fail to transition from prioritization when low-priority write tickets are 0", function () {
+            assert.commandWorked(
+                mongod.adminCommand({
+                    setParameter: 1,
+                    executionControlConcurrentWriteLowPriorityTransactions: 0,
+                }),
+            );
+
+            // Attempt to transition to kFixed should fail.
+            assert.commandFailedWithCode(
+                mongod.adminCommand({setParameter: 1, executionControlConcurrencyAdjustmentAlgorithm: kFixed}),
+                ErrorCodes.IllegalOperation,
+            );
+
+            // Attempt to transition to kThroughputProbing should also fail.
+            assert.commandFailedWithCode(
+                mongod.adminCommand({
+                    setParameter: 1,
+                    executionControlConcurrencyAdjustmentAlgorithm: kThroughputProbing,
+                }),
+                ErrorCodes.IllegalOperation,
+            );
+        });
+
+        it("should allow staying in prioritization mode regardless of low-priority ticket values", function () {
+            // Set low-priority tickets to 0.
+            assert.commandWorked(
+                mongod.adminCommand({
+                    setParameter: 1,
+                    executionControlConcurrentReadLowPriorityTransactions: 0,
+                }),
+            );
+            assert.commandWorked(
+                mongod.adminCommand({
+                    setParameter: 1,
+                    executionControlConcurrentWriteLowPriorityTransactions: 0,
+                }),
+            );
+
+            // Staying in prioritization mode should succeed.
+            setAlgorithm(mongod, kFixedWithPrio);
+        });
+
+        it("should allow transitions to prioritization mode regardless of low-priority ticket values", function () {
+            // Start with non-prioritization mode.
+            setAlgorithm(mongod, kThroughputProbing);
+
+            // Set low-priority tickets to 0 (this is allowed in non-prioritization modes).
+            assert.commandWorked(
+                mongod.adminCommand({
+                    setParameter: 1,
+                    executionControlConcurrentReadLowPriorityTransactions: 0,
+                }),
+            );
+            assert.commandWorked(
+                mongod.adminCommand({
+                    setParameter: 1,
+                    executionControlConcurrentWriteLowPriorityTransactions: 0,
+                }),
+            );
+
+            // Transition to prioritization should succeed even with 0 low-priority tickets.
+            setAlgorithm(mongod, kFixedWithPrio);
+        });
+    });
+
     describe("Ticket alignment after transition from throughput probing", function () {
         let replTest, mongod;
 
@@ -424,7 +557,7 @@ describe("Storage engine concurrency adjustment algorithm", function () {
         it(`should align tickets when transitioning from '${kThroughputProbing}' to '${kFixed}'`, function () {
             replTest = new ReplSetTest({
                 nodes: 1,
-                nodeOptions: {setParameter: {storageEngineConcurrencyAdjustmentAlgorithm: kFixed}},
+                nodeOptions: {setParameter: {executionControlConcurrencyAdjustmentAlgorithm: kFixed}},
             });
             replTest.startSet();
             replTest.initiate();
@@ -437,13 +570,13 @@ describe("Storage engine concurrency adjustment algorithm", function () {
             assert.commandWorked(
                 mongod.adminCommand({
                     setParameter: 1,
-                    storageEngineConcurrentReadTransactions: customReadTickets,
+                    executionControlConcurrentReadTransactions: customReadTickets,
                 }),
             );
             assert.commandWorked(
                 mongod.adminCommand({
                     setParameter: 1,
-                    storageEngineConcurrentWriteTransactions: customWriteTickets,
+                    executionControlConcurrentWriteTransactions: customWriteTickets,
                 }),
             );
 
@@ -455,15 +588,15 @@ describe("Storage engine concurrency adjustment algorithm", function () {
 
             const status = assert.commandWorked(mongod.adminCommand({serverStatus: 1}));
             const stats = status.queues.execution;
-            assert.eq(stats.read.normalPriority.totalTickets, customReadTickets);
-            assert.eq(stats.write.normalPriority.totalTickets, customWriteTickets);
+            assert.eq(stats.read.totalTickets, customReadTickets);
+            assert.eq(stats.write.totalTickets, customWriteTickets);
         });
 
         it(`should align tickets when transitioning from '${kThroughputProbing}' to '${kFixedWithPrio}'`, function () {
             replTest = new ReplSetTest({
                 nodes: 1,
                 nodeOptions: {
-                    setParameter: {storageEngineConcurrencyAdjustmentAlgorithm: kFixedWithPrio},
+                    setParameter: {executionControlConcurrencyAdjustmentAlgorithm: kFixedWithPrio},
                 },
             });
             replTest.startSet();
@@ -479,25 +612,25 @@ describe("Storage engine concurrency adjustment algorithm", function () {
             assert.commandWorked(
                 mongod.adminCommand({
                     setParameter: 1,
-                    storageEngineConcurrentReadTransactions: customReadTickets,
+                    executionControlConcurrentReadTransactions: customReadTickets,
                 }),
             );
             assert.commandWorked(
                 mongod.adminCommand({
                     setParameter: 1,
-                    storageEngineConcurrentWriteTransactions: customWriteTickets,
+                    executionControlConcurrentWriteTransactions: customWriteTickets,
                 }),
             );
             assert.commandWorked(
                 mongod.adminCommand({
                     setParameter: 1,
-                    storageEngineConcurrentReadLowPriorityTransactions: customLowPrioReadTickets,
+                    executionControlConcurrentReadLowPriorityTransactions: customLowPrioReadTickets,
                 }),
             );
             assert.commandWorked(
                 mongod.adminCommand({
                     setParameter: 1,
-                    storageEngineConcurrentWriteLowPriorityTransactions: customLowPrioWriteTickets,
+                    executionControlConcurrentWriteLowPriorityTransactions: customLowPrioWriteTickets,
                 }),
             );
 
@@ -513,6 +646,51 @@ describe("Storage engine concurrency adjustment algorithm", function () {
             assert.eq(stats.write.normalPriority.totalTickets, customWriteTickets);
             assert.eq(stats.read.lowPriority.totalTickets, customLowPrioReadTickets);
             assert.eq(stats.write.lowPriority.totalTickets, customLowPrioWriteTickets);
+        });
+
+        it(`should preserve dynamically adjusted tickets when transitioning from '${
+            kThroughputProbing
+        }' to '${kFixedWithPrio}'`, function () {
+            replTest = new ReplSetTest({
+                nodes: 1,
+                nodeOptions: {
+                    setParameter: {
+                        executionControlConcurrencyAdjustmentAlgorithm: kThroughputProbing,
+                    },
+                },
+            });
+            replTest.startSet();
+            replTest.initiate();
+            mongod = replTest.getPrimary();
+
+            // Capture the current ticket counts that throughput probing may have dynamically
+            // adjusted.
+            const beforeStatus = assert.commandWorked(mongod.adminCommand({serverStatus: 1}));
+            const beforeStats = beforeStatus.queues.execution;
+            const throughputProbingReadTickets = beforeStats.read.normalPriority.totalTickets;
+            const throughputProbingWriteTickets = beforeStats.write.normalPriority.totalTickets;
+
+            assert.commandWorked(
+                mongod.adminCommand({
+                    setParameter: 1,
+                    executionControlConcurrentReadTransactions: throughputProbingReadTickets,
+                }),
+            );
+            assert.commandWorked(
+                mongod.adminCommand({
+                    setParameter: 1,
+                    executionControlConcurrentWriteTransactions: throughputProbingWriteTickets,
+                }),
+            );
+
+            // Transition to prioritization algorithm.
+            setAlgorithm(mongod, kFixedWithPrio);
+
+            // Verify that the previous dynamically determined tickets count are preserved.
+            const afterStatus = assert.commandWorked(mongod.adminCommand({serverStatus: 1}));
+            const afterStats = afterStatus.queues.execution;
+            assert.eq(throughputProbingReadTickets, afterStats.read.normalPriority.totalTickets);
+            assert.eq(throughputProbingWriteTickets, afterStats.write.normalPriority.totalTickets);
         });
     });
 });

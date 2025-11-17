@@ -1016,6 +1016,14 @@ public:
         return _featureFlagMqlJsEngineGap.get(VersionContext::getDecoration(getOperationContext()));
     }
 
+    void incrNumNestedExpressionFieldPathComponentsParsed(int n) {
+        _numNestedExpressionFieldPathComponentsParsed += n;
+    }
+
+    int getNumNestedExpressionFieldPathComponentsParsed() {
+        return _numNestedExpressionFieldPathComponentsParsed;
+    }
+
 protected:
     struct ExpressionContextParams {
         OperationContext* opCtx = nullptr;
@@ -1024,9 +1032,7 @@ protected:
         // for different flags. For most operations, this is expected to be initialized by acquiring
         // an FCV snapshot during initialization. There are some cases where a VersionContext is
         // already present on the OperationContext, but this is limited to distributed DDL
-        // operations until SPM-4227. It is also possible that the FCV has not yet been established
-        // (for example at startup), in which case VersionContext will be uninitialized (see
-        // VersionContext::isInitialized()).
+        // operations until SPM-4227.
         // TODO SERVER-111234 We should probably swap this out for an FCVSnapshot until we implement
         // SPM-4227.
         VersionContext vCtx;
@@ -1278,6 +1284,8 @@ private:
     bool _isCappedDelete = false;
 
     InterruptChecker _interruptChecker;
+
+    int _numNestedExpressionFieldPathComponentsParsed = 0;
 
     // We use this set to indicate whether or not a system variable was referenced in the query that
     // is being executed (if the variable was referenced, it is an element of this set).

@@ -74,9 +74,9 @@ DocumentSourceInternalShardFilter::DocumentSourceInternalShardFilter(
     std::unique_ptr<ShardFilterer> shardFilterer)
     : DocumentSource(kStageName, pExpCtx), _shardFilterer(std::move(shardFilterer)) {}
 
-DocumentSourceContainer::iterator DocumentSourceInternalShardFilter::doOptimizeAt(
+DocumentSourceContainer::iterator DocumentSourceInternalShardFilter::optimizeAt(
     DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
-    invariant(*itr == this);
+    tassert(11282990, "Expecting DocumentSource iterator pointing to this stage", *itr == this);
 
     if (_shardFilterer->isCollectionSharded()) {
         return std::next(itr);

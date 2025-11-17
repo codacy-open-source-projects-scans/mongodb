@@ -53,6 +53,7 @@
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/sharding_environment/shard_shared_state_cache.h"
 #include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/topology/shard_registry.h"
 #include "mongo/db/topology/sharding_state.h"
@@ -107,14 +108,35 @@ void writeToLocalShard(OperationContext* opCtx,
         return cmdObjBuilder.obj();
     }();
 
-    const auto cmdResponse =
-        repl::ReplicationCoordinator::get(opCtx)->runCmdOnPrimaryAndAwaitResponse(
-            opCtx,
-            batchedCommandRequest.getNS().dbName(),
-            cmdObj,
-            [](executor::TaskExecutor::CallbackHandle handle) {},
-            [](executor::TaskExecutor::CallbackHandle handle) {});
-    uassertStatusOK(getStatusFromCommandResult(cmdResponse));
+
+    auto shState = ShardingState::get(opCtx);
+    invariant(shState->enabled());
+    auto shardId = shState->shardId();
+    auto shardState = ShardSharedStateCache::get(opCtx).getShardState(shardId);
+
+    Shard::RetryStrategy retryStrategy{ConnectionString::ConnectionType::kLocal,
+                                       *shardState,
+                                       Shard::RetryPolicy::kStrictlyNotIdempotent};
+
+    uassertStatusOK(runWithRetryStrategy(
+        opCtx, retryStrategy, [&](const TargetingMetadata&) -> RetryStrategy::Result<BSONObj> {
+            auto replCoord = repl::ReplicationCoordinator::get(opCtx);
+            const auto primaryHostAndPort = replCoord->getCurrentPrimaryHostAndPort();
+            const auto cmdResponse = replCoord->runCmdOnPrimaryAndAwaitResponse(
+                opCtx,
+                batchedCommandRequest.getNS().dbName(),
+                cmdObj,
+                [](executor::TaskExecutor::CallbackHandle handle) {},
+                [](executor::TaskExecutor::CallbackHandle handle) {});
+
+            const auto status = getStatusFromCommandResult(cmdResponse);
+
+            if (!status.isOK()) {
+                return {status, executor::extractErrorLabels(cmdResponse), primaryHostAndPort};
+            }
+
+            return RetryStrategy::Result{cmdResponse, primaryHostAndPort};
+        }));
 }
 
 }  // namespace
@@ -149,7 +171,7 @@ void ShardServerProcessInterface::checkRoutingInfoEpochOrThrow(
             catalogCache->getCollectionRoutingInfo(expCtx->getOperationContext(), nss));
         auto foundVersion = routingInfo.hasRoutingTable()
             ? routingInfo.getCollectionVersion().placementVersion()
-            : ChunkVersion::UNSHARDED();
+            : ChunkVersion::UNTRACKED();
 
         auto ignoreIndexVersion = ShardVersionFactory::make(foundVersion);
         return ignoreIndexVersion;
@@ -668,23 +690,23 @@ std::unique_ptr<Pipeline> ShardServerProcessInterface::preparePipelineForExecuti
         shouldUseCollectionDefaultCollator);
 }
 
-std::unique_ptr<MongoProcessInterface::ScopedExpectUnshardedCollection>
-ShardServerProcessInterface::expectUnshardedCollectionInScope(
+std::unique_ptr<MongoProcessInterface::ScopedExpectUntrackedCollection>
+ShardServerProcessInterface::expectUntrackedCollectionInScope(
     OperationContext* opCtx,
     const NamespaceString& nss,
     const boost::optional<DatabaseVersion>& dbVersion) {
-    class ScopedExpectUnshardedCollectionImpl : public ScopedExpectUnshardedCollection {
+    class ScopedExpectUntrackedCollectionImpl : public ScopedExpectUntrackedCollection {
     public:
-        ScopedExpectUnshardedCollectionImpl(OperationContext* opCtx,
+        ScopedExpectUntrackedCollectionImpl(OperationContext* opCtx,
                                             const NamespaceString& nss,
                                             const boost::optional<DatabaseVersion>& dbVersion)
-            : _expectUnsharded(opCtx, nss, ShardVersion::UNSHARDED(), dbVersion) {}
+            : _expectUntracked(opCtx, nss, ShardVersion::UNTRACKED(), dbVersion) {}
 
     private:
-        ScopedSetShardRole _expectUnsharded;
+        ScopedSetShardRole _expectUntracked;
     };
 
-    return std::make_unique<ScopedExpectUnshardedCollectionImpl>(opCtx, nss, dbVersion);
+    return std::make_unique<ScopedExpectUntrackedCollectionImpl>(opCtx, nss, dbVersion);
 }
 
 }  // namespace mongo

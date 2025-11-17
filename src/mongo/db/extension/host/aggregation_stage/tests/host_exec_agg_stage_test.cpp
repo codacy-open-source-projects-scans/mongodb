@@ -30,9 +30,9 @@
 #include "mongo/db/exec/agg/document_source_to_stage_registry.h"
 #include "mongo/db/exec/agg/stage.h"
 #include "mongo/db/extension/host/aggregation_stage/executable_agg_stage.h"
-#include "mongo/db/extension/host_connector/executable_agg_stage.h"
 #include "mongo/db/extension/host_connector/executable_agg_stage_adapter.h"
-#include "mongo/db/extension/sdk/aggregation_stage.h"
+#include "mongo/db/extension/host_connector/query_execution_context_adapter.h"
+#include "mongo/db/extension/sdk/tests/shared_test_stages.h"
 #include "mongo/db/extension/shared/get_next_result.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_match.h"
@@ -52,29 +52,6 @@ protected:
     ExecAggStageTest() = default;
 };
 
-class NoOpHostExecAggStage : public host::ExecAggStage {
-public:
-    explicit NoOpHostExecAggStage(std::unique_ptr<mongo::exec::agg::Stage> execAggStage)
-        : host::ExecAggStage(std::move(execAggStage)) {}
-
-    static inline std::unique_ptr<host::ExecAggStage> make(
-        std::unique_ptr<mongo::exec::agg::Stage> execAggStage) {
-        return std::make_unique<NoOpHostExecAggStage>(std::move(execAggStage));
-    }
-};
-
-class NoOpExtensionExecAggStage : public sdk::ExecAggStage {
-public:
-    NoOpExtensionExecAggStage() : sdk::ExecAggStage() {}
-
-    ExtensionGetNextResult getNext() override {
-        MONGO_UNIMPLEMENTED;
-    }
-    static inline std::unique_ptr<sdk::ExecAggStage> make() {
-        return std::make_unique<NoOpExtensionExecAggStage>();
-    }
-};
-
 TEST(HostExecAggStageTest, GetNextResult) {
     using ReturnStatus = exec::agg::GetNextResult::ReturnStatus;
     boost::intrusive_ptr<DocumentSourceMatch> matchDocSourceStage =
@@ -92,27 +69,28 @@ TEST(HostExecAggStageTest, GetNextResult) {
 
     matchExecAggStage->setSource(mockStage.get());
 
-    std::unique_ptr<host::ExecAggStage> execAggStage = NoOpHostExecAggStage::make(
-        std::unique_ptr<mongo::exec::agg::Stage>(matchExecAggStage.detach()));
+    std::unique_ptr<host::ExecAggStage> execAggStage =
+        host::ExecAggStage::make(matchExecAggStage.get());
 
     // Test ExecAggStage::getNext() which calls the stored exec agg stage's getNext().
     auto getNextResult = execAggStage->getNext();
     ASSERT_EQ(ReturnStatus::kPauseExecution, getNextResult.getStatus());
 
     // Test getNext() via ExecAggStageHandle.
+    auto nullExpCtx = host_connector::QueryExecutionContextAdapter(nullptr);
     auto hostExecAggStage = new host_connector::HostExecAggStageAdapter(std::move(execAggStage));
-    auto handle = host_connector::ExecAggStageHandle{hostExecAggStage};
+    auto handle = ExecAggStageHandle{hostExecAggStage};
 
-    auto hostGetNextResult = handle.getNext();
+    auto hostGetNextResult = handle.getNext(&nullExpCtx);
     ASSERT_EQ(extension::GetNextCode::kPauseExecution, hostGetNextResult.code);
     ASSERT_EQ(boost::none, hostGetNextResult.res);
 
-    hostGetNextResult = handle.getNext();
+    hostGetNextResult = handle.getNext(&nullExpCtx);
     ASSERT_EQ(extension::GetNextCode::kAdvanced, hostGetNextResult.code);
     ASSERT_BSONOBJ_EQ(BSON("a" << 1), hostGetNextResult.res.get());
 
     // Note that the match clause is "a": 1 so the documents where "a": 2 will be passed over.
-    hostGetNextResult = handle.getNext();
+    hostGetNextResult = handle.getNext(&nullExpCtx);
     ASSERT_EQ(extension::GetNextCode::kEOF, hostGetNextResult.code);
     ASSERT_EQ(boost::none, hostGetNextResult.res);
 
@@ -121,12 +99,12 @@ TEST(HostExecAggStageTest, GetNextResult) {
     // ::MongoExtensionExecAggStage gets deleted.
     exec::agg::StagePtr duplicateMatchExecAggStage = exec::agg::buildStage(
         DocumentSourceMatch::create(BSON("a" << 2), make_intrusive<ExpressionContextForTest>()));
-    std::unique_ptr<host::ExecAggStage> duplicateExecAgg = NoOpHostExecAggStage::make(
-        std::unique_ptr<mongo::exec::agg::Stage>(duplicateMatchExecAggStage.detach()));
+    std::unique_ptr<host::ExecAggStage> duplicateExecAgg =
+        host::ExecAggStage::make(duplicateMatchExecAggStage.get());
 
     auto duplicateHostExecAggStage =
         new host_connector::HostExecAggStageAdapter(std::move(duplicateExecAgg));
-    handle = host_connector::ExecAggStageHandle{duplicateHostExecAggStage};
+    handle = ExecAggStageHandle{duplicateHostExecAggStage};
 
     ASSERT_EQ(extension::GetNextCode::kEOF, hostGetNextResult.code);
     ASSERT_EQ(boost::none, hostGetNextResult.res);
@@ -143,14 +121,15 @@ TEST(HostExecAggStageTest, GetNextResultEdgeCaseEof) {
 
     matchExecAggStage->setSource(mockStage.get());
 
-    std::unique_ptr<host::ExecAggStage> execAggStage = NoOpHostExecAggStage::make(
-        std::unique_ptr<mongo::exec::agg::Stage>(matchExecAggStage.detach()));
+    std::unique_ptr<host::ExecAggStage> execAggStage =
+        host::ExecAggStage::make(matchExecAggStage.get());
 
     // Test getNext() via ExecAggStageHandle.
     auto hostExecAggStage = new host_connector::HostExecAggStageAdapter(std::move(execAggStage));
-    auto handle = host_connector::ExecAggStageHandle{hostExecAggStage};
+    auto handle = ExecAggStageHandle{hostExecAggStage};
+    auto nullExpCtx = host_connector::QueryExecutionContextAdapter(nullptr);
 
-    auto hostGetNextResult = handle.getNext();
+    auto hostGetNextResult = handle.getNext(&nullExpCtx);
     ASSERT_EQ(extension::GetNextCode::kEOF, hostGetNextResult.code);
     ASSERT_EQ(boost::none, hostGetNextResult.res);
 }
@@ -174,34 +153,59 @@ DEATH_TEST_F(ExecAggStageTest, InvalidReturnStatusCode, "11019500") {
 
     matchExecAggStage->setSource(mockStage.get());
 
-    std::unique_ptr<host::ExecAggStage> execAggStage = NoOpHostExecAggStage::make(
-        std::unique_ptr<mongo::exec::agg::Stage>(matchExecAggStage.detach()));
+    std::unique_ptr<host::ExecAggStage> execAggStage =
+        host::ExecAggStage::make(matchExecAggStage.get());
 
     auto hostExecAggStage = new host_connector::HostExecAggStageAdapter(std::move(execAggStage));
-    auto handle = host_connector::ExecAggStageHandle{hostExecAggStage};
+    auto handle = ExecAggStageHandle{hostExecAggStage};
+    auto nullExpCtx = host_connector::QueryExecutionContextAdapter(nullptr);
 
     // This getNext() call should hit the tassert because the C API doesn't have a
     // kAdvancedControlDocument value for GetNextCode.
-    handle.getNext();
+    handle.getNext(&nullExpCtx);
 }
 
 TEST(HostExecAggStageTest, IsHostAllocated) {
     boost::intrusive_ptr<DocumentSourceMatch> matchDocSourceStage =
         DocumentSourceMatch::create(BSON("a" << 1), make_intrusive<ExpressionContextForTest>());
     exec::agg::StagePtr matchExecAggStage = exec::agg::buildStage(matchDocSourceStage);
-    auto hostExecAggStage = new host_connector::HostExecAggStageAdapter(NoOpHostExecAggStage::make(
-        std::unique_ptr<mongo::exec::agg::Stage>(matchExecAggStage.detach())));
-    auto handle = host_connector::ExecAggStageHandle{hostExecAggStage};
+    auto hostExecAggStage = new host_connector::HostExecAggStageAdapter(
+        host::ExecAggStage::make(matchExecAggStage.get()));
+    auto handle = ExecAggStageHandle{hostExecAggStage};
 
     ASSERT_TRUE(host_connector::HostExecAggStageAdapter::isHostAllocated(*handle.get()));
 }
 
 TEST(HostExecAggStageTest, IsNotHostAllocated) {
     auto noOpExtensionExecAggStage =
-        new sdk::ExtensionExecAggStage(NoOpExtensionExecAggStage::make());
-    auto handle = host_connector::ExecAggStageHandle{noOpExtensionExecAggStage};
+        new sdk::ExtensionExecAggStage(sdk::shared_test_stages::NoOpExtensionExecAggStage::make());
+    auto handle = ExecAggStageHandle{noOpExtensionExecAggStage};
 
     ASSERT_FALSE(host_connector::HostExecAggStageAdapter::isHostAllocated(*handle.get()));
+}
+
+TEST(HostExecAggStageTest, GetNameFromExtensionStage) {
+    auto noOpExtensionExecAggStage =
+        new sdk::ExtensionExecAggStage(sdk::shared_test_stages::NoOpExtensionExecAggStage::make());
+    auto handle = ExecAggStageHandle{noOpExtensionExecAggStage};
+
+    ASSERT_EQ(handle.getName(), "$noOpExt");
+}
+
+TEST(HostExecAggStageTest, GetNameFromHostStage) {
+    boost::intrusive_ptr<DocumentSourceMatch> matchDocSourceStage =
+        DocumentSourceMatch::create(BSON("a" << 1), make_intrusive<ExpressionContextForTest>());
+    auto mock = DocumentSourceMock::createForTest({}, make_intrusive<ExpressionContextForTest>());
+    exec::agg::StagePtr matchExecAggStage = exec::agg::buildStage(matchDocSourceStage);
+    exec::agg::StagePtr mockStage = exec::agg::buildStage(mock);
+    matchExecAggStage->setSource(mockStage.get());
+    std::unique_ptr<host::ExecAggStage> execAggStage =
+        host::ExecAggStage::make(matchExecAggStage.get());
+
+    auto hostExecAggStage = new host_connector::HostExecAggStageAdapter(std::move(execAggStage));
+    auto handle = ExecAggStageHandle{hostExecAggStage};
+
+    ASSERT_EQ(handle.getName(), "$match");
 }
 
 }  // namespace

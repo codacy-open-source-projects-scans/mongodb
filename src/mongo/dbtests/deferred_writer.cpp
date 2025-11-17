@@ -27,7 +27,7 @@
  *    it in the license file.
  */
 
-#include "mongo/db/deferred_writer.h"
+#include "mongo/db/repl/dbcheck/deferred_writer.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
@@ -142,7 +142,7 @@ public:
         const auto coll = acquireCollection(
             opCtx,
             CollectionAcquisitionRequest(kTestNamespace,
-                                         PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                         PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
                                          repl::ReadConcernArgs::get(opCtx),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);

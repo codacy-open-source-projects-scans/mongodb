@@ -38,15 +38,47 @@
 namespace mongo::extension {
 
 class AggStageParseNodeHandle;
+class LogicalAggStageHandle;
+
+/**
+ * Represents the possible types of nodes created during expansion, as owned handles.
+ *
+ * Expansion can result in four types of nodes:
+ * 1. Host-defined parse node
+ * 2. Extension-defined parse node
+ * 3. Host-defined AST node
+ * 4. Extension-defined AST node
+ *
+ * This variant allows extension developers to return both host- and extension-defined nodes in
+ * AggStageParseNode::expand() without knowing the underlying implementation of host-defined
+ * nodes.
+ *
+ * The host is responsible for differentiating between host- and extension-defined nodes later on.
+ */
 using VariantNodeHandle = std::variant<AggStageParseNodeHandle, AggStageAstNodeHandle>;
 
 /**
- * AggStageParseNodeHandle is a wrapper around a
- * MongoExtensionAggStageParseNode.
+ * Represents the possible types of elements that can be in a MongoExtensionDPLArray, as owned
+ * handles.
+ *
+ * A MongoExtensionDPLArray can contain either parse nodes or logical stages. This variant allows
+ * extension developers to return both types in distributed plan logic.
+ */
+using VariantDPLHandle = std::variant<AggStageParseNodeHandle, LogicalAggStageHandle>;
+
+/**
+ * Wrapper function that converts a DPL array to a vector of RAII handles.
+ * This ensures template instantiation happens in parse_node.cpp where
+ * the specializations are visible.
+ */
+std::vector<VariantDPLHandle> dplArrayToRaiiVector(::MongoExtensionDPLArray& arr);
+
+/**
+ * AggStageParseNodeHandle is a wrapper around a MongoExtensionAggStageParseNode.
  */
 class AggStageParseNodeHandle : public OwnedHandle<::MongoExtensionAggStageParseNode> {
 public:
-    AggStageParseNodeHandle(absl::Nonnull<::MongoExtensionAggStageParseNode*> parseNode)
+    AggStageParseNodeHandle(::MongoExtensionAggStageParseNode* parseNode)
         : OwnedHandle<::MongoExtensionAggStageParseNode>(parseNode) {
         _assertValidVTable();
     }

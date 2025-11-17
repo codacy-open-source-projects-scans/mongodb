@@ -21,6 +21,8 @@
 //   # Query settings commands can not be handled by atlas proxy.
 //   simulate_atlas_proxy_incompatible,
 //   requires_getmore,
+//   # TODO(SERVER-113800): Enable setClusterParameters with replicaset started with --shardsvr
+//   transitioning_replicaset_incompatible,
 // ]
 
 import {getExplainCommand} from "jstests/libs/cmd_object_utils.js";

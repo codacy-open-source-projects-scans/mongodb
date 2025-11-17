@@ -49,6 +49,7 @@
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/allowed_contexts.h"
+#include "mongo/db/raw_data_operation.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/views/resolved_view.h"
 #include "mongo/idl/idl_parser.h"
@@ -280,9 +281,10 @@ std::unique_ptr<DocumentSourceUnionWith::LiteParsed> DocumentSourceUnionWith::Li
 PrivilegeVector DocumentSourceUnionWith::LiteParsed::requiredPrivileges(
     bool isMongos, bool bypassDocumentValidation) const {
     PrivilegeVector requiredPrivileges;
-    invariant(_pipelines.size() <= 1);
-    invariant(_foreignNss);
-
+    tassert(11282960,
+            str::stream() << "$unionWith only supports 1 subpipeline, got " << _pipelines.size(),
+            _pipelines.size() <= 1);
+    tassert(11282959, "Missing foreignNss", _foreignNss);
     // If no pipeline is specified, then assume that we're reading directly from the collection.
     // Otherwise check whether the pipeline starts with an "initial source" indicating that we don't
     // require the "find" privilege.
@@ -367,7 +369,7 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceUnionWith::createFromBson(
         expCtx, std::move(unionNss), std::move(pipeline), hasForeignDB);
 }
 
-DocumentSourceContainer::iterator DocumentSourceUnionWith::doOptimizeAt(
+DocumentSourceContainer::iterator DocumentSourceUnionWith::optimizeAt(
     DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
     auto duplicateAcrossUnion = [&](auto&& nextStage) {
         _sharedState->_pipeline->addFinalSource(
@@ -461,7 +463,7 @@ Value DocumentSourceUnionWith::serialize(const SerializationOptions& opts) const
             return Value(DOC(getSourceName() << spec));
         }
 
-        invariant(pipeCopy);
+        tassert(11282958, "Missing pipeline copy", pipeCopy);
 
         auto preparePipelineAndExplain = [&](std::unique_ptr<Pipeline> pipeline) {
             // Query settings are looked up after parsing and therefore are not populated in the
@@ -500,7 +502,9 @@ Value DocumentSourceUnionWith::serialize(const SerializationOptions& opts) const
 
         LOGV2_DEBUG(4553501, 3, "$unionWith attached cursor to pipeline for explain");
         // We expect this to be an explanation of a pipeline -- there should only be one field.
-        invariant(explainLocal.nFields() == 1);
+        tassert(11282957,
+                "Expecting pipeline explain to contain exactly 1 field",
+                explainLocal.nFields() == 1);
 
         auto spec = collectionless
             ? DOC("pipeline" << explainLocal.firstElement())
@@ -638,7 +642,12 @@ std::unique_ptr<Pipeline> DocumentSourceUnionWith::parsePipelineWithMaybeViewDef
 
     boost::intrusive_ptr<ExpressionContext> subExpCtx = makeCopyForSubPipelineFromExpressionContext(
         expCtx, resolvedNs.ns, resolvedNs.uuid, userNss);
-    // This will just parse the pipeline, with or without a view definition.
+    if (resolvedNs.ns.isTimeseriesBucketsCollection() &&
+        isRawDataOperation(expCtx->getOperationContext())) {
+        // Raw Data operations on timeseries collections operate without the timeseries view.
+        return pipeline_factory::makePipeline(currentPipeline, subExpCtx, opts);
+    }
+
     return pipeline_factory::makePipelineFromViewDefinition(
         subExpCtx, resolvedNs, std::move(currentPipeline), opts, userNss);
 }

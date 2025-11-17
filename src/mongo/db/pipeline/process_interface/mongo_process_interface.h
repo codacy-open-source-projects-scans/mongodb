@@ -494,7 +494,8 @@ public:
      * this method on a shard server will only return results which match the pipeline on that
      * shard.
      *
-     * Accepts catalog information that will be used for the new returned pipeline.
+     * Accepts catalog information that will be used for the new returned pipeline. Collections
+     * should be locked. The caller should handle acquiring and releasing catalog resources.
      *
      * Unlike attachCursorSourceToPipelineForLocalRead(), this method does not accept additional
      * configuration through 'aggRequest' or 'shouldUseCollectionDefaultCollator' parameters.
@@ -695,13 +696,13 @@ public:
                                                     bool addPrimaryShard = false) = 0;
 
     /**
-     * Used to enforce the constraint that the foreign collection must be unsharded.
+     * Used to enforce the constraint that the foreign collection must be untracked.
      */
-    class ScopedExpectUnshardedCollection {
+    class ScopedExpectUntrackedCollection {
     public:
-        virtual ~ScopedExpectUnshardedCollection() = default;
+        virtual ~ScopedExpectUntrackedCollection() = default;
     };
-    virtual std::unique_ptr<ScopedExpectUnshardedCollection> expectUnshardedCollectionInScope(
+    virtual std::unique_ptr<ScopedExpectUntrackedCollection> expectUntrackedCollectionInScope(
         OperationContext* opCtx,
         const NamespaceString& nss,
         const boost::optional<DatabaseVersion>& dbVersion) = 0;

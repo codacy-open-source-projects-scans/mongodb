@@ -12,6 +12,9 @@
  *   # capped collections connot be sharded
  *   assumes_unsharded_collection,
  *   featureFlagRecordIdsReplicated,
+ *   # TODO(SERVER-112424): Instantiate ScopedAllowImplicitCollectionCreate_UNSAFE object in
+ *   # cloneCollectionAsCapped command
+ *   transitioning_replicaset_incompatible,
  * ]
  */
 

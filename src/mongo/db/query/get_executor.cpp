@@ -1171,11 +1171,6 @@ boost::optional<ScopedCollectionFilter> getScopedCollectionFilter(
     return boost::none;
 }
 
-void setCurOpQueryFramework(const PlanExecutor* executor) {
-    auto opCtx = executor->getOpCtx();
-    stdx::lock_guard<Client> lk(*opCtx->getClient());
-    CurOp::get(opCtx)->debug().queryFramework = executor->getQueryFramework();
-}
 }  // namespace
 
 /**
@@ -1279,6 +1274,11 @@ bool isQuerySbeCompatible(const CollectionPtr& collection, const CanonicalQuery&
         return false;
     }
 
+    if (expCtx->getNumNestedExpressionFieldPathComponentsParsed() >
+        queryKnob.getInternalQueryMaxNumExprFieldPathComponentsSupportedInSbe()) {
+        return false;
+    }
+
     // Queries against the oplog are not supported. Also queries on the inner side of a $lookup are
     // not considered for SBE except search queries.
     if ((expCtx->getInLookup() && !cq.isSearchQuery()) || nss.isOplog() ||
@@ -1368,7 +1368,6 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind
                                              plannerOptions &
                                                  QueryPlannerParams::RETURN_OWNED_DATA);
 
-        setCurOpQueryFramework(expressExecutor.get());
         return std::move(expressExecutor);
     }
 
@@ -1388,7 +1387,6 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind
                 getScopedCollectionFilter(opCtx, collections, *paramsForSingleCollectionQuery),
                 plannerOptions & QueryPlannerParams::RETURN_OWNED_DATA);
 
-            setCurOpQueryFramework(expressExecutor.get());
             return std::move(expressExecutor);
         }
     }
@@ -1523,7 +1521,6 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind
         tasserted(8712800, "Exceeded retry iterations for making a planner");
     }();
     auto exec = planner->makeExecutor(std::move(canonicalQuery));
-    setCurOpQueryFramework(exec.get());
     return std::move(exec);
 }
 

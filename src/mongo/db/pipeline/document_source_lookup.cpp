@@ -60,6 +60,7 @@
 #include "mongo/db/pipeline/variable_validation.h"
 #include "mongo/db/query/allowed_contexts.h"
 #include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/raw_data_operation.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/topology/sharding_state.h"
 #include "mongo/db/views/resolved_view.h"
@@ -239,7 +240,13 @@ DocumentSourceLookUp::DocumentSourceLookUp(NamespaceString fromNs,
     const auto& resolvedNamespace = expCtx->getResolvedNamespace(_fromNs);
     _resolvedNs = resolvedNamespace.ns;
     _fromNsIsAView = resolvedNamespace.involvedNamespaceIsAView;
-    _sharedState->resolvedPipeline = resolvedNamespace.pipeline;
+
+    // Prevent view resolution for rawData timeseries commands.
+    if (!resolvedNamespace.involvedNamespaceIsAView ||
+        !isRawDataOperation(expCtx->getOperationContext()) ||
+        !resolvedNamespace.ns.isTimeseriesBucketsCollection()) {
+        _sharedState->resolvedPipeline = resolvedNamespace.pipeline;
+    }
 
     _fromExpCtx = makeCopyForSubPipelineFromExpressionContext(
         expCtx, resolvedNamespace.ns, resolvedNamespace.uuid, _fromNs);
@@ -474,8 +481,10 @@ std::unique_ptr<DocumentSourceLookUp::LiteParsed> DocumentSourceLookUp::LitePars
 PrivilegeVector DocumentSourceLookUp::LiteParsed::requiredPrivileges(
     bool isMongos, bool bypassDocumentValidation) const {
     PrivilegeVector requiredPrivileges;
-    invariant(_pipelines.size() <= 1);
-    invariant(_foreignNss);
+    tassert(11282983,
+            str::stream() << "$lookup only supports 1 subpipeline, got " << _pipelines.size(),
+            _pipelines.size() <= 1);
+    tassert(11282982, "Missing foreignNss", _foreignNss);
 
     // If no pipeline is specified or the local/foreignField syntax was used, then assume that we're
     // reading directly from the collection.
@@ -611,16 +620,18 @@ DocumentSource::GetModPathsReturn DocumentSourceLookUp::getModifiedPaths() const
     OrderedPathSet modifiedPaths{_as.fullPath()};
     if (_unwindSrc) {
         auto pathsModifiedByUnwind = _unwindSrc->getModifiedPaths();
-        invariant(pathsModifiedByUnwind.type == GetModPathsReturn::Type::kFiniteSet);
+        tassert(11282981,
+                "Expecting $unwind to modify a finite set of paths",
+                pathsModifiedByUnwind.type == GetModPathsReturn::Type::kFiniteSet);
         modifiedPaths.insert(pathsModifiedByUnwind.paths.begin(),
                              pathsModifiedByUnwind.paths.end());
     }
     return {GetModPathsReturn::Type::kFiniteSet, std::move(modifiedPaths), {}};
 }
 
-DocumentSourceContainer::iterator DocumentSourceLookUp::doOptimizeAt(
+DocumentSourceContainer::iterator DocumentSourceLookUp::optimizeAt(
     DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
-    invariant(*itr == this);
+    tassert(11282980, "Expecting DocumentSource iterator pointing to this stage", *itr == this);
 
     if (std::next(itr) == container->end()) {
         return container->end();
@@ -941,7 +952,9 @@ void DocumentSourceLookUp::serializeToArray(std::vector<Value>& array,
 DepsTracker::State DocumentSourceLookUp::getDependencies(DepsTracker* deps) const {
     if (hasPipeline() || _letVariables.size() > 0) {
         // We will use the introspection pipeline which we prebuilt during construction.
-        invariant(_sharedState->resolvedIntrospectionPipeline);
+        tassert(11282979,
+                "Expecting introspection pipeline prebuilt",
+                _sharedState->resolvedIntrospectionPipeline);
 
         DepsTracker subDeps;
 

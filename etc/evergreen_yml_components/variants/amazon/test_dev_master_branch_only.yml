@@ -366,7 +366,7 @@ buildvariants:
       <<: *amazon_linux2023_arm64_all_feature_flags_dynamic_expansions
       test_flags: >-
         --runAllFeatureFlagTests
-        --mongodSetParameters="{storageEngineConcurrencyAdjustmentAlgorithm: fixedConcurrentTransactionsWithPrioritization}"
+        --mongodSetParameters="{executionControlConcurrencyAdjustmentAlgorithm: fixedConcurrentTransactionsWithPrioritization}"
         --excludeWithAnyTags=incompatible_with_execution_control_with_prioritization,incompatible_with_amazon_linux,requires_ldap_pool,requires_external_data_source,incompatible_with_atlas_environment
     tasks:
       - name: .development_critical !.requires_large_host !.requires_compile_variant !.incompatible_development_variant !.incompatible_all_feature_flags !.suggested_excluding_required__for_devprod_mitigation_only !.requires_all_feature_flags !.multiversion
@@ -408,11 +408,12 @@ buildvariants:
     tags: ["required"]
     activate: true
     run_on:
-      - amazon2023.3-arm64-large
+      - amazon2023.3-arm64-m6g-4xlarge
     expansions:
       build_timeout_seconds: 900
       bazel_compile_flags: >-
         --define=MONGO_DISTMOD=amazon2023
+        --release=True
         --dbg_level=1
         --separate_debug=False
       evergreen_remote_exec: on
@@ -446,8 +447,8 @@ buildvariants:
     # here should be duplicated to
     # enterprise-amazon-linux2023-arm64-all-feature-flags-required-query-patch-only.
     tasks: &query-alias-task-list
-      - name: .assigned_to_jira_team_server_query_execution !.requires_large_host !.aggfuzzer !.query_fuzzer !.updatefuzzer !.jstestfuzz !.benchmarks !.blocked_in_query_alias !.requires_all_feature_flags
-      - name: .assigned_to_jira_team_server_query_execution .requires_large_host !.aggfuzzer !.query_fuzzer !.updatefuzzer !.jstestfuzz !.benchmarks !.blocked_in_query_alias !.requires_all_feature_flags
+      - name: .assigned_to_jira_team_server_query_execution !.requires_large_host !.aggfuzzer !.query_fuzzer !.updatefuzzer !.jstestfuzz !.benchmarks !.blocked_in_query_alias !.requires_all_feature_flags !.uwe
+      - name: .assigned_to_jira_team_server_query_execution .requires_large_host !.aggfuzzer !.query_fuzzer !.updatefuzzer !.jstestfuzz !.benchmarks !.blocked_in_query_alias !.requires_all_feature_flags !.uwe
         distros:
           - amazon2023-arm64-atlas-latest-m8g-4xlarge
       - name: .assigned_to_jira_team_server_query_optimization !.requires_large_host !.aggfuzzer !.query_fuzzer !.updatefuzzer !.change_stream_fuzzer !.jstestfuzz !.benchmarks !.blocked_in_query_alias !.requires_all_feature_flags
@@ -534,8 +535,8 @@ buildvariants:
         --excludeWithAnyTags=resource_intensive
     # This set of tasks is duplicated from amazon_linux2023_arm64_static-classic-engine-query-patch-only.
     tasks:
-      - name: .assigned_to_jira_team_server_query_execution !.requires_large_host !.aggfuzzer !.query_fuzzer !.updatefuzzer !.jstestfuzz !.benchmarks !.blocked_in_query_alias
-      - name: .assigned_to_jira_team_server_query_execution .requires_large_host !.aggfuzzer !.query_fuzzer !.updatefuzzer !.jstestfuzz !.benchmarks !.blocked_in_query_alias
+      - name: .assigned_to_jira_team_server_query_execution !.requires_large_host !.aggfuzzer !.query_fuzzer !.updatefuzzer !.jstestfuzz !.benchmarks !.blocked_in_query_alias !.uwe
+      - name: .assigned_to_jira_team_server_query_execution .requires_large_host !.aggfuzzer !.query_fuzzer !.updatefuzzer !.jstestfuzz !.benchmarks !.blocked_in_query_alias !.uwe
         distros:
           - amazon2023-arm64-atlas-latest-m8g-4xlarge
       - name: .assigned_to_jira_team_server_query_optimization !.requires_large_host !.aggfuzzer !.query_fuzzer !.updatefuzzer !.change_stream_fuzzer !.jstestfuzz !.benchmarks !.blocked_in_query_alias

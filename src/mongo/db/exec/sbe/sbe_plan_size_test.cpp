@@ -50,7 +50,6 @@
 #include "mongo/db/exec/sbe/stages/scan.h"
 #include "mongo/db/exec/sbe/stages/sort.h"
 #include "mongo/db/exec/sbe/stages/sorted_merge.h"
-#include "mongo/db/exec/sbe/stages/spool.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/exec/sbe/stages/union.h"
 #include "mongo/db/exec/sbe/stages/unique.h"
@@ -60,7 +59,6 @@
 #include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/unittest/unittest.h"
-#include "mongo/util/id_generator.h"
 #include "mongo/util/uuid.h"
 
 #include <cstddef>
@@ -286,25 +284,6 @@ TEST_F(PlanSizeTest, Scan) {
     assertPlanSize(*stage);
 }
 
-TEST_F(PlanSizeTest, ParallelScan) {
-    auto collUuid = UUID::parse("00000000-0000-0000-0000-000000000000").getValue();
-    auto stage =
-        makeS<sbe::ParallelScanStage>(collUuid,
-                                      DatabaseName(),
-                                      generateSlotId() /* recordSlot */,
-                                      generateSlotId() /* recordIdSlot */,
-                                      generateSlotId() /* snapshotIdSlot */,
-                                      generateSlotId() /* indexIdSlot */,
-                                      generateSlotId() /* indexKeySlot */,
-                                      generateSlotId() /* indexKeyPatternSlot */,
-                                      std::vector<std::string>{"field"} /* scanFieldNames */,
-                                      mockSV() /* scanFieldSlots */,
-                                      nullptr /* yieldPolicy */,
-                                      kEmptyPlanNodeId /* nodeId */,
-                                      ScanCallbacks());
-    assertPlanSize(*stage);
-}
-
 TEST_F(PlanSizeTest, Sort) {
     auto stage =
         makeS<SortStage>(mockS(),
@@ -339,18 +318,6 @@ TEST_F(PlanSizeTest, SortedMerge) {
                                          std::move(inputVals),
                                          mockSV(),
                                          kEmptyPlanNodeId);
-    assertPlanSize(*stage);
-}
-
-TEST_F(PlanSizeTest, SpoolLazyProducer) {
-    auto stage = makeS<SpoolLazyProducerStage>(
-        mockS(), 1, mockSV(), nullptr /* yieldPolicy */, kEmptyPlanNodeId);
-    assertPlanSize(*stage);
-}
-
-TEST_F(PlanSizeTest, SpoolConsumer) {
-    auto stage =
-        makeS<SpoolConsumerStage<true>>(1, mockSV(), nullptr /* yieldPolicy */, kEmptyPlanNodeId);
     assertPlanSize(*stage);
 }
 

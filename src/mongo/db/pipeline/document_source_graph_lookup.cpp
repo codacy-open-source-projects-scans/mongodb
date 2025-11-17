@@ -44,6 +44,7 @@
 #include "mongo/db/query/allowed_contexts.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
+#include "mongo/db/raw_data_operation.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/topology/sharding_state.h"
 #include "mongo/util/namespace_string_util.h"
@@ -158,7 +159,9 @@ DocumentSource::GetModPathsReturn DocumentSourceGraphLookUp::getModifiedPaths() 
     OrderedPathSet modifiedPaths{getAsField().fullPath()};
     if (_unwind) {
         auto pathsModifiedByUnwind = _unwind.value()->getModifiedPaths();
-        invariant(pathsModifiedByUnwind.type == GetModPathsReturn::Type::kFiniteSet);
+        tassert(11294802,
+                "Expecting only finite set of paths modified by $unwind",
+                pathsModifiedByUnwind.type == GetModPathsReturn::Type::kFiniteSet);
         modifiedPaths.insert(pathsModifiedByUnwind.paths.begin(),
                              pathsModifiedByUnwind.paths.end());
     }
@@ -191,9 +194,9 @@ StageConstraints DocumentSourceGraphLookUp::constraints(PipelineSplitState pipeS
     return constraints;
 }
 
-DocumentSourceContainer::iterator DocumentSourceGraphLookUp::doOptimizeAt(
+DocumentSourceContainer::iterator DocumentSourceGraphLookUp::optimizeAt(
     DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
-    invariant(*itr == this);
+    tassert(11294801, "Expecting DocumentSource iterator pointing to this stage", *itr == this);
 
     if (std::next(itr) == container->end()) {
         return container->end();
@@ -313,8 +316,13 @@ DocumentSourceGraphLookUp::DocumentSourceGraphLookUp(
 
     // We append an additional BSONObj to '_fromPipeline' as a placeholder for the $match
     // stage we'll eventually construct from the input document.
-    _fromPipeline.reserve(resolvedNamespace.pipeline.size() + 1);
-    _fromPipeline = resolvedNamespace.pipeline;
+    if (!isRawDataOperation(expCtx->getOperationContext()) ||
+        !resolvedNamespace.ns.isTimeseriesBucketsCollection()) {
+        _fromPipeline.reserve(resolvedNamespace.pipeline.size() + 1);
+        _fromPipeline = resolvedNamespace.pipeline;
+    } else {
+        _fromPipeline.reserve(1);
+    }
     _fromPipeline.push_back(BSON("$match" << BSONObj()));
 }
 

@@ -153,19 +153,28 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    std::vector<std::shared_ptr<const IndexCatalogEntry>> getAllReadyEntriesShared()
-        const override {
-        return {};
+    std::vector<std::shared_ptr<const IndexCatalogEntry>> getEntriesShared(
+        InclusionPolicy inclusionPolicy) const override {
+        return {_indexEntries.begin(), _indexEntries.end()};
     }
 
     class IteratorMock : public IndexIterator {
+    public:
+        IteratorMock(IndexCatalogEntryContainer::const_iterator beginIt,
+                     IndexCatalogEntryContainer::const_iterator endIt)
+            : _it(beginIt), _endIt(endIt) {}
+
+    private:
         const IndexCatalogEntry* _advance() override {
-            return nullptr;
+            return _it == _endIt ? nullptr : _it++->get();
         }
+
+        IndexCatalogEntryContainer::const_iterator _it;
+        IndexCatalogEntryContainer::const_iterator _endIt;
     };
 
     std::unique_ptr<IndexIterator> getIndexIterator(InclusionPolicy) const override {
-        return std::make_unique<IteratorMock>();
+        return std::make_unique<IteratorMock>(_indexEntries.begin(), _indexEntries.end());
     }
 
     IndexCatalogEntry* createIndexEntry(OperationContext* opCtx,
