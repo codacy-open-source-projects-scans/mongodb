@@ -74,11 +74,13 @@ QueryKnobConfiguration::QueryKnobConfiguration(const query_settings::QuerySettin
     _maxScansToExplodeValue = static_cast<size_t>(internalQueryMaxScansToExplode.loadRelaxed());
     _internalQuerySpillingMinAvailableDiskSpaceBytes =
         static_cast<int64_t>(internalQuerySpillingMinAvailableDiskSpaceBytes.loadRelaxed());
-    _internalQueryMaxNumExprFieldPathComponentsSupportedInSbe = static_cast<int64_t>(
-        internalQueryMaxNumExprFieldPathComponentsSupportedInSbe.loadRelaxed());
 
     _isJoinOrderingEnabled = internalEnableJoinOptimization.load();
+    _randomJoinReorderDefaultToHashJoin = internalRandomJoinReorderDefaultToHashJoin.load();
     _randomJoinOrderSeed = internalRandomJoinOrderSeed.load();
+    _joinReorderMode = ServerParameterSet::getNodeParameterSet()
+                           ->get<JoinReorderMode>("internalJoinReorderMode")
+                           ->_data.get();
 }
 
 QueryFrameworkControlEnum QueryKnobConfiguration::getInternalQueryFrameworkControlForOp() const {
@@ -103,6 +105,14 @@ size_t QueryKnobConfiguration::getRandomJoinOrderSeed() const {
 
 bool QueryKnobConfiguration::isJoinOrderingEnabled() const {
     return _isJoinOrderingEnabled;
+}
+
+bool QueryKnobConfiguration::getRandomJoinReorderDefaultToHashJoin() const {
+    return _randomJoinReorderDefaultToHashJoin;
+}
+
+JoinReorderModeEnum QueryKnobConfiguration::getJoinReorderMode() const {
+    return _joinReorderMode;
 }
 
 double QueryKnobConfiguration::getSamplingMarginOfError() const {
@@ -168,11 +178,6 @@ bool QueryKnobConfiguration::canPushDownFullyCompatibleStages() const {
 
 int64_t QueryKnobConfiguration::getInternalQuerySpillingMinAvailableDiskSpaceBytes() const {
     return _internalQuerySpillingMinAvailableDiskSpaceBytes;
-}
-
-int64_t QueryKnobConfiguration::getInternalQueryMaxNumExprFieldPathComponentsSupportedInSbe()
-    const {
-    return _internalQueryMaxNumExprFieldPathComponentsSupportedInSbe;
 }
 
 }  // namespace mongo

@@ -73,7 +73,9 @@ public:
      * Query knobs configuring join reordering.
      */
     bool isJoinOrderingEnabled() const;
+    bool getRandomJoinReorderDefaultToHashJoin() const;
     size_t getRandomJoinOrderSeed() const;
+    JoinReorderModeEnum getJoinReorderMode() const;
 
     /**
      * Returns whether we can push down fully compatible stages to sbe. This is only true when the
@@ -82,7 +84,6 @@ public:
     bool canPushDownFullyCompatibleStages() const;
 
     int64_t getInternalQuerySpillingMinAvailableDiskSpaceBytes() const;
-    int64_t getInternalQueryMaxNumExprFieldPathComponentsSupportedInSbe() const;
 
 private:
     QueryFrameworkControlEnum _queryFrameworkControlValue;
@@ -100,9 +101,13 @@ private:
     bool _sbeDisableGroupPushdownValue;
     bool _sbeDisableLookupPushdownValue;
     bool _sbeDisableTimeSeriesValue;
+
+    // Join-ordering values.
     bool _isJoinOrderingEnabled;
+    bool _randomJoinReorderDefaultToHashJoin;
     int64_t _randomJoinOrderSeed;
+    JoinReorderModeEnum _joinReorderMode;
+
     int64_t _internalQuerySpillingMinAvailableDiskSpaceBytes;
-    int64_t _internalQueryMaxNumExprFieldPathComponentsSupportedInSbe;
 };
 }  // namespace mongo

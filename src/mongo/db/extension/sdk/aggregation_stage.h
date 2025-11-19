@@ -433,9 +433,12 @@ private:
 class ExecAggStage {
 public:
     virtual ~ExecAggStage() = default;
-
-    virtual ExtensionGetNextResult getNext(const QueryExecutionContextHandle& execCtx,
-                                           const MongoExtensionExecAggStage* execStage) = 0;
+    // TODO SERVER-113905: once we support metadata, we should only support returning both
+    // document and metadata.
+    virtual ExtensionGetNextResult getNext(
+        const QueryExecutionContextHandle& execCtx,
+        const MongoExtensionExecAggStage* execStage,
+        ::MongoExtensionGetNextRequestType requestType = kDocumentOnly) = 0;
 
     std::string_view getName() const {
         return _name;
@@ -451,10 +454,6 @@ public:
     virtual void reopen() = 0;
 
     virtual void close() = 0;
-
-    virtual void attach(::MongoExtensionOpCtx* ctx) = 0;
-
-    virtual void detach() = 0;
 
 protected:
     ExecAggStage(std::string_view name) : _name(name) {}
@@ -595,17 +594,6 @@ private:
             [&]() { static_cast<ExtensionExecAggStage*>(execAggStage)->getImpl().close(); });
     }
 
-    static ::MongoExtensionStatus* _extAttach(::MongoExtensionExecAggStage* execAggStage,
-                                              ::MongoExtensionOpCtx* ctx) noexcept {
-        return wrapCXXAndConvertExceptionToStatus(
-            [&]() { static_cast<ExtensionExecAggStage*>(execAggStage)->getImpl().attach(ctx); });
-    }
-
-    static ::MongoExtensionStatus* _extDetach(::MongoExtensionExecAggStage* execAggStage) noexcept {
-        return wrapCXXAndConvertExceptionToStatus(
-            [&]() { static_cast<ExtensionExecAggStage*>(execAggStage)->getImpl().detach(); });
-    }
-
     static constexpr ::MongoExtensionExecAggStageVTable VTABLE = {.destroy = &_extDestroy,
                                                                   .get_next = &_extGetNext,
                                                                   .get_name = &_extGetName,
@@ -613,9 +601,7 @@ private:
                                                                       &_extCreateMetrics,
                                                                   .open = &_extOpen,
                                                                   .reopen = &_extReopen,
-                                                                  .close = &_extClose,
-                                                                  .attach = &_extAttach,
-                                                                  .detach = &_extDetach};
+                                                                  .close = &_extClose};
     std::unique_ptr<ExecAggStage> _execAggStage;
 };
 

@@ -132,8 +132,9 @@ void checkOplogFormatVersion(WiredTigerRecoveryUnit& ru, const std::string& uri)
 }
 
 void appendNumericStats(WiredTigerSession& s, const std::string& uri, BSONObjBuilder& bob) {
-    Status status =
-        WiredTigerUtil::exportTableToBSON(s, "statistics:" + uri, "statistics=(fast)", bob);
+    std::stringstream ss;
+    ss << "statistics=(" << wiredTigerGlobalOptions.statisticsSetting << ")";
+    Status status = WiredTigerUtil::exportTableToBSON(s, "statistics:" + uri, ss.str(), bob);
     if (!status.isOK()) {
         bob.append("error", "unable to retrieve statistics");
         bob.append("code", static_cast<int>(status.code()));
@@ -521,7 +522,12 @@ StatusWith<int64_t> WiredTigerRecordStore::wtCompact(OperationContext* opCtx,
 class WiredTigerRecordStore::RandomCursor final : public RecordCursor {
 public:
     RandomCursor(OperationContext* opCtx, RecoveryUnit& ru, const WiredTigerRecordStore& rs)
-        : _cursor(nullptr), _opCtx(opCtx), _ru(&ru), _rs(rs) {
+        : _cursor(nullptr),
+          _keyFormat(rs.keyFormat()),
+          _uri(rs.getURI()),
+          _opCtx(opCtx),
+          _ru(&ru),
+          _tableId(rs.tableId()) {
         restore(ru);
     }
 
@@ -537,7 +543,7 @@ public:
         invariantWTOK(advanceRet, *_cursor->getSession());
 
         RecordId id;
-        if (_rs.keyFormat() == KeyFormat::String) {
+        if (_keyFormat == KeyFormat::String) {
             WiredTigerItem item;
             invariantWTOK(_cursor->get()->get_key(_cursor->get(), &item), *_cursor->getSession());
             id = RecordId(item);
@@ -568,9 +574,9 @@ public:
 
         if (!_cursor) {
             auto cursorParams = getWiredTigerCursorParams(
-                wtRu, _rs.tableId(), false /* allowOverwrite */, true /* random */);
+                wtRu, _tableId, false /* allowOverwrite */, true /* random */);
             _cursor = std::make_unique<WiredTigerCursor>(
-                std::move(cursorParams), _rs.getURI(), *wtRu.getSession());
+                std::move(cursorParams), _uri, *wtRu.getSession());
         }
         return true;
     }
@@ -594,9 +600,11 @@ public:
 
 private:
     std::unique_ptr<WiredTigerCursor> _cursor;
+    KeyFormat _keyFormat;
+    const std::string _uri;
     OperationContext* _opCtx;
     RecoveryUnit* _ru;
-    const WiredTigerRecordStore& _rs;
+    const uint64_t _tableId;
     bool _saveStorageCursorOnDetachFromOperationContext = false;
 };
 
@@ -1290,20 +1298,8 @@ void WiredTigerRecordStore::_changeNumRecordsAndDataSize(RecoveryUnit& ru,
     updateAndStoreSizeInfo(numRecordDiff, dataSizeDiff);
 }
 
-void WiredTigerRecordStore::setNumRecords(long long numRecords) {
+void WiredTigerRecordStore::setSize(long long numRecords, long long dataSize) {
     _sizeInfo->numRecords.store(std::max(numRecords, 0ll));
-
-    if (!_sizeStorer) {
-        return;
-    }
-
-    // Flush the updated number of records to disk immediately.
-    _sizeStorer->store(getURI(), _sizeInfo);
-    bool syncToDisk = true;
-    _sizeStorer->flush(syncToDisk);
-}
-
-void WiredTigerRecordStore::setDataSize(long long dataSize) {
     _sizeInfo->dataSize.store(std::max(dataSize, 0ll));
 
     if (!_sizeStorer) {
@@ -1646,16 +1642,20 @@ WiredTigerRecordStoreCursorBase::WiredTigerRecordStoreCursorBase(OperationContex
                                                                  RecoveryUnit& ru,
                                                                  const WiredTigerRecordStore& rs,
                                                                  bool forward)
-    : _opCtx(opCtx),
+    : _tableId(rs.tableId()),
+      _opCtx(opCtx),
       _ru(&ru),
-      _rs(rs),
+      _uri(rs.getURI()),
+      _ident(rs.getIdent()),
+      _keyFormat(rs.keyFormat()),
       _forward(forward),
+      _uuid(rs.uuid()),
       _assertOutOfOrderForTest(MONGO_unlikely(WTRecordStoreUassertOutOfOrder.shouldFail())) {}
 
 void WiredTigerRecordStoreCursorBase::init() {
     auto& wtRu = WiredTigerRecoveryUnit::get(*_ru);
-    auto cursorParams = getWiredTigerCursorParams(wtRu, _rs.tableId(), true /* allowOverwrite */);
-    _cursor.emplace(std::move(cursorParams), _rs.getURI(), *wtRu.getSession());
+    auto cursorParams = getWiredTigerCursorParams(wtRu, _tableId, true /* allowOverwrite */);
+    _cursor.emplace(std::move(cursorParams), _uri, *wtRu.getSession());
 }
 
 boost::optional<Record> WiredTigerRecordStoreCursorBase::next() {
@@ -1697,9 +1697,9 @@ RecordId WiredTigerRecordStoreCursorBase::nextIdCommon() {
             return {};
         }
         invariantWTOK(advanceRet, c->session);
-        id = getKey(c, _rs.keyFormat());
+        id = getKey(c, _keyFormat);
     } else if (!id.isValid()) {
-        id = getKey(c, _rs.keyFormat());
+        id = getKey(c, _keyFormat);
     }
 
     _positioned = true;
@@ -1730,8 +1730,8 @@ void WiredTigerRecordStoreCursorBase::reportOutOfOrderRead(const RecordId& id,
                         "forward"_attr = _forward,
                         "next"_attr = id,
                         "last"_attr = _lastReturnedId,
-                        "ident"_attr = _rs.getIdent(),
-                        "uuid"_attr = _rs.uuid());
+                        "ident"_attr = _ident,
+                        "uuid"_attr = _uuid);
 }
 
 void WiredTigerRecordStoreCursorBase::checkOrder(const RecordId& id) const {
@@ -1783,7 +1783,7 @@ RecordId WiredTigerRecordStoreCursorBase::seekIdCommon(const RecordId& start,
     }
 
     WT_CURSOR* c = _cursor->get();
-    WiredTigerRecordStore::CursorKey key = makeCursorKey(start, _rs.keyFormat());
+    WiredTigerRecordStore::CursorKey key = makeCursorKey(start, _keyFormat);
     setKey(c, &key);
 
     auto const& config = _forward
@@ -1807,7 +1807,7 @@ RecordId WiredTigerRecordStoreCursorBase::seekIdCommon(const RecordId& start,
 
     _positioned = true;
     _eof = false;
-    return getKey(c, _rs.keyFormat());
+    return getKey(c, _keyFormat);
 }
 
 boost::optional<Record> WiredTigerRecordStoreCursorBase::seekExact(const RecordId& id) {
@@ -1831,7 +1831,7 @@ boost::optional<Record> WiredTigerRecordStoreCursorBase::seekExactCommon(const R
         _boundSet = false;
     }
 
-    auto key = makeCursorKey(id, _rs.keyFormat());
+    auto key = makeCursorKey(id, _keyFormat);
     setKey(c, &key);
     // Nothing after the next line can throw WCEs.
     int seekRet = wiredTigerPrepareConflictRetry(
@@ -1867,9 +1867,8 @@ bool WiredTigerRecordStoreCursorBase::restore(RecoveryUnit& ru, bool tolerateCap
 
     if (!_cursor) {
         auto& wtRu = WiredTigerRecoveryUnit::get(*_ru);
-        auto cursorParams =
-            getWiredTigerCursorParams(wtRu, _rs.tableId(), true /* allowOverwrite */);
-        _cursor.emplace(std::move(cursorParams), _rs.getURI(), *wtRu.getSession());
+        auto cursorParams = getWiredTigerCursorParams(wtRu, _tableId, true /* allowOverwrite */);
+        _cursor.emplace(std::move(cursorParams), _uri, *wtRu.getSession());
     }
 
     // This will ensure an active session exists, so any restored cursors will bind to it
@@ -1978,9 +1977,8 @@ bool WiredTigerCappedCursorBase::restore(RecoveryUnit& ru, bool tolerateCappedRe
 
     if (!_cursor) {
         auto& wtRu = WiredTigerRecoveryUnit::get(*_ru);
-        auto cursorParams =
-            getWiredTigerCursorParams(wtRu, _rs.tableId(), true /* allowOverwrite */);
-        _cursor.emplace(std::move(cursorParams), _rs.getURI(), *wtRu.getSession());
+        auto cursorParams = getWiredTigerCursorParams(wtRu, _tableId, true /* allowOverwrite */);
+        _cursor.emplace(std::move(cursorParams), _uri, *wtRu.getSession());
     }
 
     initVisibility();
@@ -2103,7 +2101,7 @@ boost::optional<Record> WiredTigerOplogCursor::next() {
                 return {};
             }
             invariantWTOK(advanceRet, cur->session);
-            id = getKey(cur, _rs.keyFormat());
+            id = getKey(cur, _keyFormat);
         }
     }
 

@@ -52,6 +52,7 @@
 #include "mongo/db/validate/validate_results.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
 #include <cstddef>
@@ -237,14 +238,9 @@ public:
     }
 
     /**
-     * Sets the new number of records and flushes the size storer.
+     * Sets the new number of records and data size, and flushes the size storer.
      */
-    void setNumRecords(long long numRecords);
-
-    /**
-     * Sets the new data size and flushes the size storer.
-     */
-    void setDataSize(long long dataSize);
+    void setSize(long long numRecords, long long dataSize) override;
 
     RecordStore::RecordStoreContainer getContainer() override;
 
@@ -544,12 +540,16 @@ protected:
      */
     boost::optional<Record> seekExactCommon(const RecordId& id);
 
+    const uint64_t _tableId;
     RecordId _lastReturnedId;  // If null, need to seek to first/last record.
     OperationContext* _opCtx;
     RecoveryUnit* _ru;
-    const WiredTigerRecordStore& _rs;
+    const std::string _uri;
+    const std::string _ident;
     boost::optional<WiredTigerCursor> _cursor;
+    const KeyFormat _keyFormat;
     const bool _forward;
+    const boost::optional<UUID> _uuid;
     bool _skipNextAdvance = false;
     bool _eof = false;
     bool _hasRestored = true;

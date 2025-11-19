@@ -2378,11 +2378,10 @@ public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& spec,
                                                  const LiteParserOptions& options) {
-            return std::make_unique<LiteParsed>(spec.fieldName());
+            return std::make_unique<LiteParsed>(spec);
         }
 
-        LiteParsed(std::string parseTimeName)
-            : LiteParsedDocumentSource(std::move(parseTimeName)) {}
+        LiteParsed(const BSONElement& spec) : LiteParsedDocumentSource(spec) {}
 
         stdx::unordered_set<NamespaceString> getInvolvedNamespaces() const final {
             return {};
@@ -2455,11 +2454,11 @@ public:
         static std::unique_ptr<LiteParsedOptOut> parse(const NamespaceString& nss,
                                                        const BSONElement& spec,
                                                        const LiteParserOptions& options) {
-            return std::make_unique<LiteParsedOptOut>(spec.fieldName());
+            return std::make_unique<LiteParsedOptOut>(spec);
         }
 
-        LiteParsedOptOut(std::string parseTimeName)
-            : TestDocumentSourceNoPrivsWithAuthzChecks::LiteParsed(std::move(parseTimeName)) {}
+        LiteParsedOptOut(const BSONElement& spec)
+            : TestDocumentSourceNoPrivsWithAuthzChecks::LiteParsed(spec) {}
 
         // Opt-out
         bool requiresAuthzChecks() const override {
@@ -2498,7 +2497,7 @@ public:
         static std::unique_ptr<LiteParsedWithPrivs> parse(const NamespaceString& nss,
                                                           const BSONElement& spec,
                                                           const LiteParserOptions& options) {
-            return std::make_unique<LiteParsedWithPrivs>(spec.fieldName(), nss);
+            return std::make_unique<LiteParsedWithPrivs>(spec, nss);
         }
 
         // Includes authz checks
@@ -2507,8 +2506,8 @@ public:
             return {Privilege(ResourcePattern::forExactNamespace(_namespace), ActionType::find)};
         }
 
-        LiteParsedWithPrivs(std::string parseTimeName, NamespaceString nss)
-            : TestDocumentSourceNoPrivsWithAuthzChecks::LiteParsed(std::move(parseTimeName)),
+        LiteParsedWithPrivs(const BSONElement& spec, NamespaceString nss)
+            : TestDocumentSourceNoPrivsWithAuthzChecks::LiteParsed(spec),
               _namespace(std::move(nss)) {}
 
     private:
@@ -2532,8 +2531,9 @@ REGISTER_DOCUMENT_SOURCE(testWithPrivs,
                          AllowedWithApiStrict::kAlways);
 
 //  Multitenancy disabled
+using AuthorizationSessionTestDeathTest = AuthorizationSessionTest;
 DEATH_TEST_F(
-    AuthorizationSessionTest,
+    AuthorizationSessionTestDeathTest,
     AggStageFailsRequiresAuthzChecksWithNoPrivilegesAndNoOptOutMultitenancyDisabled,
     "Must specify authorization checks for this stage: $testNoPrivsWithAuthzChecks or manually "
     "opt out by overriding requiresAuthzChecks to false") {
@@ -2553,7 +2553,7 @@ DEATH_TEST_F(
 
 //  Multitenancy enabled
 DEATH_TEST_F(
-    AuthorizationSessionTest,
+    AuthorizationSessionTestDeathTest,
     AggStageFailsRequiresAuthzChecksWithNoPrivilegesAndNoOptOutMultitenancyEnabled,
     "Must specify authorization checks for this stage: $testNoPrivsWithAuthzChecks or manually "
     "opt out by overriding requiresAuthzChecks to false") {

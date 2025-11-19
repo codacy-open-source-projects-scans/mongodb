@@ -47,25 +47,21 @@ extern "C" {
  * Represents the API version of the MongoDB extension, to ensure compatibility between the MongoDB
  * server and the extension.
  *
- * The version is composed of three parts: major, minor, and patch. The major version is incremented
- * for incompatible changes, the minor version for for backward-compatible changes, and the patch
- * version for bug fixes.
+ * The version is composed of two parts: major and minor. The major version is incremented
+ * for incompatible changes and the minor version for for backward-compatible changes.
  */
 typedef struct {
     uint32_t major;
     uint32_t minor;
-    uint32_t patch;
 } MongoExtensionAPIVersion;
 
 #define MONGODB_EXTENSION_API_MAJOR_VERSION 0
 #define MONGODB_EXTENSION_API_MINOR_VERSION 0
-#define MONGODB_EXTENSION_API_PATCH_VERSION 0
 
 // The current API version of the MongoDB extension.
-#define MONGODB_EXTENSION_API_VERSION                                             \
-    MongoExtensionAPIVersion {                                                    \
-        MONGODB_EXTENSION_API_MAJOR_VERSION, MONGODB_EXTENSION_API_MINOR_VERSION, \
-            MONGODB_EXTENSION_API_PATCH_VERSION                                   \
+#define MONGODB_EXTENSION_API_VERSION                                            \
+    MongoExtensionAPIVersion {                                                   \
+        MONGODB_EXTENSION_API_MAJOR_VERSION, MONGODB_EXTENSION_API_MINOR_VERSION \
     }
 
 /**
@@ -572,6 +568,17 @@ typedef enum MongoExtensionGetNextResultCode : uint8_t {
 } MongoExtensionGetNextResultCode;
 
 /**
+ * MongoExtensionGetNextRequestType is an enum used to instruct an ExecAggStage on how to fetch the
+ * next results via getNext().
+ */
+typedef enum MongoExtensionGetNextRequestType : uint8_t {
+    kNone = 0,                 // getNext() requests nothing.
+    kDocumentOnly = 1,         // getNext() requests only document data.
+    kMetadataOnly = 2,         // getNext() requests only metadata.
+    kDocumentAndMetadata = 3,  // getNext() requests both document and metadata.
+} MongoExtensionGetNextRequestType;
+
+/**
  * MongoExtensionGetNextResult is a container used to fetch results from an
  * ExecutableStage's get_next() function. Callers of ExecutableStage::get_next() are responsible for
  * instantiating this struct and passing the corresponding pointer to the function invocation.
@@ -580,14 +587,6 @@ typedef struct MongoExtensionGetNextResult {
     MongoExtensionGetNextResultCode code;
     MongoExtensionByteBuf* result;
 } MongoExtensionGetNextResult;
-
-/**
- * MongoExtensionOpCtx represents an OperationContext that can be attached to an execution stage.
- * The vtable is a placeholder for now but will be properly implemented in the future.
- */
-typedef struct MongoExtensionOpCtx {
-    void* const vtable;
-} MongoExtensionOpCtx;
 
 /**
  * MongoExtensionExecAggStage is the abstraction representing the executable phase of
@@ -649,24 +648,6 @@ typedef struct MongoExtensionExecAggStageVTable {
      * Frees all acquired resources.
      */
     MongoExtensionStatus* (*close)(MongoExtensionExecAggStage* execAggStage);
-
-    /**
-     * Attaches an OperationContext to the execution stage. The OperationContext is guaranteed to be
-     * valid until detach() is called.
-     *
-     * This function is added here to future-proof the API. A no-op implementation must be provided
-     * for the time being.
-     */
-    MongoExtensionStatus* (*attach)(MongoExtensionExecAggStage* execAggStage,
-                                    MongoExtensionOpCtx* ctx);
-
-    /**
-     * Detaches an OperationContext from the execution stage.
-     *
-     * This function is added here to future-proof the API. A no-op implementation must be provided
-     * for the time being.
-     */
-    MongoExtensionStatus* (*detach)(MongoExtensionExecAggStage* execAggStage);
 } MongoExtensionExecAggStageVTable;
 
 /**

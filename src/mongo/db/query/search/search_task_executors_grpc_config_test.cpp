@@ -27,30 +27,27 @@
  *    it in the license file.
  */
 
-#pragma once
+#include "mongo/base/error_codes.h"
+#include "mongo/db/query/search/mongot_options.h"
+#include "mongo/db/query/search/search_task_executors.h"
+#include "mongo/db/service_context.h"
+#include "mongo/unittest/unittest.h"
 
-#include "mongo/base/string_data.h"
-#include "mongo/db/exec/agg/stage.h"
-#include "mongo/db/exec/shard_filterer.h"
-#include "mongo/db/pipeline/expression_context.h"
-#include "mongo/util/modules.h"
+namespace mongo {
+namespace {
 
-#include <memory>
+TEST(SearchTaskExecutors, UassertsWhenGrpcEnabledWithoutGrpcSupport) {
+#ifndef MONGO_CONFIG_GRPC
+    const bool oldUseGrpc = globalMongotParams.useGRPC;
+    globalMongotParams.useGRPC = true;
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+    ASSERT_THROWS_CODE(ServiceContext::make(), DBException, ErrorCodes::InvalidOptions);
 
-namespace mongo::exec::agg {
+    globalMongotParams.useGRPC = oldUseGrpc;
+#endif
+}
 
-class InternalShardFilterStage final : public Stage {
-public:
-    InternalShardFilterStage(StringData stageName,
-                             const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                             const std::shared_ptr<ShardFilterer>& shardFilterer);
+}  // namespace
+}  // namespace mongo
 
-private:
-    GetNextResult doGetNext() override;
 
-    std::shared_ptr<ShardFilterer> _shardFilterer;
-};
-
-}  // namespace mongo::exec::agg

@@ -65,7 +65,8 @@ TEST_F(VersionContextDecorationTest, ScopedSetDecoration) {
     ASSERT_EQ(VersionContext{}, VersionContext::getDecoration(opCtx));
 }
 
-DEATH_TEST_F(VersionContextDecorationTest,
+using VersionContextDecorationTestDeathTest = VersionContextDecorationTest;
+DEATH_TEST_F(VersionContextDecorationTestDeathTest,
              ScopedSetDecorationRecursive,
              "Refusing to set a VersionContext on an operation that already has one") {
     VersionContext::ScopedSetDecoration scopedVCtx(opCtx, kLastLTSVersionContext);
@@ -84,6 +85,17 @@ TEST_F(VersionContextDecorationTest, FixedOperationFCVRegion) {
 
     // No OFCV after `FixedOperationFCVRegion` gets out of scope
     ASSERT_EQ(VersionContext{}, VersionContext::getDecoration(opCtx));
+}
+
+
+TEST_F(VersionContextDecorationTest, FixedOperationFCVRegionWithUninitializedFCV) {
+    // (Generic FCV reference): used for testing
+    serverGlobalParams.mutableFCV.setVersion(
+        multiversion::FeatureCompatibilityVersion::kUnsetDefaultLastLTSBehavior);
+    VersionContext::FixedOperationFCVRegion fixedOperationFcvRegion(opCtx);
+    ASSERT_EQ(
+        VersionContext{multiversion::FeatureCompatibilityVersion::kUnsetDefaultLastLTSBehavior},
+        VersionContext::getDecoration(opCtx));
 }
 
 TEST_F(VersionContextDecorationTest, FixedOperationFCVRegionReentrancy) {

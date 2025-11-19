@@ -58,7 +58,8 @@ public:
     NoOpExecAggStage() : sdk::ExecAggStage(kNoOpName) {}
 
     ExtensionGetNextResult getNext(const QueryExecutionContextHandle& execCtx,
-                                   const MongoExtensionExecAggStage* execStage) override {
+                                   const MongoExtensionExecAggStage* execStage,
+                                   ::MongoExtensionGetNextRequestType requestType) override {
         return ExtensionGetNextResult::pauseExecution();
     }
 
@@ -67,10 +68,6 @@ public:
     void reopen() override {}
 
     void close() override {}
-
-    void attach(::MongoExtensionOpCtx* /*ctx*/) override {}
-
-    void detach() override {}
 };
 
 class NoOpLogicalAggStage : public sdk::LogicalAggStage {
@@ -157,7 +154,8 @@ public:
     SourceExecAggStage() : sdk::ExecAggStage(kSourceName) {}
 
     ExtensionGetNextResult getNext(const sdk::QueryExecutionContextHandle& execCtx,
-                                   const MongoExtensionExecAggStage* execStage) override {
+                                   const MongoExtensionExecAggStage* execStage,
+                                   ::MongoExtensionGetNextRequestType requestType) override {
         if (_currentIndex >= _documents.size()) {
             return ExtensionGetNextResult::eof();
         }
@@ -169,10 +167,6 @@ public:
     void reopen() override {}
 
     void close() override {}
-
-    void attach(::MongoExtensionOpCtx* /*ctx*/) override {}
-
-    void detach() override {}
 
 private:
     // Every SourceExecAggStage object will have access to the same test document suite.
@@ -714,8 +708,12 @@ public:
     SearchLikeSourceAggStageAstNode() : sdk::AggStageAstNode(kSearchLikeSourceStageName) {}
 
     BSONObj getProperties() const override {
-        return BSON("requiresInputDocSource" << false << "position" << "first" << "hostType"
-                                             << "anyShard");
+        return BSON("requiresInputDocSource"
+                    << false << "position" << "first" << "hostType"
+                    << "anyShard"
+                    << "requiredMetadataFields" << BSON_ARRAY("searchScore")
+                    << "providedMetadataFields" << BSON_ARRAY("searchScore" << "searchHighlights")
+                    << "preservesUpstreamMetadata" << false);
     }
 
     std::unique_ptr<sdk::LogicalAggStage> bind() const override {
@@ -1019,7 +1017,8 @@ public:
 
     extension::ExtensionGetNextResult getNext(
         const sdk::QueryExecutionContextHandle& execCtx,
-        const MongoExtensionExecAggStage* execStage) override {
+        const MongoExtensionExecAggStage* execStage,
+        ::MongoExtensionGetNextRequestType requestType) override {
         if (_results.empty()) {
             return extension::ExtensionGetNextResult::eof();
         }
@@ -1042,10 +1041,6 @@ public:
     void reopen() override {}
 
     void close() override {}
-
-    void attach(::MongoExtensionOpCtx* /*ctx*/) override {}
-
-    void detach() override {}
 
     static inline std::unique_ptr<extension::sdk::ExecAggStage> make() {
         return std::make_unique<ValidExtensionExecAggStage>();
@@ -1081,7 +1076,8 @@ public:
 class NoOpExtensionExecAggStage : public sdk::ExecAggStage {
 public:
     ExtensionGetNextResult getNext(const sdk::QueryExecutionContextHandle& expCtx,
-                                   const MongoExtensionExecAggStage* execStage) override {
+                                   const MongoExtensionExecAggStage* execStage,
+                                   ::MongoExtensionGetNextRequestType requestType) override {
         MONGO_UNIMPLEMENTED;
     }
 
@@ -1090,10 +1086,6 @@ public:
     void reopen() override {}
 
     void close() override {}
-
-    void attach(::MongoExtensionOpCtx* /*ctx*/) override {}
-
-    void detach() override {}
 
     static inline std::unique_ptr<sdk::ExecAggStage> make() {
         return std::unique_ptr<sdk::ExecAggStage>(new NoOpExtensionExecAggStage());

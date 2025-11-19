@@ -39,7 +39,6 @@
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
 #include "mongo/db/pipeline/catalog_resource_handle.h"
 #include "mongo/db/pipeline/document_source_cursor.h"
-#include "mongo/db/pipeline/document_source_internal_shard_filter.h"
 #include "mongo/db/pipeline/document_source_mock.h"
 #include "mongo/db/pipeline/document_source_project.h"
 #include "mongo/db/pipeline/expression_context.h"
@@ -90,7 +89,8 @@ TEST_F(InternalSearchIdLookupTest, TestSearchIdLookupMetricsGetLookupSuccessRate
     ASSERT_EQUALS(double(0.5), searchIdLookupMetrics.getIdLookupSuccessRate());
 }
 
-DEATH_TEST_F(InternalSearchIdLookupTest,
+using InternalSearchIdLookupTestDeathTest = InternalSearchIdLookupTest;
+DEATH_TEST_F(InternalSearchIdLookupTestDeathTest,
              TestSearchIdLookupMetricsGetLookupSuccessRateTAssert,
              "9074400") {
     // Check the (should be impossible) case where the number of documents
@@ -123,8 +123,7 @@ public:
                                                               expCtx->getNamespaceString(),
                                                               nullptr /*resolvedAggRequest*/,
                                                               pipeline.get(),
-                                                              cursorCatalogResourceHandle,
-                                                              AutomaticShardFiltering{});
+                                                              cursorCatalogResourceHandle);
 
         return pipeline;
     }

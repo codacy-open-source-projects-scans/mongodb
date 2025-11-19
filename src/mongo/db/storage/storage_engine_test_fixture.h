@@ -44,6 +44,7 @@
 #include "mongo/db/storage/storage_engine_impl.h"
 #include "mongo/db/storage/storage_repair_observer.h"
 #include "mongo/logv2/log.h"
+#include "mongo/util/modules.h"
 
 #include <boost/iterator/transform_iterator.hpp>
 
@@ -51,7 +52,7 @@
 
 namespace mongo {
 
-class StorageEngineTest : public ServiceContextMongoDTest {
+class MONGO_MOD_OPEN StorageEngineTest : public ServiceContextMongoDTest {
 public:
     explicit StorageEngineTest(Options options = {})
         : ServiceContextMongoDTest(std::move(options)),
@@ -119,8 +120,9 @@ public:
     Status createCollTable(OperationContext* opCtx, NamespaceString collName) {
         const std::string identName = _storageEngine->generateNewCollectionIdent(collName.dbName());
         auto& provider = rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider();
+        auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
         return _storageEngine->getEngine()->createRecordStore(
-            provider, collName, identName, RecordStore::Options{});
+            provider, ru, collName, identName, RecordStore::Options{});
     }
 
     Status dropIndexTable(OperationContext* opCtx, NamespaceString nss, StringData indexName) {
@@ -231,7 +233,7 @@ public:
     StorageEngine* _storageEngine;
 };
 
-class StorageEngineRepairTest : public StorageEngineTest {
+class MONGO_MOD_OPEN StorageEngineRepairTest : public StorageEngineTest {
 public:
     StorageEngineRepairTest() : StorageEngineTest(Options{}.enableRepair().inMemory(false)) {
         repl::StorageInterface::set(getServiceContext(),
@@ -254,7 +256,7 @@ public:
     }
 };
 
-class StorageEngineTestNotEphemeral : public StorageEngineTest {
+class MONGO_MOD_OPEN StorageEngineTestNotEphemeral : public StorageEngineTest {
 public:
     StorageEngineTestNotEphemeral() : StorageEngineTest(Options{}.inMemory(false)) {}
 };

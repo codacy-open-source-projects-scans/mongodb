@@ -30,13 +30,14 @@
 #pragma once
 
 #include "mongo/db/storage/storage_engine.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
 /**
  * Mock storage engine.
  */
-class StorageEngineMock : public StorageEngine {
+class MONGO_MOD_OPEN StorageEngineMock : public StorageEngine {
 public:
     std::unique_ptr<RecoveryUnit> newRecoveryUnit() final {
         return nullptr;
@@ -177,6 +178,9 @@ public:
                           const Timestamp& stableTimestamp,
                           StringData ident) final {}
     std::shared_ptr<Ident> markIdentInUse(StringData ident) final {
+        return nullptr;
+    }
+    TimestampMonitor* getTimestampMonitor() const final {
         return nullptr;
     }
     void startTimestampMonitor(

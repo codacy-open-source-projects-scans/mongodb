@@ -57,6 +57,7 @@
 #include "mongo/executor/task_executor.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/util/future.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/uuid.h"
 
@@ -82,7 +83,7 @@ namespace mongo {
  * accessible via the ServiceContext. It owns an IndexBuildsManager that manages all MultiIndexBlock
  * index builder instances.
  */
-class IndexBuildsCoordinator {
+class MONGO_MOD_PUBLIC IndexBuildsCoordinator {
 public:
     /**
      * Represents the set of different application modes used around building indexes that differ
@@ -548,7 +549,8 @@ private:
      * Sets up the in-memory and durable state of the index build.
      *
      * This function should only be called when in recovery mode, because the index tables are
-     * recreated.
+     * recreated. The caller should hold the necessary resources to prevent replication state
+     * transitions.
      */
     Status _startIndexBuildForRecovery(OperationContext* opCtx,
                                        CollectionWriter& collWriter,

@@ -65,7 +65,8 @@ public:
 
     mongo::extension::ExtensionGetNextResult getNext(
         const sdk::QueryExecutionContextHandle& execCtx,
-        const MongoExtensionExecAggStage* execStage) override {
+        const MongoExtensionExecAggStage* execStage,
+        ::MongoExtensionGetNextRequestType requestType) override {
         return mongo::extension::ExtensionGetNextResult::pauseExecution();
     }
 
@@ -74,10 +75,6 @@ public:
     void reopen() override {}
 
     void close() override {}
-
-    void attach(::MongoExtensionOpCtx* /*ctx*/) override {}
-
-    void detach() override {}
 };
 
 class ShapifyLogicalStage : public sdk::LogicalAggStage {

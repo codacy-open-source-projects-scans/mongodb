@@ -32,8 +32,8 @@
 
 namespace mongo::extension {
 
-ExtensionGetNextResult ExecAggStageHandle::getNext(
-    MongoExtensionQueryExecutionContext* execCtxPtr) {
+ExtensionGetNextResult ExecAggStageHandle::getNext(MongoExtensionQueryExecutionContext* execCtxPtr,
+                                                   ::MongoExtensionGetNextRequestType requestType) {
     ::MongoExtensionGetNextResult result{};
     invokeCAndConvertStatusToException(
         [&]() { return vtable().get_next(get(), execCtxPtr, &result); });
@@ -85,14 +85,6 @@ void ExecAggStageHandle::reopen() {
 
 void ExecAggStageHandle::close() {
     invokeCAndConvertStatusToException([&]() { return vtable().close(get()); });
-}
-
-void ExecAggStageHandle::attach(::MongoExtensionOpCtx* ctx) {
-    invokeCAndConvertStatusToException([&]() { return vtable().attach(get(), ctx); });
-}
-
-void ExecAggStageHandle::detach() {
-    invokeCAndConvertStatusToException([&]() { return vtable().detach(get()); });
 }
 
 }  // namespace mongo::extension

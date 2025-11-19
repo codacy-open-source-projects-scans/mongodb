@@ -99,7 +99,8 @@ class InvalidExtensionExecAggStageAdvancedState
 public:
     extension::ExtensionGetNextResult getNext(
         const QueryExecutionContextHandle& expCtx,
-        const MongoExtensionExecAggStage* execAggStage) override {
+        const MongoExtensionExecAggStage* execAggStage,
+        MongoExtensionGetNextRequestType requestType) override {
         return {.code = extension::GetNextCode::kAdvanced, .res = boost::none};
     }
 
@@ -108,10 +109,6 @@ public:
     void reopen() override {}
 
     void close() override {}
-
-    void attach(::MongoExtensionOpCtx* /*ctx*/) override {}
-
-    void detach() override {}
 
     static inline std::unique_ptr<extension::sdk::ExecAggStage> make() {
         return std::make_unique<InvalidExtensionExecAggStageAdvancedState>();
@@ -123,7 +120,8 @@ class InvalidExtensionExecAggStagePauseExecutionState
 public:
     extension::ExtensionGetNextResult getNext(
         const QueryExecutionContextHandle& expCtx,
-        const MongoExtensionExecAggStage* execAggStage) override {
+        const MongoExtensionExecAggStage* execAggStage,
+        MongoExtensionGetNextRequestType requestType) override {
         return {.code = extension::GetNextCode::kPauseExecution,
                 .res = boost::make_optional(BSON("$dog" << "I should not exist"))};
     }
@@ -134,10 +132,6 @@ public:
 
     void close() override {}
 
-    void attach(::MongoExtensionOpCtx* /*ctx*/) override {}
-
-    void detach() override {}
-
     static inline std::unique_ptr<extension::sdk::ExecAggStage> make() {
         return std::make_unique<InvalidExtensionExecAggStagePauseExecutionState>();
     }
@@ -147,7 +141,8 @@ class InvalidExtensionExecAggStageEofState : public shared_test_stages::NoOpExte
 public:
     extension::ExtensionGetNextResult getNext(
         const QueryExecutionContextHandle& expCtx,
-        const MongoExtensionExecAggStage* execAggStage) override {
+        const MongoExtensionExecAggStage* execAggStage,
+        MongoExtensionGetNextRequestType requestType) override {
         return {.code = extension::GetNextCode::kEOF,
                 .res = boost::make_optional(BSON("$dog" << "I should not exist"))};
     }
@@ -157,10 +152,6 @@ public:
     void reopen() override {}
 
     void close() override {}
-
-    void attach(::MongoExtensionOpCtx* /*ctx*/) override {}
-
-    void detach() override {}
 
     static inline std::unique_ptr<extension::sdk::ExecAggStage> make() {
         return std::make_unique<InvalidExtensionExecAggStageEofState>();
@@ -172,7 +163,8 @@ class InvalidExtensionExecAggStageGetNextCode
 public:
     extension::ExtensionGetNextResult getNext(
         const QueryExecutionContextHandle& expCtx,
-        const MongoExtensionExecAggStage* execAggStage) override {
+        const MongoExtensionExecAggStage* execAggStage,
+        MongoExtensionGetNextRequestType requestType) override {
         return {.code = static_cast<const GetNextCode>(10), .res = boost::none};
     }
 
@@ -181,10 +173,6 @@ public:
     void reopen() override {}
 
     void close() override {}
-
-    void attach(::MongoExtensionOpCtx* /*ctx*/) override {}
-
-    void detach() override {}
 
     static inline std::unique_ptr<extension::sdk::ExecAggStage> make() {
         return std::make_unique<InvalidExtensionExecAggStageGetNextCode>();
@@ -362,25 +350,6 @@ DEATH_TEST_F(ExecAggStageVTableDeathTest, InvalidExecAggStageVTableFailsClose, "
     handle.assertVTableConstraints(vtable);
 };
 
-DEATH_TEST_F(ExecAggStageVTableDeathTest, InvalidExecAggStageVTableFailsAttach, "11216708") {
-    auto noOpExecAggStage = new extension::sdk::ExtensionExecAggStage(
-        shared_test_stages::NoOpExtensionExecAggStage::make());
-    auto handle = TestExecAggStageVTableHandle{noOpExecAggStage};
-
-    auto vtable = handle.vtable();
-    vtable.attach = nullptr;
-    handle.assertVTableConstraints(vtable);
-};
-
-DEATH_TEST_F(ExecAggStageVTableDeathTest, InvalidExecAggStageVTableFailsDetach, "11216709") {
-    auto noOpExecAggStage = new extension::sdk::ExtensionExecAggStage(
-        shared_test_stages::NoOpExtensionExecAggStage::make());
-    auto handle = TestExecAggStageVTableHandle{noOpExecAggStage};
-
-    auto vtable = handle.vtable();
-    vtable.detach = nullptr;
-    handle.assertVTableConstraints(vtable);
-};
 
 DEATH_TEST_F(AggStageDeathTest, InvalidExtensionGetNextResultAdvanced, "10956801") {
     auto invalidExtensionExecAggStageAdvancedState = new extension::sdk::ExtensionExecAggStage(

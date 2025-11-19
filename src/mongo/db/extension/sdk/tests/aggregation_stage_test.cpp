@@ -273,6 +273,9 @@ TEST_F(AggStageTest, NoOpAstNodeWithDefaultGetPropertiesSucceeds) {
     ASSERT_EQ(props.getPosition(), MongoExtensionPositionRequirementEnum::kNone);
     ASSERT_EQ(props.getHostType(), MongoExtensionHostTypeRequirementEnum::kNone);
     ASSERT_EQ(props.getRequiresInputDocSource(), true);
+    ASSERT_FALSE(props.getRequiredMetadataFields().has_value());
+    ASSERT_FALSE(props.getProvidedMetadataFields().has_value());
+    ASSERT_TRUE(props.getPreservesUpstreamMetadata());
 }
 
 TEST_F(AggStageTest, NonePosAstNodeSucceeds) {
@@ -336,7 +339,20 @@ TEST_F(AggStageTest, SearchLikeSourceAggStageAstNodeSucceeds) {
     auto props = handle.getProperties();
     ASSERT_EQ(props.getPosition(), MongoExtensionPositionRequirementEnum::kFirst);
     ASSERT_EQ(props.getHostType(), MongoExtensionHostTypeRequirementEnum::kAnyShard);
-    ASSERT_EQ(props.getRequiresInputDocSource(), false);
+    ASSERT_FALSE(props.getRequiresInputDocSource());
+    ASSERT_FALSE(props.getPreservesUpstreamMetadata());
+
+    const auto requiredFields = props.getRequiredMetadataFields();
+    const auto providedFields = props.getProvidedMetadataFields();
+
+    ASSERT_TRUE(requiredFields.has_value());
+    ASSERT_EQ(requiredFields->size(), 1u);
+    ASSERT_EQ((*requiredFields)[0], "searchScore");
+
+    ASSERT_TRUE(providedFields.has_value());
+    ASSERT_EQ(providedFields->size(), 2u);
+    ASSERT_EQ((*providedFields)[0], "searchScore");
+    ASSERT_EQ((*providedFields)[1], "searchHighlights");
 }
 
 TEST_F(AggStageTest, BadRequiresInputDocSourceTypeAggStageAstNodeFails) {
@@ -824,7 +840,10 @@ public:
 
     extension::ExtensionGetNextResult getNext(
         const QueryExecutionContextHandle& expCtx,
-        const MongoExtensionExecAggStage* execAggStage) override {
+        const MongoExtensionExecAggStage* execAggStage,
+        MongoExtensionGetNextRequestType requestType) override {
+        // TODO SERVER-113905: once we support metadata, we should only support returning both
+        // document and metadata.
         if (_results.empty()) {
             return extension::ExtensionGetNextResult::eof();
         }
@@ -848,10 +867,6 @@ public:
 
     void close() override {}
 
-    void attach(::MongoExtensionOpCtx* /*ctx*/) override {}
-
-    void detach() override {}
-
     static inline std::unique_ptr<extension::sdk::ExecAggStage> make() {
         return std::make_unique<ValidExtensionExecAggStage>("$noOp");
     }
@@ -870,7 +885,10 @@ public:
     ResourceTrackingExecAggStage(std::string_view stageName) : ExecAggStage(stageName) {}
 
     ExtensionGetNextResult getNext(const QueryExecutionContextHandle& execCtx,
-                                   const MongoExtensionExecAggStage* execAggStage) override {
+                                   const MongoExtensionExecAggStage* execAggStage,
+                                   MongoExtensionGetNextRequestType requestType) override {
+        // TODO SERVER-113905: once we support metadata, we should only support returning both
+        // document and metadata.
         return extension::ExtensionGetNextResult::eof();
     }
 
@@ -888,28 +906,12 @@ public:
         _initialized = false;
     }
 
-    void attach(::MongoExtensionOpCtx* /*ctx*/) override {
-        ++_attachCount;
-    }
-
-    void detach() override {
-        ++_detachCount;
-    }
-
     bool isResourceAllocated() const {
         return _resourceAllocated;
     }
 
     bool isInitialized() const {
         return _initialized;
-    }
-
-    int getAttachCount() const {
-        return _attachCount;
-    }
-
-    int getDetachCount() const {
-        return _detachCount;
     }
 
     static inline std::unique_ptr<ExecAggStage> make() {
@@ -919,8 +921,6 @@ public:
 private:
     bool _resourceAllocated = false;
     bool _initialized = false;
-    int _attachCount = 0;
-    int _detachCount = 0;
 };
 
 TEST(AggregationStageTest, ValidExecAggStageVTableGetNextSucceeds) {
@@ -988,8 +988,10 @@ public:
 
     extension::ExtensionGetNextResult getNext(
         const extension::sdk::QueryExecutionContextHandle& execCtx,
-        const MongoExtensionExecAggStage* execAggStage) override {
-
+        const MongoExtensionExecAggStage* execAggStage,
+        MongoExtensionGetNextRequestType requestType) override {
+        // TODO SERVER-113905: once we support metadata, we should only support returning both
+        // document and metadata.
         auto metrics = execCtx.getMetrics(execAggStage);
         metrics.update(MongoExtensionByteView{nullptr, 0});
 
@@ -1013,10 +1015,6 @@ public:
     void reopen() override {}
 
     void close() override {}
-
-    void attach(::MongoExtensionOpCtx* /*ctx*/) override {}
-
-    void detach() override {}
 
     static inline std::unique_ptr<extension::sdk::ExecAggStage> make() {
         return std::make_unique<GetMetricsExtensionExecAggStage>("$getMetrics");
@@ -1170,15 +1168,6 @@ TEST_F(AggStageTest, ValidateExecAggStageLifecycleFunctions) {
     handle.close();
     ASSERT_FALSE(trackingExecAggStageImplPtr->isResourceAllocated());
     ASSERT_FALSE(trackingExecAggStageImplPtr->isInitialized());
-
-    // Confirm attach and detach are set up as no-ops.
-    ::MongoExtensionOpCtx ctx{nullptr};
-    handle.attach(&ctx);
-    handle.attach(&ctx);
-    handle.detach();
-    handle.detach();
-    ASSERT_EQUALS(2, trackingExecAggStageImplPtr->getAttachCount());
-    ASSERT_EQUALS(2, trackingExecAggStageImplPtr->getDetachCount());
 }
 
 TEST_F(AggStageTest, TestDPLRaiiVecToAbiArrayRoundTrip) {

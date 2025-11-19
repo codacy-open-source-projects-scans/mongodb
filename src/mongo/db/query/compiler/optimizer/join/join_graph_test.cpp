@@ -29,31 +29,11 @@
 
 #include "mongo/db/query/compiler/optimizer/join/join_graph.h"
 
+#include "mongo/db/query/compiler/optimizer/join/unit_test_helpers.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo::join_ordering {
-
-namespace {
-NamespaceString makeNSS(StringData collName) {
-    return NamespaceString::makeLocalCollection(collName);
-}
-
-NodeSet makeNodeSetFromIds(std::set<NodeId> ids) {
-    NodeSet result;
-    for (auto id : ids) {
-        result.set(id);
-    }
-    return result;
-}
-
-NodeSet makeNodeSetFromId(NodeId id) {
-    return makeNodeSetFromIds({id});
-}
-
-}  // namespace
-
-
 TEST(JoinGraphTests, AddNode) {
     JoinGraph graph{};
 
@@ -88,7 +68,9 @@ TEST(JoinGraphTests, AddEdge) {
     ASSERT_EQ(graph.getEdge(secondThird).right, 1 << third);
 }
 
-DEATH_TEST(JoinGraphTests, AddEdgeSimpleSelfEdgeForbidden, "Self edges are not permitted") {
+DEATH_TEST(JoinGraphTestsDeathTest,
+           AddEdgeSimpleSelfEdgeForbidden,
+           "Self edges are not permitted") {
     JoinGraph graph{};
 
     auto a = graph.addNode(makeNSS("a"), nullptr, boost::none);
@@ -98,7 +80,9 @@ DEATH_TEST(JoinGraphTests, AddEdgeSimpleSelfEdgeForbidden, "Self edges are not p
     graph.addSimpleEqualityEdge(a, a, 0, 1);
 }
 
-DEATH_TEST(JoinGraphTests, AddEdgeComplexSelfEdgeForbidden, "Self edges are not permitted") {
+DEATH_TEST(JoinGraphTestsDeathTest,
+           AddEdgeComplexSelfEdgeForbidden,
+           "Self edges are not permitted") {
     JoinGraph graph{};
 
     auto a = graph.addNode(makeNSS("a"), nullptr, boost::none);

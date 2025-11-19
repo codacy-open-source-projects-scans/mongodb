@@ -174,7 +174,8 @@ TEST_F(LoadExtensionsTest, LoadExtensionErrorCases) {
 }
 
 // null_initialize_function_bad_extension has a null initialization function.
-DEATH_TEST_F(LoadExtensionsTest, LoadExtensionNullInitialize, "10930101") {
+using LoadExtensionsTestDeathTest = LoadExtensionsTest;
+DEATH_TEST_F(LoadExtensionsTestDeathTest, LoadExtensionNullInitialize, "10930101") {
     ExtensionLoader::load(
         "null_initialize_function_bad_extension",
         test_util::makeEmptyExtensionConfig("libnull_initialize_function_bad_extension.so"));
@@ -327,7 +328,7 @@ TEST_F(LoadExtensionsTest, LoadExtensionInitializeVersionFails) {
                        10726600);
 }
 
-DEATH_TEST_F(LoadExtensionsTest, LoadExtensionNullStageDescriptor, "10596400") {
+DEATH_TEST_F(LoadExtensionsTestDeathTest, LoadExtensionNullStageDescriptor, "10596400") {
     ExtensionLoader::load(
         "null_stage_descriptor_bad_extension",
         test_util::makeEmptyExtensionConfig("libnull_stage_descriptor_bad_extension.so"));
@@ -359,7 +360,7 @@ TEST_F(LoadExtensionsTest, LoadHighestCompatibleVersionSucceeds) {
                               test_util::makeEmptyExtensionConfig(
                                   "libload_highest_compatible_version_mongo_extension.so")));
 
-    std::vector<BSONObj> pipeline = {BSON("$extensionV3" << BSONObj())};
+    std::vector<BSONObj> pipeline = {BSON("$extensionV1" << BSONObj())};
     auto parsedPipeline = Pipeline::parse(pipeline, expCtx);
     ASSERT_TRUE(parsedPipeline != nullptr);
     ASSERT_EQUALS(parsedPipeline->getSources().size(), 1U);
@@ -368,14 +369,12 @@ TEST_F(LoadExtensionsTest, LoadHighestCompatibleVersionSucceeds) {
         dynamic_cast<DocumentSourceExtension*>(parsedPipeline->getSources().front().get());
 
     ASSERT_TRUE(extensionStage != nullptr);
-    ASSERT_EQUALS(std::string(extensionStage->getSourceName()), "$extensionV3");
+    ASSERT_EQUALS(std::string(extensionStage->getSourceName()), "$extensionV1");
 
     // Assert that the other extension versions registered aren't available.
-    pipeline = {BSON("$extensionV1" << BSONObj())};
-    ASSERT_THROWS_CODE(Pipeline::parse(pipeline, expCtx), AssertionException, 16436);
     pipeline = {BSON("$extensionV2" << BSONObj())};
     ASSERT_THROWS_CODE(Pipeline::parse(pipeline, expCtx), AssertionException, 16436);
-    pipeline = {BSON("$extensionV4" << BSONObj())};
+    pipeline = {BSON("$extensionV3" << BSONObj())};
     ASSERT_THROWS_CODE(Pipeline::parse(pipeline, expCtx), AssertionException, 16436);
 }
 
@@ -492,7 +491,8 @@ TEST_F(ExtensionErrorsTest, ExtensionUasserts) {
     ASSERT_THROWS_WHAT(Pipeline::parse(pipeline, expCtx), AssertionException, "a new error");
 }
 
-DEATH_TEST_REGEX_F(ExtensionErrorsTest, ExtensionTasserts, "98765.*another new error") {
+using ExtensionErrorsTestDeathTest = ExtensionErrorsTest;
+DEATH_TEST_REGEX_F(ExtensionErrorsTestDeathTest, ExtensionTasserts, "98765.*another new error") {
     std::vector<BSONObj> pipeline = {
         BSON("$assert" << BSON("errmsg" << "another new error" << "code" << 98765 << "assertionType"
                                         << "tassert"))};
