@@ -32,6 +32,7 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/admission/execution_control_parameters_gen.h"
+#include "mongo/db/admission/throughput_probing_gen.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/logv2/log.h"
@@ -47,8 +48,7 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
-namespace mongo {
-namespace admission {
+namespace mongo::admission::execution_control {
 
 namespace {
 const auto ticketingSystemDecoration =
@@ -108,15 +108,14 @@ bool wasOperationDowngradedToLowPriority(OperationContext* opCtx,
     //      2. We don't deprioritize operations within a multi-document transaction.
     //      3. It is illegal to demote a high-priority (exempt) operation.
     //      4. The operation is already low-priority (no-op).
-    if (!gExecutionControlHeuristicDeprioritizationEnabled.load() ||
-        opCtx->inMultiDocumentTransaction() || priority == AdmissionContext::Priority::kExempt ||
+    if (!gHeuristicDeprioritization.load() || opCtx->inMultiDocumentTransaction() ||
+        priority == AdmissionContext::Priority::kExempt ||
         priority == AdmissionContext::Priority::kLow) {
         return false;
     }
 
     // If the op is eligible, downgrade it if it has yielded enough times to meet the threshold.
-    return admCtx->getAdmissions() >=
-        gExecutionControlHeuristicNumAdmissionsDeprioritizeThreshold.load();
+    return admCtx->getAdmissions() >= gHeuristicNumAdmissionsDeprioritizeThreshold.load();
 }
 
 }  // namespace
@@ -183,6 +182,15 @@ Status TicketingSystem::NormalPrioritySettings::validateConcurrentReadTransactio
                       "Concurrent read transactions limit must be greater than or equal to 5.");
     }
     return Status::OK();
+}
+
+Status TicketingSystem::validateConcurrencyAdjustmentAlgorithm(
+    const std::string& name, const boost::optional<TenantId>&) try {
+    ExecutionControlConcurrencyAdjustmentAlgorithm_parse(
+        name, IDLParserContext{"executionControlConcurrencyAdjustmentAlgorithm"});
+    return Status::OK();
+} catch (const DBException& ex) {
+    return ex.toStatus();
 }
 
 Status TicketingSystem::LowPrioritySettings::updateWriteMaxQueueDepth(
@@ -290,10 +298,12 @@ TicketingSystem::TicketingSystem(
     ServiceContext* svcCtx,
     RWTicketHolder normal,
     RWTicketHolder low,
-    Milliseconds throughputProbingInterval,
     ExecutionControlConcurrencyAdjustmentAlgorithmEnum concurrencyAdjustmentAlgorithm)
     : _state({concurrencyAdjustmentAlgorithm}),
-      _throughputProbing(svcCtx, normal.read.get(), normal.write.get(), throughputProbingInterval) {
+      _throughputProbing(svcCtx,
+                         normal.read.get(),
+                         normal.write.get(),
+                         Milliseconds{throughput_probing::gConcurrencyAdjustmentIntervalMillis}) {
     _holders[static_cast<size_t>(AdmissionContext::Priority::kNormal)] = std::move(normal);
     _holders[static_cast<size_t>(AdmissionContext::Priority::kLow)] = std::move(low);
 };
@@ -584,5 +594,4 @@ void TicketingSystem::TicketingState::appendStats(BSONObjBuilder& b) const {
     b.append("executionControlConcurrencyAdjustmentAlgorithm", algorithm);
 }
 
-}  // namespace admission
-}  // namespace mongo
+}  // namespace mongo::admission::execution_control

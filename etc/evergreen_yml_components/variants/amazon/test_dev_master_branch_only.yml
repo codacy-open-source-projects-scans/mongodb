@@ -604,11 +604,9 @@ buildvariants:
         --mongosSetParameters="{internalQueryUnifiedWriteExecutor: true}"
     # For now just unified write executor suites but tasks will be added as development continues.
     tasks:
-      # TODO SERVER-104147: Both 'DocumentSequenceLargeDocumentMultiInsertWorks' and
-      # 'DocumentSequenceMaxWriteBatchWorks' currently fails in the UWE because we do not check our
-      # batches for sizing, nor do we check that a batch is under the BSON size limit. Enable this
-      # task and verify that this passes once we have support for this.
-      # - name: integration_tests_sharded
+      - name: compile_integration_and_test_parallel_stream_TG
+        distros:
+          - amazon2023-arm64-latest-large
       - name: run_unit_tests_TG
         distros:
           - amazon2023-arm64-latest-large
@@ -641,6 +639,7 @@ buildvariants:
       - name: unified_write_executor_fle2_sharding_high_cardinality
       - name: unified_write_executor_sharding_legacy_timeseries_no_rawdata_gen
       - name: unified_write_executor_sharding_jscore_passthrough_legacy_timeseries_no_rawdata_gen
+      - name: unified_write_executor_concurrency_sharded_initial_sync_gen
       - name: burn_in_tests_gen
         depends_on:
           - name: version_burn_in_gen

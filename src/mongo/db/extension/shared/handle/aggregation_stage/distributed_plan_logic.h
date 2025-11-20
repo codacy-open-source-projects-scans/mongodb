@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2018-present MongoDB, Inc.
+ *    Copyright (C) 2025-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -26,36 +26,47 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-
 #pragma once
 
-#include "mongo/db/local_catalog/lock_manager/lock_manager.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/db/extension/public/api.h"
+#include "mongo/db/extension/shared/handle/aggregation_stage/parse_node.h"
+#include "mongo/db/extension/shared/handle/byte_buf_handle.h"
+#include "mongo/db/extension/shared/handle/handle.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+namespace mongo::extension {
 
-class TrackingLockGrantNotification : public LockGrantNotification {
+/**
+ * DistributedPlanLogicHandle is an owned handle wrapper around a
+ * MongoExtensionDistributedPlanLogic.
+ */
+class DistributedPlanLogicHandle : public OwnedHandle<::MongoExtensionDistributedPlanLogic> {
 public:
-    TrackingLockGrantNotification() : numNotifies(0), lastResult(LOCK_INVALID) {}
-
-    void notify(ResourceId resId, LockResult result) override {
-        numNotifies++;
-        lastResId = resId;
-        lastResult = result;
+    DistributedPlanLogicHandle(::MongoExtensionDistributedPlanLogic* dpl)
+        : OwnedHandle<::MongoExtensionDistributedPlanLogic>(dpl) {
+        _assertValidVTable();
     }
 
-public:
-    int numNotifies;
+    std::vector<VariantDPLHandle> getShardsPipeline() const;
 
-    ResourceId lastResId;
-    LockResult lastResult;
-};
+    std::vector<VariantDPLHandle> getMergingPipeline() const;
 
-struct LockRequestCombo : public LockRequest, TrackingLockGrantNotification {
-public:
-    explicit LockRequestCombo(Locker* locker) {
-        initNew(locker, this);
+    BSONObj getSortPattern() const;
+
+protected:
+    void _assertVTableConstraints(const VTable_t& vtable) const override {
+        tassert(11027300,
+                "DistributedPlanLogic 'get_shards_pipeline' is null",
+                vtable.get_shards_pipeline != nullptr);
+        tassert(11027301,
+                "DistributedPlanLogic 'get_merging_pipeline' is null",
+                vtable.get_merging_pipeline != nullptr);
+        tassert(11027302,
+                "DistributedPlanLogic 'get_sort_pattern' is null",
+                vtable.get_sort_pattern != nullptr);
     }
 };
 
-}  // namespace mongo
+}  // namespace mongo::extension
+
