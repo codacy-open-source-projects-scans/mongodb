@@ -34,9 +34,9 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/extension/host/query_execution_context.h"
-#include "mongo/db/extension/host_connector/host_services_adapter.h"
-#include "mongo/db/extension/host_connector/query_execution_context_adapter.h"
-#include "mongo/db/extension/host_connector/query_shape_opts_adapter.h"
+#include "mongo/db/extension/host_connector/adapter/host_services_adapter.h"
+#include "mongo/db/extension/host_connector/adapter/query_execution_context_adapter.h"
+#include "mongo/db/extension/host_connector/adapter/query_shape_opts_adapter.h"
 #include "mongo/db/extension/public/api.h"
 #include "mongo/db/extension/sdk/distributed_plan_logic.h"
 #include "mongo/db/extension/sdk/dpl_array_container.h"
@@ -84,9 +84,9 @@ public:
     void setUp() override {
         // Initialize HostServices so that aggregation stages will be able to access member
         // functions, e.g. to run assertions.
-        extension::sdk::HostServicesHandle::setHostServices(
-            extension::host_connector::HostServicesAdapter::get());
-        _execCtx = std::make_unique<host_connector::QueryExecutionContextAdapter>(nullptr);
+        sdk::HostServicesHandle::setHostServices(host_connector::HostServicesAdapter::get());
+        _execCtx = std::make_unique<host_connector::QueryExecutionContextAdapter>(
+            std::make_unique<shared_test_stages::MockQueryExecutionContext>());
     }
 
     std::unique_ptr<host_connector::QueryExecutionContextAdapter> _execCtx;
@@ -351,12 +351,11 @@ TEST_F(AggStageTest, SearchLikeSourceAggStageAstNodeSucceeds) {
 
     ASSERT_TRUE(requiredFields.has_value());
     ASSERT_EQ(requiredFields->size(), 1u);
-    ASSERT_EQ((*requiredFields)[0], "searchScore");
+    ASSERT_EQ((*requiredFields)[0], "score");
 
     ASSERT_TRUE(providedFields.has_value());
-    ASSERT_EQ(providedFields->size(), 2u);
-    ASSERT_EQ((*providedFields)[0], "searchScore");
-    ASSERT_EQ((*providedFields)[1], "searchHighlights");
+    ASSERT_EQ(providedFields->size(), 1u);
+    ASSERT_EQ((*providedFields)[0], "searchHighlights");
 }
 
 TEST_F(AggStageTest, BadRequiresInputDocSourceTypeAggStageAstNodeFails) {
@@ -928,26 +927,24 @@ private:
     bool _initialized = false;
 };
 
-TEST(AggregationStageTest, ValidExecAggStageVTableGetNextSucceeds) {
+TEST_F(AggStageTest, ValidExecAggStageVTableGetNextSucceeds) {
     auto validExecAggStage = new extension::sdk::ExtensionExecAggStage(
         shared_test_stages::ValidExtensionExecAggStage::make());
     auto handle = extension::ExecAggStageHandle{validExecAggStage};
 
-    auto nullExecCtx = host_connector::QueryExecutionContextAdapter(nullptr);
-
-    auto getNext = handle.getNext(&nullExecCtx);
+    auto getNext = handle.getNext(_execCtx.get());
     ASSERT_EQUALS(extension::GetNextCode::kAdvanced, getNext.code);
     ASSERT_BSONOBJ_EQ(BSON("meow" << "adithi"), getNext.res.get());
 
-    getNext = handle.getNext(&nullExecCtx);
+    getNext = handle.getNext(_execCtx.get());
     ASSERT_EQUALS(extension::GetNextCode::kPauseExecution, getNext.code);
     ASSERT_EQ(boost::none, getNext.res);
 
-    getNext = handle.getNext(&nullExecCtx);
+    getNext = handle.getNext(_execCtx.get());
     ASSERT_EQUALS(extension::GetNextCode::kAdvanced, getNext.code);
     ASSERT_BSONOBJ_EQ(BSON("meow" << "cedric"), getNext.res.get());
 
-    getNext = handle.getNext(&nullExecCtx);
+    getNext = handle.getNext(_execCtx.get());
     ASSERT_EQUALS(extension::GetNextCode::kEOF, getNext.code);
     ASSERT_EQ(boost::none, getNext.res);
 };

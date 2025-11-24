@@ -33,9 +33,9 @@
 #include "mongo/db/extension/host/document_source_extension_optimizable.h"
 #include "mongo/db/extension/host/extension_stage.h"
 #include "mongo/db/extension/host/query_execution_context.h"
-#include "mongo/db/extension/host_connector/executable_agg_stage_adapter.h"
-#include "mongo/db/extension/host_connector/host_services_adapter.h"
-#include "mongo/db/extension/host_connector/query_execution_context_adapter.h"
+#include "mongo/db/extension/host_connector/adapter/executable_agg_stage_adapter.h"
+#include "mongo/db/extension/host_connector/adapter/host_services_adapter.h"
+#include "mongo/db/extension/host_connector/adapter/query_execution_context_adapter.h"
 #include "mongo/db/extension/public/api.h"
 #include "mongo/db/extension/sdk/aggregation_stage.h"
 #include "mongo/db/extension/sdk/distributed_plan_logic.h"
@@ -69,7 +69,8 @@ public:
         // functions, e.g. to run assertions.
         extension::sdk::HostServicesHandle::setHostServices(
             extension::host_connector::HostServicesAdapter::get());
-        _execCtx = std::make_unique<host_connector::QueryExecutionContextAdapter>(nullptr);
+        _execCtx = std::make_unique<host_connector::QueryExecutionContextAdapter>(
+            std::make_unique<shared_test_stages::MockQueryExecutionContext>());
     }
 
     std::unique_ptr<host_connector::QueryExecutionContextAdapter> _execCtx;

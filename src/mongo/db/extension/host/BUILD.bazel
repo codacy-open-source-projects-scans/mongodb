@@ -17,6 +17,9 @@ exports_files(
 # Note that this is a standalone library such that it doesn't need to have any server dependencies like the rest of the extension_host target does.
 mongo_cc_library(
     name = "extension_operation_metrics_registry",
+    srcs = [
+        "operation_metrics_registry.cpp",
+    ],
     hdrs = [
         "operation_metrics_registry.h",
     ],
@@ -39,8 +42,9 @@ mongo_cc_library(
         "//src/mongo:base",
         "//src/mongo/db:commands",
         "//src/mongo/db/extension/host/aggregation_stage",
-        "//src/mongo/db/extension/host_connector:extensions_host_connector",
-        "//src/mongo/db/extension/host_connector:host_services_adapter",
+        "//src/mongo/db/extension/host_connector/adapter:host_adapters",
+        "//src/mongo/db/extension/host_connector/adapter:host_services_adapter",
+        "//src/mongo/db/extension/host_connector/handle:host_handles",
         "//src/mongo/db/extension/shared/handle/aggregation_stage",
         "//src/mongo/db/pipeline",
         "//src/mongo/db/pipeline:desugarer",

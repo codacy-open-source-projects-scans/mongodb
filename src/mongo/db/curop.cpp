@@ -479,8 +479,10 @@ void CurOp::setEndOfOpMetrics(long long nreturned) {
         // We don't strictly need to record executionTime unless keyHash is non-none, but there's
         // no harm in recording it since we've already computed the value.
         metrics.executionTime = elapsed;
+        auto workingMillis =
+            duration_cast<Milliseconds>(elapsed - (_sumBlockedTimeTotal() - _blockedTimeAtStart));
         metrics.clusterWorkingTime = metrics.clusterWorkingTime.value_or(Milliseconds(0)) +
-            (duration_cast<Milliseconds>(elapsed - (_sumBlockedTimeTotal() - _blockedTimeAtStart)));
+            std::max(Milliseconds(0), workingMillis);
 
         calculateCpuTime();
         metrics.cpuNanos = metrics.cpuNanos.value_or(Nanoseconds(0)) + _debug.cpuTime;
@@ -751,6 +753,7 @@ CurOp::ShouldProfileQuery CurOp::_shouldProfileAtLevel1AndLogSlowQuery(
 }
 
 logv2::DynamicAttributes CurOp::_reportDebugAndStats(const logv2::LogOptions& logOptions,
+                                                     const Date_t* operationDeadline,
                                                      bool isFinalStorageStatsUpdate) {
     auto* opCtx = this->opCtx();
     auto locker = shard_role_details::getLocker(opCtx);
@@ -780,7 +783,8 @@ logv2::DynamicAttributes CurOp::_reportDebugAndStats(const logv2::LogOptions& lo
     const auto& storageMetrics = getOperationStorageMetrics();
 
     logv2::DynamicAttributes attr;
-    _debug.report(opCtx, &lockStats, storageMetrics, getPrepareReadConflicts(), &attr);
+    _debug.report(
+        opCtx, &lockStats, storageMetrics, getPrepareReadConflicts(), operationDeadline, &attr);
     return attr;
 }
 
@@ -839,7 +843,8 @@ bool CurOp::completeAndLogOperation(const logv2::LogOptions& logOptions,
     }
 
     if (forceLog || shouldLogSlowOp) {
-        logv2::DynamicAttributes attr = _reportDebugAndStats(logOptions, true);
+        Date_t deadline = opCtx->getDeadline();
+        logv2::DynamicAttributes attr = _reportDebugAndStats(logOptions, &deadline, true);
         LOGV2_OPTIONS(51803, logOptions, "Slow query", attr);
 
         _checkForFailpointsAfterCommandLogged();
@@ -879,7 +884,8 @@ void CurOp::logLongRunningOperationIfNeeded() {
     }
 
     calculateCpuTime();
-    logv2::DynamicAttributes attr = _reportDebugAndStats(kLogOptions, false);
+    Date_t deadline = opCtx()->getDeadline();
+    logv2::DynamicAttributes attr = _reportDebugAndStats(kLogOptions, &deadline, false);
     LOGV2_OPTIONS(1794200, kLogOptions, "Slow in-progress query", attr);
     _eligibleForLongRunningQueryLogging = false;
 }

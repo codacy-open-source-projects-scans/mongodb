@@ -85,8 +85,16 @@ public:
 class ExtensionLogicalAggStage final : public ::MongoExtensionLogicalAggStage {
 public:
     ExtensionLogicalAggStage(std::unique_ptr<LogicalAggStage> logicalStage)
-        : ::MongoExtensionLogicalAggStage{&VTABLE}, _stage(std::move(logicalStage)) {}
+        : ::MongoExtensionLogicalAggStage{&VTABLE}, _stage(std::move(logicalStage)) {
+        sdk_tassert(11417105, "Provided LogicalAggStage is null", _stage != nullptr);
+    }
+
     ~ExtensionLogicalAggStage() = default;
+
+    ExtensionLogicalAggStage(const ExtensionLogicalAggStage&) = delete;
+    ExtensionLogicalAggStage& operator=(const ExtensionLogicalAggStage&) = delete;
+    ExtensionLogicalAggStage(ExtensionLogicalAggStage&&) = delete;
+    ExtensionLogicalAggStage& operator=(ExtensionLogicalAggStage&&) = delete;
 
     const LogicalAggStage& getImpl() const noexcept {
         return *_stage;
@@ -162,7 +170,6 @@ protected:
     AggStageAstNode() = delete;  // No default constructor.
     explicit AggStageAstNode(std::string_view name) : _name(name) {}
 
-private:
     const std::string _name;
 };
 
@@ -181,8 +188,16 @@ private:
 class ExtensionAggStageAstNode final : public ::MongoExtensionAggStageAstNode {
 public:
     ExtensionAggStageAstNode(std::unique_ptr<AggStageAstNode> astNode)
-        : ::MongoExtensionAggStageAstNode{&VTABLE}, _astNode(std::move(astNode)) {}
+        : ::MongoExtensionAggStageAstNode{&VTABLE}, _astNode(std::move(astNode)) {
+        sdk_tassert(11417106, "Provided AggStageAstNode is null", _astNode != nullptr);
+    }
+
     ~ExtensionAggStageAstNode() = default;
+
+    ExtensionAggStageAstNode(const ExtensionAggStageAstNode&) = delete;
+    ExtensionAggStageAstNode& operator=(const ExtensionAggStageAstNode&) = delete;
+    ExtensionAggStageAstNode(ExtensionAggStageAstNode&&) = delete;
+    ExtensionAggStageAstNode& operator=(ExtensionAggStageAstNode&&) = delete;
 
 private:
     const AggStageAstNode& getImpl() const noexcept {
@@ -260,7 +275,6 @@ protected:
     AggStageParseNode() = delete;  // No default constructor.
     explicit AggStageParseNode(std::string_view name) : _name(name) {}
 
-private:
     const std::string _name;
 };
 
@@ -278,9 +292,16 @@ private:
 class ExtensionAggStageParseNode final : public ::MongoExtensionAggStageParseNode {
 public:
     ExtensionAggStageParseNode(std::unique_ptr<AggStageParseNode> parseNode)
-        : ::MongoExtensionAggStageParseNode(&VTABLE), _parseNode(std::move(parseNode)) {}
+        : ::MongoExtensionAggStageParseNode(&VTABLE), _parseNode(std::move(parseNode)) {
+        sdk_tassert(11417107, "Provided AggStageParseNode is null", _parseNode != nullptr);
+    }
 
     ~ExtensionAggStageParseNode() = default;
+
+    ExtensionAggStageParseNode(const ExtensionAggStageParseNode&) = delete;
+    ExtensionAggStageParseNode& operator=(const ExtensionAggStageParseNode&) = delete;
+    ExtensionAggStageParseNode(ExtensionAggStageParseNode&&) = delete;
+    ExtensionAggStageParseNode& operator=(ExtensionAggStageParseNode&&) = delete;
 
 private:
     const AggStageParseNode& getImpl() const noexcept {
@@ -379,9 +400,16 @@ protected:
 class ExtensionAggStageDescriptor final : public ::MongoExtensionAggStageDescriptor {
 public:
     ExtensionAggStageDescriptor(std::unique_ptr<AggStageDescriptor> descriptor)
-        : ::MongoExtensionAggStageDescriptor(&VTABLE), _descriptor(std::move(descriptor)) {}
+        : ::MongoExtensionAggStageDescriptor(&VTABLE), _descriptor(std::move(descriptor)) {
+        sdk_tassert(11417108, "Provided AggStageDescriptor is null", _descriptor != nullptr);
+    }
 
     ~ExtensionAggStageDescriptor() = default;
+
+    ExtensionAggStageDescriptor(const ExtensionAggStageDescriptor&) = delete;
+    ExtensionAggStageDescriptor& operator=(const ExtensionAggStageDescriptor&) = delete;
+    ExtensionAggStageDescriptor(ExtensionAggStageDescriptor&&) = delete;
+    ExtensionAggStageDescriptor& operator=(ExtensionAggStageDescriptor&&) = delete;
 
 private:
     const AggStageDescriptor& getImpl() const noexcept {
@@ -463,7 +491,6 @@ protected:
 
     virtual UnownedExecAggStageHandle& _getSource() = 0;
 
-private:
     const std::string _name;
 };
 
@@ -572,9 +599,16 @@ static void convertExtensionGetNextResultToCRepresentation(
 class ExtensionExecAggStage final : public ::MongoExtensionExecAggStage {
 public:
     ExtensionExecAggStage(std::unique_ptr<ExecAggStageBase> execAggStage)
-        : ::MongoExtensionExecAggStage(&VTABLE), _execAggStage(std::move(execAggStage)) {}
+        : ::MongoExtensionExecAggStage(&VTABLE), _execAggStage(std::move(execAggStage)) {
+        sdk_tassert(11417109, "Provided ExecAggStageBase is null", _execAggStage != nullptr);
+    }
 
     ~ExtensionExecAggStage() = default;
+
+    ExtensionExecAggStage(const ExtensionExecAggStage&) = delete;
+    ExtensionExecAggStage& operator=(const ExtensionExecAggStage&) = delete;
+    ExtensionExecAggStage(ExtensionExecAggStage&&) = delete;
+    ExtensionExecAggStage& operator=(ExtensionExecAggStage&&) = delete;
 
 private:
     const ExecAggStageBase& getImpl() const noexcept {
