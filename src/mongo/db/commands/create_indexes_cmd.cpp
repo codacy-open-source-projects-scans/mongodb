@@ -55,27 +55,8 @@
 #include "mongo/db/index_builds/index_builds_coordinator.h"
 #include "mongo/db/index_builds/repl_index_build_state.h"
 #include "mongo/db/index_builds/two_phase_index_build_knobs_gen.h"
+#include "mongo/db/index_key_validate.h"
 #include "mongo/db/index_names.h"
-#include "mongo/db/local_catalog/catalog_raii.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/collection_options.h"
-#include "mongo/db/local_catalog/collection_uuid_mismatch.h"
-#include "mongo/db/local_catalog/create_collection.h"
-#include "mongo/db/local_catalog/db_raii.h"
-#include "mongo/db/local_catalog/ddl/create_indexes_gen.h"
-#include "mongo/db/local_catalog/ddl/replica_set_ddl_tracker.h"
-#include "mongo/db/local_catalog/index_catalog.h"
-#include "mongo/db/local_catalog/index_descriptor.h"
-#include "mongo/db/local_catalog/index_key_validate.h"
-#include "mongo/db/local_catalog/lock_manager/exception_util.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
-#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_state.h"
-#include "mongo/db/local_catalog/shard_role_catalog/database_sharding_state.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
-#include "mongo/db/local_catalog/shard_role_catalog/scoped_collection_metadata.h"
-#include "mongo/db/local_catalog/uncommitted_catalog_updates.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/profile_settings.h"
@@ -85,6 +66,25 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/session_catalog_mongod.h"
+#include "mongo/db/shard_role/ddl/create_indexes_gen.h"
+#include "mongo/db/shard_role/ddl/replica_set_ddl_tracker.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_state.h"
+#include "mongo/db/shard_role/shard_catalog/collection_uuid_mismatch.h"
+#include "mongo/db/shard_role/shard_catalog/create_collection.h"
+#include "mongo/db/shard_role/shard_catalog/database_sharding_state.h"
+#include "mongo/db/shard_role/shard_catalog/db_raii.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
+#include "mongo/db/shard_role/shard_catalog/scoped_collection_metadata.h"
+#include "mongo/db/shard_role/shard_catalog/uncommitted_catalog_updates.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/stats/top.h"
 #include "mongo/db/storage/exceptions.h"
@@ -201,6 +201,28 @@ void validateTTLOptions(OperationContext* opCtx,
                 !(coll && coll->getClusteredInfo() && coll->isCapped() &&
                   index_key_validate::isIndexTTL(index)));
         uassertStatusOK(index_key_validate::validateIndexSpecTTL(index));
+    }
+}
+
+/**
+ * Ensures that the user is authorized to create an index of a given type.
+ */
+void validateIndexType(OperationContext* opCtx,
+                       const NamespaceString& ns,
+                       const CreateIndexesCommand& cmd) {
+    for (const auto& elem : cmd.getIndexes()) {
+        for (const auto& key : elem.getField("key").Obj()) {
+            const auto type = key.str();  // will return "" for btree
+            if (IndexNames::isInternalOnly(type)) {
+                const Privilege p(CommandHelpers::resourcePatternForNamespace(ns),
+                                  ActionType::internal);
+                const bool isAuthForInternal =
+                    AuthorizationSession::get(opCtx->getClient())->isAuthorizedForPrivilege(p);
+                uassert(ErrorCodes::IndexOptionsConflict,
+                        fmt::format("Index Type {} is for internal use only", type),
+                        isAuthForInternal);
+            }
+        }
     }
 }
 
@@ -581,6 +603,7 @@ CreateIndexesReply runCreateIndexesWithCoordinator(
             }
 
             validateTTLOptions(opCtx, collection.getCollectionPtr().get(), cmd);
+            validateIndexType(opCtx, ns, cmd);
 
             if (collection.exists() &&
                 !UncommittedCatalogUpdates::get(opCtx).isCreatedCollection(opCtx, ns)) {

@@ -49,7 +49,6 @@
 #include "mongo/db/auth/security_token_authentication_guard.h"
 #include "mongo/db/auth/validated_tenancy_scope.h"
 #include "mongo/db/client.h"
-#include "mongo/db/cluster_parameters/sharding_cluster_parameters_gen.h"
 #include "mongo/db/command_can_run_here.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/fsync.h"
@@ -64,12 +63,6 @@
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/generic_argument_util.h"
 #include "mongo/db/initialize_operation_session_info.h"
-#include "mongo/db/local_catalog/collection.h"
-#include "mongo/db/local_catalog/collection_catalog.h"
-#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role_loop.h"
-#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
-#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/not_primary_error_tracker.h"
@@ -98,6 +91,12 @@
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/session/session_catalog.h"
 #include "mongo/db/session/session_catalog_mongod.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
+#include "mongo/db/shard_role/shard_role_loop.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/sharding_environment/sharding_initialization_waiter.h"
 #include "mongo/db/sharding_environment/sharding_statistics.h"
@@ -107,12 +106,13 @@
 #include "mongo/db/stats/server_read_concern_metrics.h"
 #include "mongo/db/stats/top.h"
 #include "mongo/db/tenant_id.h"
+#include "mongo/db/topology/cluster_parameters/sharding_cluster_parameters_gen.h"
 #include "mongo/db/topology/cluster_role.h"
 #include "mongo/db/topology/sharding_state.h"
+#include "mongo/db/topology/vector_clock/vector_clock.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/transaction_validation.h"
 #include "mongo/db/validate_api_parameters.h"
-#include "mongo/db/vector_clock/vector_clock.h"
 #include "mongo/db/versioning_protocol/database_version.h"
 #include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/db/write_concern.h"
@@ -182,6 +182,7 @@ MONGO_FAIL_POINT_DEFINE(hangAfterSessionCheckOut);
 MONGO_FAIL_POINT_DEFINE(hangBeforeSettingTxnInterruptFlag);
 MONGO_FAIL_POINT_DEFINE(hangAfterCheckingWritabilityForMultiDocumentTransactions);
 MONGO_FAIL_POINT_DEFINE(failWithErrorCodeAfterSessionCheckOut);
+MONGO_FAIL_POINT_DEFINE(failIngressRequestRateLimiting);
 
 // Tracks the number of times a legacy unacknowledged write failed due to
 // not primary error resulted in network disconnection.
@@ -1750,7 +1751,56 @@ void ExecCommandDatabase::_initiateCommand() {
         }
     }
 
+    // TODO(SERVER-114130): Move those condition inside the gIngressAdmissionControlEnabled scope.
     const auto isProcessInternalCommand = isProcessInternalClient(*opCtx->getClient());
+    const auto isExemptFromAdmissionControl = isProcessInternalCommand ||
+        !_invocation->isSubjectToIngressAdmissionControl() ||
+        IngressAdmissionContext::get(opCtx).isHoldingTicket();
+
+    failIngressRequestRateLimiting.executeIf(
+        [&](const BSONObj& data) {
+            // TODO(SERVER-114130): Remove error label override when moving to the ingress
+            // request rate limiter.
+            BSONArrayBuilder arrayBuilder;
+            arrayBuilder.append(ErrorLabel::kSystemOverloadedError);
+            arrayBuilder.append(ErrorLabel::kRetryableError);
+            auto& errorLabels = errorLabelsOverride(opCtx);
+            invariant(!errorLabels);
+            errorLabels.emplace(arrayBuilder.arr());
+
+            // We simulate a request being rejected by the rate limiter.
+            uasserted(ErrorCodes::IngressRequestRateLimitExceeded,
+                      "Rejection from the 'failIngressRequestRateLimiting' fail point");
+        },
+        [&](const BSONObj& data) {
+            // Because we don't have a maintenance port yet, we must only simulate the rate limiter
+            // on non critical operations.
+            // TODO(SERVER-114130): Move this fail point to the ingress request rate limiter and
+            // remove this condition.
+            if (isExemptFromAdmissionControl) {
+                return false;
+            }
+
+            // Because we don't have a maintenance port yet, we must only simulate the rate limiter
+            // on requests directly coming from mongod and mongos. As the maintenance port is
+            // implemented, background checks and heatbeat won't interfere with rate-limiting
+            // behavior.
+            // TODO(SERVER-114130): Move this fail point to the ingress request rate limiter and
+            // remove this condition.
+            auto clientMetadata = ClientMetadata::get(opCtx->getClient());
+            if (clientMetadata) {
+                auto document = clientMetadata->getDocument();
+                auto clientName = clientMetadata->getApplicationName();
+                auto isFromMongoExecutable =
+                    clientName.ends_with("mongos") || clientName.ends_with("mongod");
+
+                if (!isFromMongoExecutable) {
+                    return false;
+                }
+            }
+
+            return true;
+        });
 
     if (gIngressAdmissionControlEnabled.load()) {
         // The way ingress admission works, one ticket should cover all the work for the operation.
@@ -1758,8 +1808,7 @@ void ExecCommandDatabase::_initiateCommand() {
         // of the subsequent admissions of the same operation (e.g. via DBDirectClient) should be
         // exempt from ingress admission control.
         boost::optional<ScopedAdmissionPriority<IngressAdmissionContext>> admissionPriority;
-        if (isProcessInternalCommand || !_invocation->isSubjectToIngressAdmissionControl() ||
-            IngressAdmissionContext::get(opCtx).isHoldingTicket()) {
+        if (isExemptFromAdmissionControl) {
             admissionPriority.emplace(opCtx, AdmissionContext::Priority::kExempt);
         }
         auto& admissionController = IngressAdmissionController::get(opCtx);

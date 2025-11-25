@@ -30,7 +30,7 @@ mongo_cc_library(
     ],
     deps = [
         "//src/mongo/db:server_base",
-        "//src/mongo/db/query/query_shape",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db/query/query_shape",
         "//src/mongo/db/storage:storage_options",
         "//src/mongo/util:processinfo",
     ],
@@ -40,9 +40,9 @@ mongo_cc_library(
     name = "timeseries_extended_range",
     srcs = ["timeseries_extended_range.cpp"],
     deps = [
-        ":timeseries_options",  # TODO(SERVER-93876): Remove.
+        ":timeseries_options",
         "//src/mongo:base",
-        "//src/mongo/db/local_catalog:index_catalog",
+        "//src/mongo/db/shard_role/shard_catalog:index_catalog",
     ],
 )
 
@@ -68,8 +68,8 @@ mongo_cc_library(
         "//src/mongo:base",
         "//src/mongo/db:shard_role",
         "//src/mongo/db/index:index_access_method",
-        "//src/mongo/db/local_catalog:catalog_helpers",
-        "//src/mongo/db/local_catalog:catalog_test_fixture",
+        "//src/mongo/db/shard_role/shard_catalog:catalog_helpers",
+        "//src/mongo/db/shard_role/shard_catalog:catalog_test_fixture",
         "//src/mongo/db/timeseries/bucket_catalog",
     ],
 )
@@ -106,17 +106,17 @@ mongo_cc_library(
     ],
     deps = [
         ":bucket_compression",
-        ":timeseries_options",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/bson/column",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/db:coll_mod_command_idl",  # TODO(SERVER-93876): Remove.
+        ":timeseries_options",
+        "//src/mongo/bson/column",
+        "//src/mongo/db:coll_mod_command_idl",
         "//src/mongo/db:expression_context_builder",
-        "//src/mongo/db:index_commands_idl",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db:index_commands_idl",
         "//src/mongo/db:server_base",
         "//src/mongo/db/exec:bucket_unpacker",
-        "//src/mongo/db/local_catalog:index_catalog",
-        "//src/mongo/db/query:bucket_predicate_generator",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/db/query/write_ops:write_ops_parsers",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/db/storage:storage_options",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db/query:bucket_predicate_generator",
+        "//src/mongo/db/query/write_ops:write_ops_parsers",
+        "//src/mongo/db/shard_role/shard_catalog:index_catalog",
+        "//src/mongo/db/storage:storage_options",
     ],
 )
 
@@ -129,7 +129,7 @@ mongo_cc_library(
         ":timeseries_options",
         "//src/mongo/db:server_base",
         "//src/mongo/db:shard_role",
-        "//src/mongo/db/local_catalog:collection_catalog",
+        "//src/mongo/db/shard_role/shard_catalog:collection_catalog",
     ],
 )
 
@@ -145,11 +145,11 @@ mongo_cc_library(
         "//src/mongo/db:record_id_helpers",
         "//src/mongo/db:shard_role",
         "//src/mongo/db/collection_crud",
-        "//src/mongo/db/local_catalog:collection_query_info",
-        "//src/mongo/db/local_catalog:document_validation",
         "//src/mongo/db/query/query_stats",
         "//src/mongo/db/query/write_ops:delete_request_idl",
         "//src/mongo/db/query/write_ops:write_ops_exec_util",
+        "//src/mongo/db/shard_role/shard_catalog:collection_query_info",
+        "//src/mongo/db/shard_role/shard_catalog:document_validation",
         "//src/mongo/db/storage:storage_options",
         "//src/mongo/db/timeseries/bucket_catalog",
         "//src/mongo/db/timeseries/write_ops:timeseries_write_ops_utils_internal",
@@ -164,9 +164,9 @@ mongo_cc_library(
     ],
     deps = [
         ":timeseries_extended_range",
-        "//src/mongo/db/local_catalog:collection_catalog",
-        "//src/mongo/db/local_catalog/lock_manager",
         "//src/mongo/db/op_observer",
+        "//src/mongo/db/shard_role/lock_manager",
+        "//src/mongo/db/shard_role/shard_catalog:collection_catalog",
         "//src/mongo/db/timeseries/bucket_catalog",
     ],
 )
@@ -185,7 +185,7 @@ mongo_cc_library(
         "//src/mongo/db:server_base",
         "//src/mongo/db:shard_role",
         "//src/mongo/db/exec:bucket_unpacker",
-        "//src/mongo/db/local_catalog:catalog_helpers",
+        "//src/mongo/db/shard_role/shard_catalog:catalog_helpers",
     ],
 )
 

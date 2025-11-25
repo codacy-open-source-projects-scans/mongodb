@@ -36,13 +36,12 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
-#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/pipeline_split_state.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/db/pipeline/sharded_agg_helpers_targeting_policy.h"
@@ -53,7 +52,9 @@
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
+#include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
@@ -114,6 +115,14 @@ public:
     static std::unique_ptr<Pipeline> parse(const std::vector<BSONObj>& rawPipeline,
                                            const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                            PipelineValidatorCallback validator = nullptr);
+
+    /**
+     * Like parse, but takes a LiteParsedPipeline instead of raw BSONObjs.
+     */
+    static std::unique_ptr<Pipeline> parseFromLiteParsed(
+        const LiteParsedPipeline& liteParsedPipeline,
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        PipelineValidatorCallback validator = nullptr);
 
     /**
      * Parses sub-pipelines from a $facet aggregation. Like parse(), but skips top-level
@@ -482,7 +491,7 @@ private:
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         PipelineValidatorCallback validator,
         bool isFacetPipeline,
-        std::function<BSONObj(T)> getElemFunc);
+        std::function<DocumentSourceContainer(const T&)> getDocSourceFn);
 
     DocumentSourceContainer _sources;
 
