@@ -406,9 +406,12 @@ ReorderedJoinSolution constructSolutionWithRandomOrder(
                     *mca.lookupCollection(currentNode.collectionName)->getIndexCatalog(),
                     indexedJoinPreds);
                 indexEntry.has_value()) {
-                rhs = std::make_unique<FetchNode>(std::make_unique<IndexProbeNode>(
-                    currentNode.collectionName, std::move(indexEntry.value())));
-                // TODO SERVER-111910: Write an end-to-end test exercising this codepath.
+                rhs = std::make_unique<FetchNode>(
+                    std::make_unique<IndexProbeNode>(currentNode.collectionName,
+                                                     std::move(indexEntry.value())),
+                    currentNode.collectionName);
+                // TODO SERVER-111222: Write an end-to-end test exercising this codepath, once we
+                // can lower INLJ nodes to SBE.
                 if (auto matchExpr = currentNode.accessPath->getPrimaryMatchExpression();
                     matchExpr != nullptr && !matchExpr->isTriviallyTrue()) {
                     rhs->filter = matchExpr->clone();
