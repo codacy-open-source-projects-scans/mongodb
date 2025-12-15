@@ -30,6 +30,7 @@
 
 global:
     cpp_namespace: "mongo"
+    mod_visibility: needs_replacement
 
 feature_flags:
     featureFlagConcurrencyInChunkMigration:
@@ -239,6 +240,15 @@ feature_flags:
     featureFlagPreventDirectShardDDLsDuringPromotion:
         description: "Enable the prevention of direct shard connection DDL operations during addShard"
         cpp_varname: feature_flags::gFeatureFlagPreventDirectShardDDLsDuringPromotion
+        default: true
+        version: 8.3
+        fcv_gated: true
+    # TODO (SERVER-115179): remove feature once 9.0 becomes LTS.
+    featureFlagAddTransactionRuntimeContextAsAGenericArgument:
+        description:
+            "Feature flag to notify that the placementConflictTime is being kept in TransactionParticipant
+            instead of being a ShardVersion/DatabaseVersion field."
+        cpp_varname: feature_flags::gAddTransactionRuntimeContextAsAGenericArgument
         default: true
         version: 8.3
         fcv_gated: true

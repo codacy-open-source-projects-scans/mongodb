@@ -310,6 +310,8 @@ public:
         }
 
         CreateCommandReply typedRun(OperationContext* opCtx) final {
+            VersionContext::FixedOperationFCVRegion fixedOfcvRegion(opCtx);
+
             // Intentional copy of request made here, as request object can be modified below.
             auto cmd = request();
 
@@ -318,9 +320,7 @@ public:
 
             auto createViewlessTimeseriesColl =
                 gFeatureFlagCreateViewlessTimeseriesCollections
-                    .isEnabledUseLastLTSFCVWhenUninitialized(
-                        VersionContext::getDecoration(opCtx),
-                        serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
+                    .isEnabledUseLastLTSFCVWhenUninitialized(VersionContext::getDecoration(opCtx));
 
             CreateCommandReply reply;
 

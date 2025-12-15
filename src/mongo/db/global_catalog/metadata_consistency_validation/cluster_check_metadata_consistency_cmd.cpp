@@ -226,9 +226,8 @@ public:
         ClusterClientCursorGuard _establishCursorOnDbPrimary(OperationContext* opCtx,
                                                              const NamespaceString& nss) {
 
-            sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), nss.dbName());
+            sharding::router::DBPrimaryRouter router(opCtx, nss.dbName());
             return router.route(
-                opCtx,
                 Request::kCommandName,
                 [&](OperationContext* opCtx, const CachedDatabaseInfo& dbInfo) {
                     ShardsvrCheckMetadataConsistency shardsvrRequest{nss};
@@ -323,8 +322,8 @@ public:
 
             auto&& opDebug = CurOp::get(opCtx)->debug();
             opDebug.nShards = ccc->getNumRemotes();
-            opDebug.additiveMetrics.nBatches = 1;
-            opDebug.additiveMetrics.nreturned = firstBatch.size();
+            opDebug.getAdditiveMetrics().nBatches = 1;
+            opDebug.getAdditiveMetrics().nreturned = firstBatch.size();
 
             if (cursorState == ClusterCursorManager::CursorState::Exhausted) {
                 opDebug.cursorExhausted = true;

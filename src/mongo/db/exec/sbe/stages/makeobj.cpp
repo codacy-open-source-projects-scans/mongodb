@@ -549,8 +549,9 @@ const SpecificStats* MakeObjStageBase<O>::getSpecificStats() const {
 }
 
 template <typename O>
-std::vector<DebugPrinter::Block> MakeObjStageBase<O>::debugPrint() const {
-    auto ret = PlanStage::debugPrint();
+std::vector<DebugPrinter::Block> MakeObjStageBase<O>::debugPrint(
+    const DebugPrintInfo& debugPrintInfo) const {
+    auto ret = PlanStage::debugPrint(debugPrintInfo);
 
     DebugPrinter::addIdentifier(ret, _objSlot);
 
@@ -582,11 +583,15 @@ std::vector<DebugPrinter::Block> MakeObjStageBase<O>::debugPrint() const {
     }
     ret.emplace_back(DebugPrinter::Block("`]"));
 
-    ret.emplace_back(_forceNewObject ? "true" : "false");
-    ret.emplace_back(_returnOldObject ? "true" : "false");
+    if (_forceNewObject) {
+        ret.emplace_back("forceNewObject");
+    }
+    if (_returnOldObject) {
+        ret.emplace_back("returnOldObject");
+    }
 
     DebugPrinter::addNewLine(ret);
-    DebugPrinter::addBlocks(ret, _children[0]->debugPrint());
+    DebugPrinter::addBlocks(ret, _children[0]->debugPrint(debugPrintInfo));
 
     return ret;
 }

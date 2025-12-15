@@ -50,15 +50,17 @@ namespace mongo::classic_runtime_planner_for_sbe {
  * Data that any runtime planner needs to perform the planning.
  */
 struct PlannerDataForSBE final : public PlannerData {
-    PlannerDataForSBE(OperationContext* opCtx,
-                      CanonicalQuery* cq,
-                      std::unique_ptr<WorkingSet> workingSet,
-                      const MultipleCollectionAccessor& collections,
-                      std::unique_ptr<QueryPlannerParams> plannerParams,
-                      PlanYieldPolicy::YieldPolicy yieldPolicy,
-                      boost::optional<size_t> cachedPlanHash,
-                      std::unique_ptr<PlanYieldPolicySBE> sbeYieldPolicy,
-                      bool useSbePlanCache)
+    PlannerDataForSBE(
+        OperationContext* opCtx,
+        CanonicalQuery* cq,
+        std::unique_ptr<WorkingSet> workingSet,
+        const MultipleCollectionAccessor& collections,
+        // To be shared between all instances of this type and the prepare helper creating them.
+        std::shared_ptr<const QueryPlannerParams> plannerParams,
+        PlanYieldPolicy::YieldPolicy yieldPolicy,
+        boost::optional<size_t> cachedPlanHash,
+        std::unique_ptr<PlanYieldPolicySBE> sbeYieldPolicy,
+        bool useSbePlanCache)
         : PlannerData(opCtx,
                       cq,
                       std::move(workingSet),
@@ -216,6 +218,17 @@ public:
      */
     std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> makeExecutor(
         std::unique_ptr<CanonicalQuery> canonicalQuery) override;
+
+
+    /**
+     * Runs the trial period by working all candidate plans for as long as given in 'trialConfig'.
+     */
+    Status runTrials(MultiPlanStage::TrialPhaseConfig trialConfig);
+
+    /**
+     * Returns the specific stats for the multi-plan stage.
+     */
+    const MultiPlanStats* getSpecificStats() const;
 
 private:
     using SbePlanAndData = std::pair<std::unique_ptr<sbe::PlanStage>, stage_builder::PlanStageData>;

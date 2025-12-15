@@ -21,7 +21,6 @@ COMPILERS = struct(
 )
 
 LINKERS = struct(
-    GOLD = "gold",
     LLD = "lld",
     MOLD = "mold",
 )
@@ -425,13 +424,26 @@ def get_common_features(ctx):
         ),
         feature(
             name = "warnings_as_errors_compile",
-            enabled = False,
+            enabled = ctx.attr.warnings_as_errors_enabled,
             flag_sets = [
                 flag_set(
                     actions = all_compile_actions,
                     flag_groups = [flag_group(flags = [
                         "-Werror",
                     ])],
+                ),
+            ],
+        ),
+        feature(
+            name = "mongo_defines",
+            enabled = True,
+            flag_sets = [
+                flag_set(
+                    actions = all_compile_actions,
+                    flag_groups = [flag_group(
+                        flags =
+                            ["-D" + define for define in ctx.attr.global_defines],
+                    )],
                 ),
             ],
         ),

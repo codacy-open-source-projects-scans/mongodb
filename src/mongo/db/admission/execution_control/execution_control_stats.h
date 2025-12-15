@@ -29,15 +29,18 @@
 
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/util/modules.h"
 
 #include <cstdint>
 #include <string>
 
 #pragma once
 
-namespace mongo::admission::execution_control {
+namespace mongo {
+namespace admission {
+namespace MONGO_MOD_PUBLIC execution_control {
 /**
- * Recolect the number of operations that hold the ticket longer than a defined threshold.
+ * Recollect the number of operations that hold the ticket longer than a defined threshold.
  */
 class DelinquencyStats {
 public:
@@ -55,7 +58,7 @@ public:
 };
 
 /**
- * Recolect information about long and short operations on the server.
+ * Recollect information about long and short operations on the server.
  */
 class OperationExecutionStats {
 public:
@@ -80,4 +83,6 @@ public:
     DelinquencyStats delinquencyStats;
 };
 
-}  // namespace mongo::admission::execution_control
+}  // namespace MONGO_MOD_PUBLIC execution_control
+}  // namespace admission
+}  // namespace mongo

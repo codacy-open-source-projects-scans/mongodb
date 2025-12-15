@@ -453,7 +453,7 @@ public:
     static constexpr StringData kStageName = "$simpleSerialization";
     static constexpr StringData kStageSpec = "mongodb";
 
-    SimpleSerializationLogicalStage() {}
+    SimpleSerializationLogicalStage() : LogicalAggStage(toStdStringViewForInterop(kStageName)) {}
 
     BSONObj serialize() const override {
         return BSON(kStageName << kStageSpec);
@@ -463,9 +463,12 @@ public:
         return BSON(kStageName << verbosity);
     }
 
-    // TODO (SERVER-112395): Implement this function for testing.
     std::unique_ptr<ExecAggStageBase> compile() const override {
         return nullptr;
+    }
+
+    boost::optional<DistributedPlanLogic> getDistributedPlanLogic() const override {
+        return boost::none;
     }
 
     static inline std::unique_ptr<extension::sdk::LogicalAggStage> make() {
@@ -484,7 +487,7 @@ TEST(AggregationStageTest, SimpleSerializationSucceeds) {
                       serialized);
 }
 
-TEST(AggregationStageTest, Explain) {
+TEST(AggregationStageTest, ExplainQueryPlanner) {
     auto logicalStage =
         new extension::sdk::ExtensionLogicalAggStage(SimpleSerializationLogicalStage::make());
     auto handle = extension::LogicalAggStageHandle{logicalStage};
@@ -509,6 +512,36 @@ TEST(AggregationStageTest, Explain) {
         auto output = handle.explain(ExplainOptions::Verbosity::kExecAllPlans);
         ASSERT_BSONOBJ_EQ(BSON(SimpleSerializationLogicalStage::kStageName
                                << ::MongoExtensionExplainVerbosity::kExecAllPlans),
+                          output);
+    }
+}
+
+
+TEST(AggregationStageTest, ExplainExecutionStats) {
+    auto validExecAggStage = new extension::sdk::ExtensionExecAggStage(
+        shared_test_stages::ValidExtensionExecAggStage::make());
+    auto handle = extension::ExecAggStageHandle{validExecAggStage};
+
+    // Test that different verbosity levels can be passed through to the extension implementation
+    // correctly.
+    {
+        auto output = handle.explain(ExplainOptions::Verbosity::kQueryPlanner);
+        ASSERT_BSONOBJ_EQ(BSON("execField" << "execMetric" << "verbosity"
+                                           << ::MongoExtensionExplainVerbosity::kQueryPlanner),
+                          output);
+    }
+
+    {
+        auto output = handle.explain(ExplainOptions::Verbosity::kExecStats);
+        ASSERT_BSONOBJ_EQ(BSON("execField" << "execMetric" << "verbosity"
+                                           << ::MongoExtensionExplainVerbosity::kExecStats),
+                          output);
+    }
+
+    {
+        auto output = handle.explain(ExplainOptions::Verbosity::kExecAllPlans);
+        ASSERT_BSONOBJ_EQ(BSON("execField" << "execMetric" << "verbosity"
+                                           << ::MongoExtensionExplainVerbosity::kExecAllPlans),
                           output);
     }
 }
@@ -847,8 +880,6 @@ public:
 
     ExtensionGetNextResult getNext(const QueryExecutionContextHandle& execCtx,
                                    MongoExtensionExecAggStage* execAggStage) override {
-        // TODO SERVER-113905: once we support metadata, we should only support returning both
-        // document and metadata.
         return extension::ExtensionGetNextResult::eof();
     }
 
@@ -872,6 +903,10 @@ public:
 
     bool isInitialized() const {
         return _initialized;
+    }
+
+    BSONObj explain(::MongoExtensionExplainVerbosity verbosity) const override {
+        return BSONObj();
     }
 
     static inline std::unique_ptr<ExecAggStageBase> make() {
@@ -908,8 +943,7 @@ TEST_F(AggStageTest, ValidExecAggStageVTableGetNextSucceeds) {
 TEST_F(AggStageTest, ValidateStructStateAfterConvertingStructToGetNextResult) {
     ::MongoExtensionGetNextResult result = {.code =
                                                 static_cast<::MongoExtensionGetNextResultCode>(10),
-                                            .resultDocument = createEmptyByteContainer(),
-                                            .requestType = kDocumentOnly};
+                                            .resultDocument = createEmptyByteContainer()};
     ASSERT_THROWS_WITH_CHECK(
         [&] {
             [[maybe_unused]] auto converted =
@@ -952,8 +986,6 @@ public:
     extension::ExtensionGetNextResult getNext(
         const extension::sdk::QueryExecutionContextHandle& execCtx,
         MongoExtensionExecAggStage* execAggStage) override {
-        // TODO SERVER-113905: once we support metadata, we should only support returning both
-        // document and metadata.
         auto metrics = execCtx.getMetrics(execAggStage);
         metrics.update(MongoExtensionByteView{nullptr, 0});
 
@@ -978,6 +1010,10 @@ public:
     void reopen() override {}
 
     void close() override {}
+
+    BSONObj explain(::MongoExtensionExplainVerbosity verbosity) const override {
+        return BSONObj();
+    }
 
     static inline std::unique_ptr<ExecAggStageBase> make() {
         return std::make_unique<GetMetricsExtensionExecAggStage>("$getMetrics");
@@ -1034,29 +1070,35 @@ TEST_F(AggStageTest, TestValidExecAggStageFromCompiledLogicalAggStage) {
         auto getNext = compiledExecAggStageHandle.getNext(_execCtx.get());
         ASSERT_EQUALS(extension::GetNextCode::kAdvanced, getNext.code);
         ASSERT_BSONOBJ_EQ(BSON("meow" << "adithi"), getNext.resultDocument->getUnownedBSONObj());
+        ASSERT_BSONOBJ_EQ(BSON("$searchScore" << 1.0), getNext.resultMetadata->getUnownedBSONObj());
     }
 
     {
         auto getNext = compiledExecAggStageHandle.getNext(_execCtx.get());
         ASSERT_EQUALS(extension::GetNextCode::kPauseExecution, getNext.code);
         ASSERT_EQ(boost::none, getNext.resultDocument);
+        ASSERT_EQ(boost::none, getNext.resultMetadata);
     }
 
     {
         auto getNext = compiledExecAggStageHandle.getNext(_execCtx.get());
         ASSERT_EQUALS(extension::GetNextCode::kAdvanced, getNext.code);
         ASSERT_BSONOBJ_EQ(BSON("meow" << "cedric"), getNext.resultDocument->getUnownedBSONObj());
+        ASSERT_BSONOBJ_EQ(BSON("$textScore" << 2.0), getNext.resultMetadata->getUnownedBSONObj());
     }
 
     {
         auto getNext = compiledExecAggStageHandle.getNext(_execCtx.get());
         ASSERT_EQUALS(extension::GetNextCode::kEOF, getNext.code);
         ASSERT_EQ(boost::none, getNext.resultDocument);
+        ASSERT_EQ(boost::none, getNext.resultMetadata);
     }
 }
 
 class TestSourceLogicalAggStage : public shared_test_stages::FruitsAsDocumentsLogicalAggStage {
 public:
+    TestSourceLogicalAggStage() : shared_test_stages::FruitsAsDocumentsLogicalAggStage() {}
+
     static inline std::unique_ptr<extension::sdk::LogicalAggStage> make() {
         return std::make_unique<TestSourceLogicalAggStage>();
     }
@@ -1239,7 +1281,7 @@ TEST_F(AggStageTest, TestDPLArrayContainerRoundTrip) {
     sdkElements.emplace_back(extension::AggStageParseNodeHandle{parseNode});
 
     auto sdkAdapter = std::make_unique<sdk::ExtensionDPLArrayContainerAdapter>(
-        std::make_unique<sdk::DPLArrayContainer>(std::move(sdkElements)));
+        sdk::DPLArrayContainer(std::move(sdkElements)));
 
     DPLArrayContainerHandle arrayContainer(sdkAdapter.release());
     ASSERT_EQ(arrayContainer.size(), 2U);
@@ -1254,58 +1296,58 @@ TEST_F(AggStageTest, TestDPLArrayContainerRoundTrip) {
     ASSERT_EQ(shared_test_stages::CountingParse::alive, 1);
 }
 
-class TestDistributedPlanLogic : public sdk::DistributedPlanLogicBase {
-public:
-    std::unique_ptr<sdk::DPLArrayContainer> getShardsPipeline() const override {
-        std::vector<extension::VariantDPLHandle> elements;
-        elements.emplace_back(_makeCountingLogicalStage());
-        elements.emplace_back(_makeCountingLogicalStage());
-        return std::make_unique<sdk::DPLArrayContainer>(std::move(elements));
-    }
+sdk::DistributedPlanLogic makeTestDistributedPlanLogic() {
+    sdk::DistributedPlanLogic dpl;
 
-    std::unique_ptr<sdk::DPLArrayContainer> getMergingPipeline() const override {
-        std::vector<extension::VariantDPLHandle> elements;
-        elements.emplace_back(_makeCountingLogicalStage());
-        return std::make_unique<sdk::DPLArrayContainer>(std::move(elements));
-    }
-
-    BSONObj getSortPattern() const override {
-        return BSON("_id" << 1);
-    }
-
-    static inline std::unique_ptr<sdk::DistributedPlanLogicBase> make() {
-        return std::make_unique<TestDistributedPlanLogic>();
-    }
-
-private:
-    static extension::LogicalAggStageHandle _makeCountingLogicalStage() {
+    auto makeCountingLogicalStage = [] {
         return extension::LogicalAggStageHandle{
             new sdk::ExtensionLogicalAggStage(shared_test_stages::CountingLogicalStage::make())};
+    };
+
+    {
+        std::vector<extension::VariantDPLHandle> elements;
+        elements.emplace_back(makeCountingLogicalStage());
+        dpl.mergingPipeline = sdk::DPLArrayContainer(std::move(elements));
     }
-};
+
+    {
+        std::vector<extension::VariantDPLHandle> elements;
+        elements.emplace_back(makeCountingLogicalStage());
+        elements.emplace_back(makeCountingLogicalStage());
+        dpl.shardsPipeline = sdk::DPLArrayContainer(std::move(elements));
+    }
+
+    dpl.sortPattern = BSON("_id" << 1);
+
+    return dpl;
+}
 
 TEST_F(AggStageTest, TestDPLWithCountingStages) {
     shared_test_stages::CountingLogicalStage::alive = 0;
 
     auto handle = DistributedPlanLogicHandle(
-        new sdk::ExtensionDistributedPlanLogicAdapter(TestDistributedPlanLogic::make()));
+        new sdk::ExtensionDistributedPlanLogicAdapter(makeTestDistributedPlanLogic()));
 
-    // Confirm getShardsPipeline() returns a vector with 2 logical stages.
+    // Three counting stages are created for the DPL object.
+    ASSERT_EQ(shared_test_stages::CountingLogicalStage::alive, 3);
+
+    // Confirm extractShardsPipeline() returns a vector with 2 logical stages.
     {
-        auto shardsPipeline = handle.getShardsPipeline();
+        auto shardsPipeline = handle.extractShardsPipeline();
         ASSERT_EQ(shardsPipeline.size(), 2U);
         ASSERT_TRUE(std::holds_alternative<LogicalAggStageHandle>(shardsPipeline[0]));
         ASSERT_TRUE(std::holds_alternative<LogicalAggStageHandle>(shardsPipeline[1]));
 
-        ASSERT_EQ(shared_test_stages::CountingLogicalStage::alive, 2);
+        // All three counting stages should still be alive.
+        ASSERT_EQ(shared_test_stages::CountingLogicalStage::alive, 3);
     }
 
-    // Stages are destroyed when shardsPipeline goes out of scope.
-    ASSERT_EQ(shared_test_stages::CountingLogicalStage::alive, 0);
+    // 2 stages are destroyed when shardsPipeline goes out of scope.
+    ASSERT_EQ(shared_test_stages::CountingLogicalStage::alive, 1);
 
-    // Confirm getMergingPipeline() returns a vector with 1 logical stage.
+    // Confirm extractMergingPipeline() returns a vector with 1 logical stage.
     {
-        auto mergingPipeline = handle.getMergingPipeline();
+        auto mergingPipeline = handle.extractMergingPipeline();
         ASSERT_EQ(mergingPipeline.size(), 1U);
         ASSERT_TRUE(std::holds_alternative<LogicalAggStageHandle>(mergingPipeline[0]));
 
@@ -1323,18 +1365,18 @@ TEST_F(AggStageTest, TestDPLWithCountingStages) {
 }
 
 TEST_F(AggStageTest, TestEmptyDistributedPlanLogic) {
-    auto handle = DistributedPlanLogicHandle(new sdk::ExtensionDistributedPlanLogicAdapter(
-        shared_test_stages::EmptyDistributedPlanLogic::make()));
+    auto handle = DistributedPlanLogicHandle(
+        new sdk::ExtensionDistributedPlanLogicAdapter(sdk::DistributedPlanLogic{}));
 
-    // Verify that getShardsPipeline() returns an empty vector when the C returns nullptr.
+    // Verify that extractShardsPipeline() returns an empty vector when the C returns nullptr.
     {
-        auto shardsPipeline = handle.getShardsPipeline();
+        auto shardsPipeline = handle.extractShardsPipeline();
         ASSERT_EQ(shardsPipeline.size(), 0U);
     }
 
-    // Verify that getMergingPipeline() returns an empty vector when the C API returns nullptr.
+    // Verify that extractMergingPipeline() returns an empty vector when the C API returns nullptr.
     {
-        auto mergingPipeline = handle.getMergingPipeline();
+        auto mergingPipeline = handle.extractMergingPipeline();
         ASSERT_EQ(mergingPipeline.size(), 0U);
     }
 
@@ -1343,6 +1385,43 @@ TEST_F(AggStageTest, TestEmptyDistributedPlanLogic) {
         auto sortPattern = handle.getSortPattern();
         ASSERT_BSONOBJ_EQ(BSONObj(), sortPattern);
     }
+}
+
+/**
+ * MergeOnlyLogicalStage must always run on the merge pipeline. It cannot run on shards.
+ */
+class MergeOnlyLogicalStage : public shared_test_stages::TransformLogicalAggStage {
+public:
+    boost::optional<sdk::DistributedPlanLogic> getDistributedPlanLogic() const override {
+        sdk::DistributedPlanLogic dpl;
+
+        {
+            std::vector<extension::VariantDPLHandle> elements;
+            elements.emplace_back(extension::LogicalAggStageHandle{
+                new sdk::ExtensionLogicalAggStage(std::make_unique<MergeOnlyLogicalStage>())});
+            dpl.mergingPipeline = sdk::DPLArrayContainer(std::move(elements));
+        }
+
+        return dpl;
+    }
+};
+
+TEST_F(AggStageTest, TestMergeOnlyDistributedPlanLogic) {
+    auto logicalStageHandle = LogicalAggStageHandle(
+        new sdk::ExtensionLogicalAggStage(std::make_unique<MergeOnlyLogicalStage>()));
+
+    auto dpl = logicalStageHandle.getDistributedPlanLogic();
+    // Confirm that the dpl is valid; it must run on the merge pipeline.
+    ASSERT_TRUE(dpl.isValid());
+
+    // Verify shards pipeline is empty; it cannot fully run on shards.
+    auto shardsPipeline = dpl.extractShardsPipeline();
+    ASSERT_EQ(shardsPipeline.size(), 0U);
+
+    // Verify merging pipeline has one MergeOnlyLogicalStage.
+    auto mergingPipeline = dpl.extractMergingPipeline();
+    ASSERT_EQ(mergingPipeline.size(), 1U);
+    ASSERT_TRUE(std::holds_alternative<LogicalAggStageHandle>(mergingPipeline[0]));
 }
 
 }  // namespace

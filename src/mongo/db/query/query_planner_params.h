@@ -40,6 +40,7 @@
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/shard_role/shard_catalog/clustered_collection_options_gen.h"
 #include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/util/modules.h"
 
 #include <vector>
 
@@ -110,7 +111,7 @@ struct TraversalPreference {
     std::string clusterField;
 };
 
-struct QueryPlannerParams {
+struct MONGO_MOD_NEEDS_REPLACEMENT QueryPlannerParams {
     enum Options {
         // You probably want to set this.
         DEFAULT = 0,
@@ -307,11 +308,19 @@ struct QueryPlannerParams {
     QueryPlannerParams& operator=(QueryPlannerParams&& other) = default;
 
     /**
-     * Fills planner parameters for the secondary collections.
+     * Fills planner parameters for the secondary collections if there is a pipeline in
+     * canonicalQuery.
      */
     void fillOutSecondaryCollectionsPlannerParams(OperationContext* opCtx,
                                                   const CanonicalQuery& canonicalQuery,
                                                   const MultipleCollectionAccessor& collections);
+
+    /**
+     * Fills planner parameters for the secondary collections.
+     */
+    void fillOutSecondaryCollectionsInfo(OperationContext* opCtx,
+                                         const CanonicalQuery& canonicalQuery,
+                                         const MultipleCollectionAccessor& collections);
 
     /**
      * This method updates this QueryPlannerParams object as needed so that it can be used with

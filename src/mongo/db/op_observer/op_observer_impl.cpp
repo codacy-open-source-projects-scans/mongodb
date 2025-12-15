@@ -42,6 +42,7 @@
 #include "mongo/db/index_builds/index_builds_common.h"
 #include "mongo/db/logical_time_validator.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/namespace_string_reserved.h"
 #include "mongo/db/op_observer/batched_write_context.h"
 #include "mongo/db/op_observer/op_observer_util.h"
 #include "mongo/db/operation_context.h"
@@ -720,8 +721,7 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
         size_t i = 0;
         for (auto iter = first; iter != last; iter++) {
             const auto docKey = getDocumentKey(coll, iter->doc).getShardKeyAndId();
-            repl::ReplOperation operation;
-            operation = MutableOplogEntry::makeInsertOperation(
+            repl::ReplOperation operation = MutableOplogEntry::makeInsertOperation(
                 nss,
                 uuid,
                 iter->doc,
@@ -816,7 +816,7 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
         SessionTxnRecord sessionTxnRecord;
         sessionTxnRecord.setLastWriteOpTime(lastOpTime);
         sessionTxnRecord.setLastWriteDate(lastWriteDate);
-        onWriteOpCompleted(opCtx, stmtIdsWritten, sessionTxnRecord, nss);
+        onWriteOpCompleted(opCtx, std::move(stmtIdsWritten), sessionTxnRecord, nss);
     }
 
     if (opAccumulator) {
@@ -866,8 +866,7 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx,
     auto shardingWriteRouter = std::make_unique<ShardingWriteRouter>(opCtx, nss);
     OpTimeBundle opTime;
     if (inBatchedWrite) {
-        repl::ReplOperation operation;
-        operation = MutableOplogEntry::makeUpdateOperation(
+        repl::ReplOperation operation = MutableOplogEntry::makeUpdateOperation(
             nss,
             args.coll->uuid(),
             args.updateArgs->update,
@@ -1031,8 +1030,7 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
 
     OpTimeBundle opTime;
     if (inBatchedWrite) {
-        repl::ReplOperation operation;
-        operation = MutableOplogEntry::makeDeleteOperation(
+        repl::ReplOperation operation = MutableOplogEntry::makeDeleteOperation(
             nss,
             uuid,
             documentKey.getShardKeyAndId(),
@@ -1366,6 +1364,10 @@ void OpObserverImpl::onCreateCollection(
     const boost::optional<CreateCollCatalogIdentifier>& createCollCatalogIdentifier,
     bool fromMigrate,
     bool isTimeseries) {
+    tassert(11145000,
+            "All collection creation paths are expected to acquire an Operation FCV",
+            VersionContext::getDecoration(opCtx).hasOperationFCV());
+
     if (repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, collectionName)) {
         return;
     }
@@ -1733,7 +1735,7 @@ namespace {
  */
 std::size_t getMaxNumberOfBatchedOperationsInSingleOplogEntry() {
     // IDL validation defined for this startup parameter ensures that we have a positive number.
-    return static_cast<std::size_t>(gMaxNumberOfBatchedOperationsInSingleOplogEntry);
+    return static_cast<std::size_t>(gMaxNumberOfBatchedOperationsInSingleOplogEntry.load());
 }
 
 /**
@@ -1742,7 +1744,7 @@ std::size_t getMaxNumberOfBatchedOperationsInSingleOplogEntry() {
  */
 std::size_t getMaxSizeOfBatchedOperationsInSingleOplogEntryBytes() {
     // IDL validation defined for this startup parameter ensures that we have a positive number.
-    return static_cast<std::size_t>(gMaxSizeOfBatchedOperationsInSingleOplogEntryBytes);
+    return static_cast<std::size_t>(gMaxSizeOfBatchedOperationsInSingleOplogEntryBytes.load());
 }
 
 // Logs one applyOps entry on a prepared transaction, or an unprepared transaction's commit, or on
@@ -2341,12 +2343,14 @@ void OpObserverImpl::onTruncateRange(OperationContext* opCtx,
                 rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider(),
                 VersionContext::getDecoration(opCtx)));
 
-    TruncateRangeOplogEntry objectEntry(
-        std::string(coll->ns().coll()), minRecordId, maxRecordId, bytesDeleted, docsDeleted);
+    NamespaceString nss = coll->ns();
+    TruncateRangeOplogEntry objectEntry(nss, minRecordId, maxRecordId, bytesDeleted, docsDeleted);
 
     MutableOplogEntry oplogEntry;
     oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
-    oplogEntry.setNss(coll->ns().getCommandNS());
+    // For oplog truncation, use admin.$cmd as the namespace to get around the isOplogDisabledFor()
+    // checks that usually prevent generating oplog entries for operations on the oplog.
+    oplogEntry.setNss(nss.isOplog() ? NamespaceString::kAdminCommandNamespace : nss.getCommandNS());
     oplogEntry.setUuid(coll->uuid());
     oplogEntry.setObject(objectEntry.toBSON());
     opTime = logOperation(opCtx, &oplogEntry, true /*assignCommonFields*/, _operationLogger.get());

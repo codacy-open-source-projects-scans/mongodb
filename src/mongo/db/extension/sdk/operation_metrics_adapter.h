@@ -29,6 +29,7 @@
 #pragma once
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/extension/public/api.h"
+#include "mongo/db/extension/sdk/assert_util.h"
 #include "mongo/db/extension/shared/byte_buf.h"
 #include "mongo/db/extension/shared/extension_status.h"
 #include "mongo/util/modules.h"
@@ -97,7 +98,7 @@ private:
 
             const auto& impl = static_cast<const OperationMetricsAdapter*>(metrics)->getImpl();
 
-            *output = new VecByteBuf(impl.serialize());
+            *output = new ByteBuf(impl.serialize());
         });
     }
 

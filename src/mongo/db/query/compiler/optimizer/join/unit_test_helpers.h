@@ -32,8 +32,11 @@
 #include "mongo/db/query/compiler/ce/sampling/sampling_estimator.h"
 #include "mongo/db/query/compiler/optimizer/cost_based_ranker/estimates.h"
 #include "mongo/db/query/compiler/optimizer/join/join_graph.h"
+#include "mongo/db/query/compiler/optimizer/join/join_reordering_context.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/shard_role/shard_catalog/catalog_test_fixture.h"
+#include "mongo/unittest/golden_test_base.h"
+#include "mongo/util/modules.h"
 
 namespace mongo::join_ordering {
 
@@ -49,6 +52,10 @@ MultipleCollectionAccessor multipleCollectionAccessor(OperationContext* opCtx,
  */
 class JoinOrderingTestFixture : public CatalogTestFixture {
 public:
+    JoinOrderingTestFixture()
+        : goldenTestConfig{"src/mongo/db/test_output/query/join"},
+          jCtx{.joinGraph = graph, .resolvedPaths = resolvedPaths} {}
+
     std::unique_ptr<CanonicalQuery> makeCanonicalQuery(NamespaceString nss,
                                                        BSONObj filter = BSONObj::kEmptyObject);
 
@@ -62,6 +69,16 @@ public:
     std::unique_ptr<ce::SamplingEstimator> samplingEstimator(const MultipleCollectionAccessor& mca,
                                                              NamespaceString nss,
                                                              double sampleProportion = 0.1);
+
+protected:
+    unittest::GoldenTestConfig goldenTestConfig;
+
+    JoinGraph graph;
+    std::vector<ResolvedPath> resolvedPaths;
+
+    std::vector<int> seeds;
+    std::vector<NamespaceString> namespaces;
+    JoinReorderingContext jCtx;
 };
 
 using namespace cost_based_ranker;
@@ -72,6 +89,8 @@ using namespace cost_based_ranker;
  */
 class FakeNdvEstimator : public ce::SamplingEstimator {
 public:
+    FakeNdvEstimator(CardinalityEstimate collCard) : _collCard(collCard) {};
+
     CardinalityEstimate estimateCardinality(const MatchExpression* expr) const override {
         MONGO_UNREACHABLE;
     }
@@ -114,7 +133,12 @@ public:
         return _fakeEstimates.at(fieldNames);
     }
 
+    double getCollCard() const override {
+        return _collCard.toDouble();
+    }
+
 private:
+    CardinalityEstimate _collCard;
     stdx::unordered_map<std::vector<FieldPath>, CardinalityEstimate> _fakeEstimates;
 };
 
@@ -122,16 +146,4 @@ private:
  * Small utility function to make a namepace string from collection name.
  */
 NamespaceString makeNSS(StringData collName);
-
-/**
- * Creates a join graph node from the set of ids.
- */
-NodeSet makeNodeSetFromIds(std::set<NodeId> ids);
-
-/**
- * Creates a join graph node from a single id.
- */
-inline NodeSet makeNodeSetFromId(NodeId id) {
-    return makeNodeSetFromIds({id});
-}
 }  // namespace mongo::join_ordering

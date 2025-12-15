@@ -30,6 +30,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/extension/public/api.h"
 #include "mongo/db/extension/sdk/assert_util.h"
+#include "mongo/db/extension/sdk/distributed_plan_logic.h"
 #include "mongo/db/extension/sdk/operation_metrics_adapter.h"
 #include "mongo/db/extension/sdk/query_execution_context_handle.h"
 #include "mongo/db/extension/sdk/raii_vector_to_abi_array.h"
@@ -60,14 +61,25 @@ extern template void raiiVectorToAbiArray<VariantDPLHandle>(
  * expose it to the host as a ExtensionLogicalAggStage.
  */
 class ExecAggStageBase;
+class DistributedPlanLogic;
 class LogicalAggStage {
 public:
-    LogicalAggStage() = default;
     virtual ~LogicalAggStage() = default;
+
+    std::string_view getName() const {
+        return _name;
+    }
 
     virtual BSONObj serialize() const = 0;
     virtual BSONObj explain(::MongoExtensionExplainVerbosity verbosity) const = 0;
     virtual std::unique_ptr<ExecAggStageBase> compile() const = 0;
+    virtual boost::optional<DistributedPlanLogic> getDistributedPlanLogic() const = 0;
+
+protected:
+    LogicalAggStage() = delete;  // No default constructor.
+    explicit LogicalAggStage(std::string_view name) : _name(name) {}
+
+    const std::string _name;
 };
 
 /**
@@ -105,6 +117,12 @@ private:
         delete static_cast<ExtensionLogicalAggStage*>(extlogicalStage);
     }
 
+    static ::MongoExtensionByteView _extGetName(
+        const ::MongoExtensionLogicalAggStage* logicalStage) noexcept {
+        return stringViewAsByteView(
+            static_cast<const ExtensionLogicalAggStage*>(logicalStage)->getImpl().getName());
+    }
+
     static MongoExtensionStatus* _extSerialize(
         const ::MongoExtensionLogicalAggStage* extLogicalStage,
         ::MongoExtensionByteBuf** output) noexcept {
@@ -114,7 +132,7 @@ private:
             const auto& impl =
                 static_cast<const ExtensionLogicalAggStage*>(extLogicalStage)->getImpl();
 
-            *output = new VecByteBuf(impl.serialize());
+            *output = new ByteBuf(impl.serialize());
         });
     }
 
@@ -129,7 +147,7 @@ private:
                 static_cast<const ExtensionLogicalAggStage*>(extLogicalStage)->getImpl();
 
             // Allocate a buffer on the heap. Ownership is transferred to the caller.
-            *output = new VecByteBuf(impl.explain(verbosity));
+            *output = new ByteBuf(impl.explain(verbosity));
         });
     };
 
@@ -137,10 +155,28 @@ private:
         const ::MongoExtensionLogicalAggStage* extLogicalStage,
         ::MongoExtensionExecAggStage** output) noexcept;
 
-    static constexpr ::MongoExtensionLogicalAggStageVTable VTABLE = {.destroy = &_extDestroy,
-                                                                     .serialize = &_extSerialize,
-                                                                     .explain = &_extExplain,
-                                                                     .compile = &_extCompile};
+    static ::MongoExtensionStatus* _extGetDistributedPlanLogic(
+        const ::MongoExtensionLogicalAggStage* extLogicalStage,
+        ::MongoExtensionDistributedPlanLogic** output) noexcept {
+        return wrapCXXAndConvertExceptionToStatus([&]() {
+            *output = nullptr;
+
+            const auto& impl =
+                static_cast<const ExtensionLogicalAggStage*>(extLogicalStage)->getImpl();
+
+            if (auto dpl = impl.getDistributedPlanLogic()) {
+                *output = new ExtensionDistributedPlanLogicAdapter(std::move(*dpl));
+            }
+        });
+    }
+
+    static constexpr ::MongoExtensionLogicalAggStageVTable VTABLE = {
+        .destroy = &_extDestroy,
+        .get_name = &_extGetName,
+        .serialize = &_extSerialize,
+        .explain = &_extExplain,
+        .compile = &_extCompile,
+        .get_distributed_plan_logic = &_extGetDistributedPlanLogic};
     std::unique_ptr<LogicalAggStage> _stage;
 };
 
@@ -227,7 +263,7 @@ private:
             const auto& impl = static_cast<const ExtensionAggStageAstNode*>(astNode)->getImpl();
 
             // Allocate a buffer on the heap. Ownership is transferred to the caller.
-            *properties = new VecByteBuf(impl.getProperties());
+            *properties = new ByteBuf(impl.getProperties());
         });
     }
 
@@ -332,7 +368,7 @@ private:
             const auto& impl = static_cast<const ExtensionAggStageParseNode*>(parseNode)->getImpl();
 
             // Allocate a buffer on the heap. Ownership is transferred to the caller.
-            *queryShape = new VecByteBuf(impl.getQueryShape(ctx));
+            *queryShape = new ByteBuf(impl.getQueryShape(ctx));
         });
     };
 
@@ -462,8 +498,7 @@ private:
 class ExecAggStageBase {
 public:
     virtual ~ExecAggStageBase() = default;
-    // TODO SERVER-113905: once we support metadata, we should only support returning both
-    // document and metadata.
+
     virtual ExtensionGetNextResult getNext(const QueryExecutionContextHandle& execCtx,
                                            ::MongoExtensionExecAggStage* execStage) = 0;
 
@@ -483,6 +518,8 @@ public:
     virtual void reopen() = 0;
 
     virtual void close() = 0;
+
+    virtual BSONObj explain(::MongoExtensionExplainVerbosity verbosity) const = 0;
 
 protected:
     ExecAggStageBase(std::string_view name) : _name(name) {}
@@ -577,6 +614,7 @@ private:
             sdk_tassert(11357806, "The api result should be non-null", apiResult != nullptr);
             apiResult->code = ::MongoExtensionGetNextResultCode::kPauseExecution;
             apiResult->resultDocument = createEmptyByteContainer();
+            apiResult->resultMetadata = createEmptyByteContainer();
 
             QueryExecutionContextHandle execCtx{execCtxPtr};
 
@@ -633,6 +671,19 @@ private:
             [&]() { static_cast<ExtensionExecAggStage*>(execAggStage)->getImpl().close(); });
     }
 
+    static ::MongoExtensionStatus* _extExplain(const ::MongoExtensionExecAggStage* execAggStage,
+                                               ::MongoExtensionExplainVerbosity verbosity,
+                                               ::MongoExtensionByteBuf** output) noexcept {
+        return wrapCXXAndConvertExceptionToStatus([&]() {
+            *output = nullptr;
+
+            const auto& impl = static_cast<const ExtensionExecAggStage*>(execAggStage)->getImpl();
+
+            // Allocate a buffer on the heap. Ownership is transferred to the caller.
+            *output = new ByteBuf(impl.explain(verbosity));
+        });
+    };
+
     static constexpr ::MongoExtensionExecAggStageVTable VTABLE = {.destroy = &_extDestroy,
                                                                   .get_next = &_extGetNext,
                                                                   .get_name = &_extGetName,
@@ -641,7 +692,8 @@ private:
                                                                   .set_source = &_extSetSource,
                                                                   .open = &_extOpen,
                                                                   .reopen = &_extReopen,
-                                                                  .close = &_extClose};
+                                                                  .close = &_extClose,
+                                                                  .explain = &_extExplain};
     std::unique_ptr<ExecAggStageBase> _execAggStage;
 };
 

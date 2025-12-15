@@ -210,8 +210,8 @@ std::unique_ptr<Pipeline> Pipeline::parseCommon(
     // memory.
     uassert(7749501,
             str::stream() << "Pipeline length must be no longer than "
-                          << internalPipelineLengthLimit << " stages.",
-            static_cast<int>(rawPipeline.size()) <= internalPipelineLengthLimit);
+                          << internalPipelineLengthLimit.load() << " stages.",
+            static_cast<int>(rawPipeline.size()) <= internalPipelineLengthLimit.load());
 
     DocumentSourceContainer stages;
     for (auto&& stageElem : rawPipeline) {
@@ -265,24 +265,16 @@ std::unique_ptr<Pipeline> Pipeline::parse(const std::vector<BSONObj>& rawPipelin
 std::unique_ptr<Pipeline> Pipeline::parseFromLiteParsed(
     const LiteParsedPipeline& liteParsedPipeline,
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    PipelineValidatorCallback validator) {
+    PipelineValidatorCallback validator,
+    bool isFacetPipeline) {
     return parseCommon<std::unique_ptr<LiteParsedDocumentSource>>(
         liteParsedPipeline.getStages(),
         expCtx,
         validator,
-        false,
+        isFacetPipeline,
         [&expCtx](const std::unique_ptr<LiteParsedDocumentSource>& lp) {
             return DocumentSource::parseFromLiteParsed(expCtx, *lp);
         });
-}
-
-std::unique_ptr<Pipeline> Pipeline::parseFacetPipeline(
-    const std::vector<BSONObj>& rawPipeline,
-    const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    PipelineValidatorCallback validator) {
-    return parseCommon<BSONObj>(rawPipeline, expCtx, validator, true, [&expCtx](BSONObj o) {
-        return DocumentSource::parse(expCtx, o);
-    });
 }
 
 std::unique_ptr<Pipeline> Pipeline::create(DocumentSourceContainer stages,
@@ -297,8 +289,8 @@ std::unique_ptr<Pipeline> Pipeline::create(DocumentSourceContainer stages,
 void Pipeline::validateCommon(bool alreadyOptimized) const {
     uassert(5054701,
             str::stream() << "Pipeline length must be no longer than "
-                          << internalPipelineLengthLimit << " stages",
-            static_cast<int>(_sources.size()) <= internalPipelineLengthLimit);
+                          << internalPipelineLengthLimit.load() << " stages",
+            static_cast<int>(_sources.size()) <= internalPipelineLengthLimit.load());
 
     // Keep track of stages which can only appear once.
     std::set<StringData> singleUseStages;

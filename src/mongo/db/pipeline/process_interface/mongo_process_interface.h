@@ -73,6 +73,7 @@
 #include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/task_executor.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
 #include <cstdint>
@@ -109,7 +110,7 @@ class TransactionHistoryIteratorBase;
  * interface. This allows all DocumentSources to be parsed on either mongos or mongod, but only
  * executable where it makes sense.
  */
-class MongoProcessInterface {
+class MONGO_MOD_OPEN MongoProcessInterface {
 public:
     /**
      * Storage for a batch of BSON Objects to be updated in the write namespace. For each element
@@ -142,7 +143,7 @@ public:
     /**
      * Interface which estimates the size of a given write operation.
      */
-    class WriteSizeEstimator {
+    class MONGO_MOD_OPEN WriteSizeEstimator {
     public:
         virtual ~WriteSizeEstimator() = default;
 
@@ -238,21 +239,26 @@ public:
     virtual void updateClientOperationTime(OperationContext* opCtx) const = 0;
 
     /**
-     * Executes 'insertCommand' against 'ns' and returns an error Status if the insert fails. If
-     * 'targetEpoch' is set, throws ErrorCodes::StaleEpoch if the targeted collection does not have
-     * the same epoch or the epoch changes during the course of the insert.
+     * Executes 'insertCommand' against 'ns'. Returns a vector of statuses. Will contain at least
+     * one error status if insert failed to not swallow any errors. If 'targetEpoch' is set, throws
+     * ErrorCodes::StaleEpoch if the targeted collection does not have the same epoch or the epoch
+     * changes during the course of the insert.
      */
-    virtual Status insert(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                          const NamespaceString& ns,
-                          std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
-                          const WriteConcernOptions& wc,
-                          boost::optional<OID> targetEpoch) = 0;
+    using InsertResult = absl::InlinedVector<Status, 4>;
 
-    virtual Status insertTimeseries(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                    const NamespaceString& ns,
-                                    std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
-                                    const WriteConcernOptions& wc,
-                                    boost::optional<OID> targetEpoch) = 0;
+    virtual InsertResult insert(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                const NamespaceString& ns,
+                                std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
+                                const WriteConcernOptions& wc,
+                                boost::optional<OID> targetEpoch) = 0;
+
+    virtual InsertResult insertTimeseries(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        const NamespaceString& ns,
+        std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
+        const WriteConcernOptions& wc,
+        boost::optional<OID> targetEpoch) = 0;
+
     /**
      * Executes the updates described by 'updateCommand'. Returns an error Status if any of the
      * updates fail, otherwise returns an 'UpdateResult' objects with the details of the update
@@ -695,7 +701,7 @@ public:
     /**
      * Used to enforce the constraint that the foreign collection must be untracked.
      */
-    class ScopedExpectUntrackedCollection {
+    class MONGO_MOD_UNFORTUNATELY_OPEN ScopedExpectUntrackedCollection {
     public:
         virtual ~ScopedExpectUntrackedCollection() = default;
     };

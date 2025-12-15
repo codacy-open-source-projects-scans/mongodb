@@ -29,12 +29,16 @@
 #include "mongo/db/pipeline/expression_context_builder.h"
 
 #include "mongo/db/curop.h"
+#include "mongo/db/exec/disk_use_options_gen.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/distinct_command_gen.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/query_utils.h"
+#include "mongo/db/query/write_ops/delete_request_gen.h"
+#include "mongo/db/query/write_ops/update_request.h"
+#include "mongo/db/storage/storage_options.h"
 
 namespace mongo {
 
@@ -167,12 +171,6 @@ ExpressionContextBuilder& ExpressionContextBuilder::inUnionWith(bool inUnionWith
 ExpressionContextBuilder& ExpressionContextBuilder::isParsingViewDefinition(
     bool isParsingViewDefinition) {
     params.isParsingViewDefinition = isParsingViewDefinition;
-    return *this;
-}
-
-ExpressionContextBuilder& ExpressionContextBuilder::isParsingPipelineUpdate(
-    bool isParsingPipelineUpdate) {
-    params.isParsingPipelineUpdate = isParsingPipelineUpdate;
     return *this;
 }
 
@@ -388,6 +386,12 @@ ExpressionContextBuilder& ExpressionContextBuilder::tailableMode(TailableModeEnu
     return *this;
 }
 
+ExpressionContextBuilder& ExpressionContextBuilder::mainCollPathArrayness(
+    std::shared_ptr<const PathArrayness> mainCollPathArrayness) {
+    params.mainCollPathArrayness = mainCollPathArrayness;
+    return *this;
+}
+
 ExpressionContextBuilder& ExpressionContextBuilder::fromRequest(
     OperationContext* operationContext,
     const FindCommandRequest& request,
@@ -490,6 +494,36 @@ ExpressionContextBuilder& ExpressionContextBuilder::fromRequest(
     letParameters(request.getLet());
     serializationContext(request.getSerializationContext());
     isFleQuery(request.getEncryptionInformation().has_value());
+    return *this;
+}
+
+ExpressionContextBuilder& ExpressionContextBuilder::fromRequest(OperationContext* operationContext,
+                                                                const UpdateRequest& request,
+                                                                bool forgoOpCounterIncrements) {
+    opCtx(operationContext);
+    ns(request.getNamespaceString());
+    // mayDbProfile. We pass 'true' here conservatively. In the
+    // future we may change this.
+    mayDbProfile(true);
+    allowDiskUse(allowDiskUseByDefault.load());
+    explain(request.explain());
+    runtimeConstants(request.getLegacyRuntimeConstants());
+    letParameters(request.getLetParameters());
+    isUpsert(request.isUpsert());
+    tmpDir(boost::filesystem::path(storageGlobalParams.dbpath) / "_tmp");
+
+    if (forgoOpCounterIncrements) {
+        enabledCounters(false);
+    }
+    return *this;
+}
+
+ExpressionContextBuilder& ExpressionContextBuilder::fromRequest(OperationContext* operationContext,
+                                                                const DeleteRequest& request) {
+    opCtx(operationContext);
+    ns(request.getNsString());
+    runtimeConstants(request.getLegacyRuntimeConstants());
+    letParameters(request.getLet());
     return *this;
 }
 

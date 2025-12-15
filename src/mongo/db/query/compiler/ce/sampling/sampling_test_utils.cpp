@@ -481,6 +481,7 @@ void SamplingAccuracyTest::runSamplingEstimatorTestConfiguration(
             SamplingEstimatorImpl samplingEstimator(
                 operationContext(),
                 collection,
+                collection.getMainCollection()->ns(),
                 PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                 actualSampleSize,
                 samplingAlgoAndChunk.first,
@@ -522,6 +523,7 @@ void SamplingAccuracyTest::runNDVSamplingEstimatorTestConfiguration(
                     SamplingEstimatorImpl samplingEstimator(
                         operationContext(),
                         collection,
+                        collection.getMainCollection()->ns(),
                         PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
                         actualSampleSize,
                         samplingAlgoAndChunk.first,
@@ -560,6 +562,7 @@ SamplingEstimatorForTesting SamplingEstimatorTest::createSamplingEstimatorForTes
     SamplingEstimatorForTesting samplingEstimator(
         operationContext(),
         colls,
+        collection.nss(),
         PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
         sampleSize,
         SamplingEstimatorForTesting::SamplingStyle::kRandom,
@@ -596,4 +599,14 @@ IndexBounds getIndexBounds(const QueryConfiguration& queryConfig,
     }
     return bounds;
 }
+
+size_t numberKeysMatch(const IndexBounds& bounds,
+                       const BSONObj& document,
+                       bool skipDuplicateMatches) {
+    size_t count = 0;
+    SamplingEstimatorImpl::forNumberKeysMatch(
+        bounds, {document}, [&](size_t cnt) { count += cnt; }, skipDuplicateMatches);
+    return count;
+}
+
 }  // namespace mongo::ce

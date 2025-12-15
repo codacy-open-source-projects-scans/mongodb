@@ -54,13 +54,11 @@
 #include <memory>
 #include <utility>
 
-#include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
-namespace mongo {
-namespace collection_internal {
+namespace mongo::collection_internal {
 namespace {
 
 struct CappedCollectionState {
@@ -198,8 +196,8 @@ void cappedDeleteUntilBelowConfiguredMaximum(OperationContext* opCtx,
             opCtx, *shard_role_details::getRecoveryUnit(opCtx), toDelete);
 
         if (opDebug) {
-            opDebug->additiveMetrics.incrementKeysDeleted(keysDeleted);
-            opDebug->additiveMetrics.incrementNdeleted(1);
+            opDebug->getAdditiveMetrics().incrementKeysDeleted(keysDeleted);
+            opDebug->getAdditiveMetrics().incrementNdeleted(1);
         }
         serviceOpCounters(opCtx).gotDelete();
     }
@@ -213,5 +211,4 @@ void cappedDeleteUntilBelowConfiguredMaximum(OperationContext* opCtx,
         });
 }
 
-}  // namespace collection_internal
-}  // namespace mongo
+}  // namespace mongo::collection_internal

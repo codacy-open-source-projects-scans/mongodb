@@ -42,6 +42,7 @@
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/router_role/routing_cache/shard_cannot_refresh_due_to_locks_held_exception.h"
+#include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/shard_role/direct_connection_util.h"
 #include "mongo/db/shard_role/lock_manager/d_concurrency.h"
@@ -52,7 +53,6 @@
 #include "mongo/db/shard_role/shard_catalog/collection_uuid_mismatch.h"
 #include "mongo/db/shard_role/shard_catalog/collection_uuid_mismatch_info.h"
 #include "mongo/db/shard_role/shard_catalog/database_sharding_state.h"
-#include "mongo/db/shard_role/shard_catalog/db_raii.h"
 #include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
 #include "mongo/db/shard_role/shard_catalog/shard_filtering_util.h"
 #include "mongo/db/shard_role/shard_catalog/snapshot_helper.h"
@@ -63,14 +63,10 @@
 #include "mongo/db/storage/exceptions.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_engine.h"
-#include "mongo/db/storage/storage_options.h"
-#include "mongo/db/topology/sharding_state.h"
 #include "mongo/db/versioning_protocol/shard_version.h"
-#include "mongo/db/versioning_protocol/stale_exception.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_severity_suppressor.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
@@ -95,6 +91,7 @@ namespace mongo {
 using TransactionResources = shard_role_details::TransactionResources;
 
 namespace {
+
 auto& killedDueToRangeDeletionCounter =
     *MetricBuilder<Counter64>("operation.killedDueToRangeDeletion");
 
@@ -294,67 +291,6 @@ void verifyDbAndCollection(OperationContext* opCtx,
     }
 }
 
-void logMissingPlacementConflictTime(const NamespaceString& nss) {
-    if (TestingProctor::instance().isEnabled()) {
-        tasserted(
-            10206300,
-            str::stream() << "Routed operations in multi-document transactions with readConcern != "
-                             "snapshot must carry a PlacementConflictTime for nss "
-                          << nss.toStringForErrorMsg());
-    } else {
-        static logv2::SeveritySuppressor logSeverity{
-            Minutes{1}, logv2::LogSeverity::Warning(), logv2::LogSeverity::Debug(5)};
-        LOGV2_DEBUG(10206301,
-                    logSeverity().toInt(),
-                    "Detected a missing PlacementConflictTime for an operation in a multi-document "
-                    "transaction with readConcern != snapshot originating from a router.",
-                    "nss"_attr = redact(nss.toStringForErrorMsg()));
-    }
-}
-
-// Check the operation correctly carries the PlacementConflictTime in case of a multi-document
-// transaction. The version is mandatory when all the following are true:
-// 1. The operation is coming from a router
-// 2. The operation carry a valid placement version that cannot be ignored.
-// 3. The operation requests a read concern != snapshot
-// 4. The operation runs as a part of a multi-document transaction
-// 5. The operation runs on a trackable namespace
-// The PlacementConflictTime is either present in the dbVersion or in the shardVersion otherwise.
-void assertPlacementConflictTimePresentWhenRequired(
-    OperationContext* opCtx,
-    const NamespaceString& nss,
-    const boost::optional<DatabaseVersion>& receivedDbVersion,
-    const boost::optional<ShardVersion>& receivedShardVersion) {
-    bool isShardVersionIgnored =
-        receivedShardVersion && ShardVersion::isPlacementVersionIgnored(*receivedShardVersion);
-    bool isShardVersionUntracked =
-        receivedShardVersion && *receivedShardVersion == ShardVersion::UNTRACKED();
-    bool isRoutedVersion = (receivedDbVersion && isShardVersionUntracked) ||
-        (receivedShardVersion && !isShardVersionIgnored && !isShardVersionUntracked);
-
-    if (isRoutedVersion && opCtx->inMultiDocumentTransaction() &&
-        OperationShardingState::isComingFromRouter(opCtx) &&
-        repl::ReadConcernArgs::get(opCtx).getLevel() !=
-            repl::ReadConcernLevel::kSnapshotReadConcern &&
-        !nss.isNamespaceAlwaysUntracked()) {
-        // Get the PlacementConflictTime from the either the dbVersion or shardVersion: This is
-        // inline with the protocol which will use the first available value in either of the two
-        // versions.
-        auto placementConflictTime = [&]() -> boost::optional<LogicalTime> {
-            if (receivedDbVersion && receivedDbVersion->getPlacementConflictTime()) {
-                return receivedDbVersion->getPlacementConflictTime();
-            } else if (receivedShardVersion) {
-                return receivedShardVersion->placementConflictTime();
-            }
-            return boost::none;
-        }();
-        if (!placementConflictTime) {
-            logMissingPlacementConflictTime(nss);
-        }
-    }
-}
-
-
 void checkPlacementVersion(OperationContext* opCtx,
                            const NamespaceString& nss,
                            const PlacementConcern& placementConcern) {
@@ -369,9 +305,61 @@ void checkPlacementVersion(OperationContext* opCtx,
         const auto scopedCSS = CollectionShardingState::acquire(opCtx, nss);
         scopedCSS->checkShardVersionOrThrow(opCtx, *receivedShardVersion);
     }
+}
 
-    assertPlacementConflictTimePresentWhenRequired(
-        opCtx, nss, receivedDbVersion, receivedShardVersion);
+/**
+ * Asserts whether the read concern is supported for the given collection with the specified read
+ * source.
+ */
+void assertReadConcernSupported(OperationContext* opCtx,
+                                const CollectionPtr& coll,
+                                const repl::ReadConcernArgs& readConcernArgs,
+                                const RecoveryUnit::ReadSource& readSource) {
+    const auto readConcernLevel = readConcernArgs.getLevel();
+    const auto& ns = coll->ns();
+
+    // The pre-images collection prunes old content using untimestamped truncates. A read
+    // establishing a snapshot at a point in time (PIT) may see data inconsistent with that PIT:
+    // data that should have been present at that PIT will be missing if it was truncated, since a
+    // non-truncated operation effectively overwrites history.
+    uassert(7829600,
+            "Reading with readConcern snapshot from pre-images collection is "
+            "not supported",
+            !ns.isChangeStreamPreImagesCollection() ||
+                readConcernLevel != repl::ReadConcernLevel::kSnapshotReadConcern);
+
+    // Ban snapshot reads on capped collections.
+    uassert(
+        ErrorCodes::SnapshotUnavailable,
+        "Reading from non replicated capped collections with readConcern snapshot is not supported",
+        !coll->isCapped() || ns.isReplicated() ||
+            readConcernLevel != repl::ReadConcernLevel::kSnapshotReadConcern);
+
+    // Disallow snapshot reads and causal consistent majority reads on config.transactions
+    // outside of transactions to avoid running the collection at a point-in-time in the middle
+    // of a secondary batch. Such reads are unsafe because config.transactions updates are
+    // coalesced on secondaries. Majority reads without an afterClusterTime is allowed because
+    // they are allowed to return arbitrarily stale data. We allow kNoTimestamp and kLastApplied
+    // reads because they must be from internal readers given the snapshot/majority readConcern
+    // (e.g. for session checkout).
+    if (ns == NamespaceString::kSessionTransactionsTableNamespace &&
+        readSource != RecoveryUnit::ReadSource::kNoTimestamp &&
+        readSource != RecoveryUnit::ReadSource::kLastApplied &&
+        ((readConcernLevel == repl::ReadConcernLevel::kSnapshotReadConcern &&
+          !readConcernArgs.allowTransactionTableSnapshot()) ||
+         (readConcernLevel == repl::ReadConcernLevel::kMajorityReadConcern &&
+          readConcernArgs.getArgsAfterClusterTime()))) {
+        // When we disable transaction update coalescing on secondaries to ensure that the history
+        // of updates is identical between the primary and secondaries. Then, snapshot and
+        // point-in-time (PIT) reads are allowed.
+        if (!rss::ReplicatedStorageService::get(opCtx)
+                 .getPersistenceProvider()
+                 .shouldDisableTransactionUpdateCoalescing()) {
+            uasserted(5557800,
+                      "Snapshot reads and causal consistent majority reads on config.transactions "
+                      "are not supported");
+        }
+    }
 }
 
 std::variant<CollectionPtr, std::shared_ptr<const ViewDefinition>> acquireLocalCollectionOrView(
@@ -403,6 +391,7 @@ std::variant<CollectionPtr, std::shared_ptr<const ViewDefinition>> acquireLocalC
         // concern for the user (snapshot).
         if (prerequisites.operationType == AcquisitionPrerequisites::kRead) {
             assertReadConcernSupported(
+                opCtx,
                 coll,
                 prerequisites.readConcern,
                 shard_role_details::getRecoveryUnit(opCtx)->getTimestampReadSource());
@@ -1578,7 +1567,7 @@ CollectionOrViewAcquisitions acquireCollectionsOrViewsMaybeLockFree(
     }
 }
 
-CollectionAcquisition acquireCollectionForLocalCatalogOnlyWithPotentialDataLoss(
+CollectionAcquisition shard_role_nocheck::acquireCollectionForLocalCatalogOnlyWithPotentialDataLoss(
     OperationContext* opCtx, const NamespaceString& nss, LockMode mode) {
     tassert(10566706,
             "Cannot use acquireCollectionForLocalCatalogOnlyWithPotentialDataLoss on "
@@ -1626,7 +1615,7 @@ CollectionAcquisition acquireCollectionForLocalCatalogOnlyWithPotentialDataLoss(
     return CollectionAcquisition(txnResources, acquiredCollection);
 }
 
-CollectionAcquisition acquireLocalCollectionNoConsistentCatalog(
+CollectionAcquisition shard_role_nocheck::acquireLocalCollectionNoConsistentCatalog(
     OperationContext* opCtx,
     const NamespaceStringOrUUID& nsOrUUID,
     AcquisitionPrerequisites::OperationType operationType,

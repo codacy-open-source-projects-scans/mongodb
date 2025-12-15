@@ -42,6 +42,7 @@ namespace mongo::extension::host_connector {
     return wrapCXXAndConvertExceptionToStatus([&]() {
         apiResult->code = ::MongoExtensionGetNextResultCode::kPauseExecution;
         apiResult->resultDocument = createEmptyByteContainer();
+        apiResult->resultMetadata = createEmptyByteContainer();
 
         auto& aggStageAdapter = *static_cast<HostExecAggStageAdapter*>(execAggStage);
 
@@ -86,25 +87,20 @@ namespace mongo::extension::host_connector {
 }
 
 void CachedGetNextResult::getAsExtensionNextResult(::MongoExtensionGetNextResult& outputResult) {
-    switch (outputResult.requestType) {
-        case kDocumentOnly: {
-            // TODO SERVER-113905, once we support metadata, we should only support returning both
-            // document and metadata.
-
-            // First, we must obtain the BSONObj for the document.
-            // Whether the resultDocument BSON is owned or not owned, it does not matter, since we
-            // will keep it stable for the lifetime of this cached result.
-            if (!_resultDocument) {
-                _resultDocument = _getNextResult.getDocument().toBson();
-            }
-            // Populate the output result as a view on the cached result BSON.
-            outputResult.resultDocument.type = MongoExtensionByteContainerType::kByteView;
-            outputResult.resultDocument.bytes.view = objAsByteView(*_resultDocument);
-        } break;
-        default:
-            MONGO_UNREACHABLE_TASSERT(11357800);
-            break;
+    // First, we must obtain the BSONObj for the document.
+    // Whether the resultDocument BSON is owned or not owned, it does not matter, since we
+    // will keep it stable for the lifetime of this cached result.
+    if (!_resultDocument) {
+        _resultDocument = _getNextResult.getDocument().toBson();
     }
+    if (!_resultMetadata) {
+        _resultMetadata = _getNextResult.getDocument().toBsonWithMetaDataOnly();
+    }
+    // Populate the output result as a view on the cached result BSON.
+    outputResult.resultDocument.type = MongoExtensionByteContainerType::kByteView;
+    outputResult.resultDocument.bytes.view = objAsByteView(*_resultDocument);
+    outputResult.resultMetadata.type = MongoExtensionByteContainerType::kByteView;
+    outputResult.resultMetadata.bytes.view = objAsByteView(*_resultMetadata);
 }
 
 };  // namespace mongo::extension::host_connector

@@ -83,6 +83,7 @@
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/replication_state_transition_lock_guard.h"
 #include "mongo/db/request_execution_context.h"
+#include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/server_parameter.h"
@@ -955,7 +956,8 @@ void CheckoutSessionAndInvokeCommand::_checkOutSession() {
                     opCtx,
                     {*sessionOptions.getTxnNumber(), sessionOptions.getTxnRetryCounter()},
                     sessionOptions.getAutocommit(),
-                    transactionAction);
+                    transactionAction,
+                    sessionOptions.getTransactionRuntimeContext());
                 beganOrContinuedTxn = true;
             } catch (const ExceptionFor<ErrorCodes::PreparedTransactionInProgress>&) {
                 auto prevTxnExitedPrepare = txnParticipant.onExitPrepare();
@@ -1633,6 +1635,29 @@ void ExecCommandDatabase::_initiateCommand() {
     _invocation->checkAuthorization(opCtx, _execContext.getRequest());
 
     boost::optional<rss::consensus::WriteIntentGuard> writeGuard;
+    auto& rss = rss::ReplicatedStorageService::get(opCtx->getServiceContext());
+
+    // On DSC, we block writes to local collections.
+    // We block transactions to local collections in case part of the transaction is a write for
+    // future proofing.
+    if (dbName == DatabaseName::kLocal &&
+        !rss.getPersistenceProvider().supportsLocalCollections()) {
+        bool commandIsWrite = (command->getReadWriteType() == Command::ReadWriteType::kWrite ||
+                               command->getReadWriteType() == Command::ReadWriteType::kTransaction);
+        uassert(ErrorCodes::IllegalOperation,
+                "Not allowed to write to 'local' database",
+                !commandIsWrite);
+
+        bool commandIsCreateCollection = command->getName() == "create";
+        uassert(ErrorCodes::IllegalOperation,
+                "Not allowed to create 'local' collections",
+                !commandIsCreateCollection);
+
+        bool commandIsCreateIndex = command->getName() == "createIndexes";
+        uassert(ErrorCodes::IllegalOperation,
+                "Not allowed to create indexes on 'local' collections",
+                !commandIsCreateIndex);
+    }
 
     if (!opCtx->getClient()->isInDirectClient() &&
         !MONGO_unlikely(skipCheckingForNotPrimaryInCommandDispatch.shouldFail())) {
@@ -1664,7 +1689,14 @@ void ExecCommandDatabase::_initiateCommand() {
             uassert(ErrorCodes::NotWritablePrimary, msg, canRunHere);
         }
 
+        // If we are the primary of a replSet which does not allow writes for targeted db
+        // and command is not permitted to run on "recovering" replica set secondary,
+        // we must assert repl states for safety.
+        // We filter out localDb since reads to localDb - regardless of write permissions -
+        // should still be allowed through. Previous conditional checks authorize
+        // write permissions to localDb depending on repl coordinator settings,
         if (!command->maintenanceOk() && replCoord->getSettings().isReplSet() &&
+            dbName != DatabaseName::kLocal &&
             !replCoord->canAcceptWritesForDatabase_UNSAFE(opCtx, dbName) &&
             !replCoord->getMemberState().secondary()) {
 
@@ -1995,10 +2027,13 @@ void ExecCommandDatabase::_commandExec() {
 bool ExecCommandDatabase::_awaitShardingInitializedIfNeeded(const Status& status) {
     auto opCtx = _execContext.getOpCtx();
 
-    // If this node hasn't even been started with --shardsvr then there is no chance sharding can
-    // be initialized so there is no point waiting.
-    // TODO (SERVER-103081): non-shardsvr nodes should not receive the ShardingStateNotInitialized
-    // error.
+    // The ShardingStateNotInitialized error can occur under two scenarios:
+    // 1. This node has nothing to do with sharding, but some command has been run which is
+    // intended only to be run in sharding scenarios
+    // 2. This node was recently added to a sharded cluster and we might need to do wait for
+    // initialization to finish before doing whatever we were trying to do
+    // If this node was not even started with --shardsvr, then we must be in the first situation
+    // and so there is no reason to wait for anything.
     if (opCtx->getClient()->isInDirectClient() ||
         !serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
         return false;

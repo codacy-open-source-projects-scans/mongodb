@@ -54,6 +54,9 @@ fi
 
 echo "common --//bazel/config:running_through_bazelisk" > $REPO_ROOT/.bazelrc.bazelisk
 
+# Write a compressed execution log to a file for EngFlow to pick up for more detailed analysis.
+echo "common --execution_log_compact_file=$REPO_ROOT/.tmp/bazel_execution_log.binpb.zst" > $REPO_ROOT/.bazelrc.exec_log_file
+
 if [[ $MONGO_BAZEL_WRAPPER_DEBUG == 1 ]]; then
     wrapper_start_time="$(date -u +%s.%N)"
 fi
@@ -211,9 +214,9 @@ fi
 # if no python use bazel to install one
 if [[ "$python" = "" ]] || [ ! -f $python ]; then
   >&2 echo "python prereq missing, using bazel to install python..."
-  >&2 $bazel_real build --bes_backend= --bes_results_url= @py_${os}_${ARCH}//:all
+  >&2 $bazel_real build --bes_backend= --bes_results_url= --workspace_status_command= @py_${os}_${ARCH}//:all
   if [[ $? != 0 ]]; then
-    >&2 $bazel_real build --config=local @py_${os}_${ARCH}//:all
+    >&2 $bazel_real build --config=local --workspace_status_command= @py_${os}_${ARCH}//:all
     if [[ $? != 0 ]]; then
       if [[ ! -z "$CI" ]] || [[ $MONGO_BAZEL_WRAPPER_FALLBACK == 1 ]]; then
         >&2 echo "wrapper script failed to install python! falling back to normal bazel call..."

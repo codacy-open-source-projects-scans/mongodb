@@ -137,7 +137,7 @@ mongo_cc_library(
         "//src/mongo/db/exec/document_value",
         "//src/mongo/db/query/query_shape",
         "//src/mongo/db/query/query_stats:query_stats_parse",
-        "//src/mongo/db/shard_role/shard_catalog:local_oplog_info",
+        "//src/mongo/db/repl:local_oplog_info",
         "//src/mongo/db/storage/key_string",
         "//src/mongo/db/timeseries:timeseries_options",
         "//src/mongo/idl:idl_parser",
@@ -437,6 +437,7 @@ mongo_cc_library(
         "single_document_transformation_processor.cpp",
         "skip_and_limit.cpp",
         "sort_reorder_helpers.cpp",
+        "stage_params_to_document_source_registry.cpp",
         "tee_buffer.cpp",
         "writer_util.cpp",
         "//src/mongo/db/exec/agg:bucket_auto_stage.cpp",
@@ -499,11 +500,8 @@ mongo_cc_library(
         "//src/mongo/db/pipeline:document_source_list_catalog.cpp",
         "//src/mongo/db/pipeline:document_source_list_cluster_catalog.cpp",
         "//src/mongo/db/pipeline:document_source_sharded_data_distribution.cpp",
-        "//src/mongo/db/pipeline/optimization:match_rules.cpp",
         "//src/mongo/db/pipeline/optimization:optimize.cpp",
         "//src/mongo/db/pipeline/optimization:rule_based_rewriter.cpp",
-        "//src/mongo/db/pipeline/optimization:rules_to_move.cpp",
-        "//src/mongo/db/pipeline/optimization:simple_rules.cpp",
         "//src/mongo/db/pipeline/search:document_source_internal_search_id_lookup.cpp",
         "//src/mongo/db/pipeline/search:document_source_internal_search_mongot_remote.cpp",
         "//src/mongo/db/pipeline/search:document_source_list_search_indexes.cpp",
@@ -512,7 +510,6 @@ mongo_cc_library(
         "//src/mongo/db/pipeline/search:document_source_vector_search.cpp",
         "//src/mongo/db/pipeline/search:search_helper.cpp",
         "//src/mongo/db/pipeline/search:vector_search_helper.cpp",
-        "//src/mongo/db/pipeline/visitors:document_source_walker.cpp",
         "//src/mongo/db/pipeline/window_function:partition_iterator.cpp",
         "//src/mongo/db/pipeline/window_function:window_function_exec.cpp",
         "//src/mongo/db/pipeline/window_function:window_function_exec_derivative.cpp",
@@ -1012,7 +1009,19 @@ mongo_cc_library(
         "//src/mongo/s:async_requests_sender",
         "//src/mongo/s:sharding_router_api",
         "//src/mongo/s/query:cluster_query_knobs",
+        "//src/mongo/s/query:shard_targeting_helpers",
         "//src/mongo/s/query/exec:cluster_cursor",
+    ],
+)
+
+mongo_cc_library(
+    name = "pipeline_visitor",
+    srcs = [
+        "//src/mongo/db/pipeline/visitors:document_source_walker.cpp",
+    ],
+    deps = [
+        ":pipeline",
+        "//src/mongo:base",
     ],
 )
 
@@ -1026,6 +1035,7 @@ mongo_cc_library(
         ":docs_needed_bounds",
         ":document_source_internal_apply_oplog_update",
         ":pipeline",
+        ":pipeline_visitor",
     ],
 )
 
@@ -1036,7 +1046,8 @@ mongo_cc_library(
     ],
     deps = [
         "//src/mongo/db:change_stream_pre_images_collection_manager",
-        "//src/mongo/db:shard_role",
+        "//src/mongo/db/repl:replica_set_aware_service",
+        "//src/mongo/db/shard_role",
         "//src/mongo/util:periodic_runner",
     ],
 )
@@ -1202,6 +1213,8 @@ mongo_cc_unit_test(
         "sharded_agg_helpers_test.cpp",
         "sharded_union_test.cpp",
         "skip_and_limit_test.cpp",
+        "split_pipeline_test.cpp",
+        "stage_params_to_document_source_registry_test.cpp",
         "tee_buffer_test.cpp",
         "//src/mongo/db/exec/agg:document_source_to_stage_registry_test.cpp",
         "//src/mongo/db/extension/host:document_source_extension_expandable_test.cpp",
@@ -1287,6 +1300,7 @@ mongo_cc_unit_test(
         ":field_path",
         ":granularity_rounder",
         ":pipeline",
+        ":pipeline_visitor",
         ":sharded_agg_helpers",
         ":stage_params",
         "//src/mongo:base",
@@ -1303,7 +1317,6 @@ mongo_cc_unit_test(
         "//src/mongo/db/exec/document_value:document_value_test_util",
         "//src/mongo/db/extension/host:extension_loader",
         "//src/mongo/db/extension/sdk:sdk_cpp",
-        "//src/mongo/db/extension/sdk/tests:shared_test_stages",
         "//src/mongo/db/op_observer",
         "//src/mongo/db/op_observer:op_observer_impl",
         "//src/mongo/db/op_observer:operation_logger_impl",
@@ -1320,11 +1333,11 @@ mongo_cc_unit_test(
         "//src/mongo/db/repl:oplog_entry",
         "//src/mongo/db/repl:replmocks",
         "//src/mongo/db/repl:storage_interface_impl",
-        "//src/mongo/db/s:shard_server_test_fixture",
         "//src/mongo/db/shard_role/shard_catalog:catalog_test_fixture",
+        "//src/mongo/db/sharding_environment:shard_server_test_fixture",
+        "//src/mongo/db/sharding_environment:sharding_mongos_test_fixture",
         "//src/mongo/db/storage/devnull:storage_devnull_core",
         "//src/mongo/executor:thread_pool_task_executor_test_fixture",
-        "//src/mongo/s:sharding_mongos_test_fixture",
         "//src/mongo/s/query/exec:router_exec_stage",
         "//src/mongo/unittest",
         "//src/mongo/util:clock_source_mock",
@@ -1365,8 +1378,8 @@ mongo_cc_unit_test(
     tags = ["mongo_unittest_eighth_group"],
     deps = [
         "//src/mongo/db:shard_role_api",
-        "//src/mongo/db/s:shard_server_test_fixture",
         "//src/mongo/db/s:sharding_runtime_d",
+        "//src/mongo/db/sharding_environment:shard_server_test_fixture",
         "//src/mongo/s:sharding_router_api",
     ],
 )
@@ -1394,9 +1407,9 @@ mongo_cc_benchmark(
         ":aggregation_context_fixture",
         ":document_source_mock",
         ":pipeline",
-        "//src/mongo/db:service_context_non_d",
         "//src/mongo/db:service_context_test_fixture",
         "//src/mongo/db/query:query_test_service_context",
+        "//src/mongo/db/shard_role:service_context_non_d",
     ],
 )
 
@@ -1418,9 +1431,9 @@ mongo_cc_benchmark(
     deps = [
         ":accumulator",
         ":expression_context_for_test",
-        "//src/mongo/db:service_context_non_d",
         "//src/mongo/db/query:query_fcv_environment_for_test",
         "//src/mongo/db/query:query_test_service_context",
+        "//src/mongo/db/shard_role:service_context_non_d",
     ],
 )
 
@@ -1431,9 +1444,9 @@ mongo_cc_benchmark(
     deps = [
         ":accumulator",
         ":expression_context_for_test",
-        "//src/mongo/db:service_context_non_d",
         "//src/mongo/db/query:query_fcv_environment_for_test",
         "//src/mongo/db/query:query_test_service_context",
+        "//src/mongo/db/shard_role:service_context_non_d",
     ],
 )
 

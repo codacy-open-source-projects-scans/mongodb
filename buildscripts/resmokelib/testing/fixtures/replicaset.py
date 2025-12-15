@@ -1165,7 +1165,8 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
         coll = primary_client["test"]["validate.hook"].with_options(
             write_concern=pymongo.write_concern.WriteConcern(w=len(self.nodes))
         )
-        coll.insert_one({"a": 1})
+        res = primary_client.test.command({"insert": "validate.hook", "documents": [{"a": 1}]})
+        clusterTime = res["opTime"]["ts"]
         coll.drop()
 
         self.logger.info("Performing Internode Validation")
@@ -1210,16 +1211,30 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
                 if db_name not in hashes:
                     hashes[db_name] = {}
                 db = client.get_database(db_name)
-                for coll_name in db.list_collection_names(filter=filter):
+                for coll in db.list_collections(filter=filter):
+                    coll_name = coll["name"]
                     # Skip excluded collections which all live in the 'config' database.
                     if db_name == "config" and coll_name in excluded_config_collections:
                         continue
                     if coll_name in excluded_any_db_collections:
                         continue
-                    # Skip collections that contain TTL indexes.
-                    if "ttl" in coll_name:
+                    # TODO SERVER-114904 Skip collections with names that end with a dot.
+                    # Even though the server allows their creation, db.get_collection() below
+                    # throws an InvalidName error.
+                    if coll_name.endswith("."):
                         continue
-                    validate_cmd = {"validate": coll_name, "collHash": True}
+                    # Skip collections that contain TTL indexes or TTL options.
+                    indexes = db.get_collection(coll_name).list_indexes()
+                    if any("expireAfterSeconds" in index for index in indexes):
+                        continue
+                    if "expireAfterSeconds" in coll["options"]:
+                        continue
+
+                    validate_cmd = {
+                        "validate": coll_name,
+                        "collHash": True,
+                        "atClusterTime": clusterTime,
+                    }
                     ret = db.command(validate_cmd, check=False)
                     if "all" in ret and "metadata" in ret:
                         something_set = True

@@ -28,6 +28,9 @@
  */
 #pragma once
 #include "mongo/db/extension/public/api.h"
+#include "mongo/util/modules.h"
+
+#include <utility>  // std::declval
 
 namespace mongo::extension {
 

@@ -231,9 +231,7 @@ std::string WiredTigerRecordStore::generateCreateString(
     // override values in the prefix, but not values in the suffix.
     str::stream ss;
     ss << "type=file,";
-    // Setting this larger than 10m can hurt latencies and throughput degradation if this
-    // is the oplog.  See SERVER-16247
-    ss << "memory_page_max=10m,";
+    ss << "memory_page_max=" << wtTableConfig.memoryPageMax << ",";
     // Choose a higher split percent, since most usage is append only. Allow some space
     // for workloads where updates increase the size of documents.
     ss << "split_pct=90,";
@@ -885,12 +883,14 @@ bool WiredTigerRecordStore::updateWithDamagesSupported() const {
     return !_forceUpdateWithFullDocument;
 }
 
-StatusWith<RecordData> WiredTigerRecordStore::_updateWithDamages(OperationContext* opCtx,
-                                                                 RecoveryUnit& ru,
-                                                                 const RecordId& id,
-                                                                 const RecordData& oldRec,
-                                                                 const char* damageSource,
-                                                                 const DamageVector& damages) {
+StatusWith<RecordData> WiredTigerRecordStore::_updateWithDamages(
+    OperationContext* opCtx,
+    RecoveryUnit& ru,
+    const RecordId& id,
+    const RecordData& oldRec,
+    const char* damageSource,
+    const DamageVector& damages,
+    const SeekableRecordCursor* cursor) {
     const int nentries = damages.size();
     DamageVector::const_iterator where = damages.begin();
     const DamageVector::const_iterator end = damages.cend();
@@ -904,14 +904,23 @@ StatusWith<RecordData> WiredTigerRecordStore::_updateWithDamages(OperationContex
 
     auto& wtRu = WiredTigerRecoveryUnit::get(ru);
 
-    auto cursorParams = getWiredTigerCursorParams(wtRu, tableId(), /*allowOverwrite=*/true);
-    WiredTigerCursor curwrap(std::move(cursorParams), getURI(), *wtRu.getSession());
-
-    wtRu.assertInActiveTxn();
-    WT_CURSOR* c = curwrap.get();
-    invariant(c);
+    WT_CURSOR* c = nullptr;
+    boost::optional<WiredTigerCursor> curwrap;
     CursorKey key = makeCursorKey(id, keyFormat());
-    setKey(c, &key);
+    if (!cursor) {
+        auto cursorParams = getWiredTigerCursorParams(wtRu, tableId(), /*allowOverwrite=*/true);
+        curwrap.emplace(std::move(cursorParams), getURI(), *wtRu.getSession());
+        wtRu.assertInActiveTxn();
+        c = curwrap->get();
+        setKey(c, &key);
+    } else {
+        // Make sure the cursor is already positioned.
+        const WiredTigerRecordStoreCursor* wtC =
+            reinterpret_cast<const WiredTigerRecordStoreCursor*>(cursor);
+        c = wtC->get();
+        tassert(10522601, "expected nonnull underlying cursor", c);
+        tassert(10522602, "expected cursor to be positioned", getKey(c, keyFormat()) == id);
+    }
 
     // The test harness calls us with empty damage vectors which WiredTiger doesn't allow.
     if (nentries == 0)
@@ -1224,8 +1233,8 @@ RecordId WiredTigerRecordStore::getLargestKey(OperationContext* opCtx, RecoveryU
                         err_msg));
     } else if (ret != WT_NOTFOUND) {
         if (ret == ENOTSUP) {
-            auto creationMetadata =
-                WiredTigerUtil::getMetadataCreate(sessRaii, getURI()).getValue();
+            auto res = WiredTigerUtil::getMetadataCreate(sessRaii, getURI());
+            const std::string& creationMetadata = res.getValue();
             if (creationMetadata.find("lsm=") != std::string::npos) {
                 LOGV2_FATAL(
                     6627200,

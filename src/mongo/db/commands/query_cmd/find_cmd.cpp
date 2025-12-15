@@ -73,6 +73,7 @@
 #include "mongo/db/query/client_cursor/cursor_response.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/collection_query_info.h"
 #include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
 #include "mongo/db/query/explain.h"
 #include "mongo/db/query/explain_diagnostic_printer.h"
@@ -101,6 +102,7 @@
 #include "mongo/db/s/query_analysis_writer.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
 #include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
 #include "mongo/db/shard_role/shard_catalog/collection.h"
 #include "mongo/db/shard_role/shard_catalog/collection_options.h"
@@ -190,6 +192,10 @@ std::unique_ptr<CanonicalQuery> parseQueryAndBeginOperation(
     auto expCtx = ExpressionContextBuilder{}
                       .fromRequest(opCtx, *findCommand, collator, allowDiskUseByDefault.load())
                       .tmpDir(boost::filesystem::path(storageGlobalParams.dbpath) / "_tmp")
+                      .mainCollPathArrayness(
+                          collection && feature_flags::gFeatureFlagPathArrayness.isEnabled()
+                              ? CollectionQueryInfo::get(collection).getPathArrayness()
+                              : nullptr)
                       .build();
     expCtx->startExpressionCounters();
     auto parsedRequest = uassertStatusOK(parsed_find_command::parse(
@@ -231,7 +237,7 @@ std::unique_ptr<CanonicalQuery> parseQueryAndBeginOperation(
         });
 
         if (parsedRequest->findCommandRequest->getIncludeQueryStatsMetrics()) {
-            CurOp::get(opCtx)->debug().queryStatsInfo.metricsRequested = true;
+            CurOp::get(opCtx)->debug().getQueryStatsInfo().metricsRequested = true;
         }
     }
 
@@ -428,9 +434,32 @@ public:
             }
         }
 
+        /**
+         * Entry point for execution of find explain command.
+         * Wraps a 'explainFind' invocation while ensuring that for any read queries will retry
+         * execution if the query throws a WriteConflictException.
+         * WriteConflict error may appear in a read path mostly due to storage failures.
+         * A known location such error may occur is during access of wildcard index multikeyness
+         * information in 'getExecutorFind' invocation.
+         */
         void explain(OperationContext* opCtx,
                      ExplainOptions::Verbosity verbosity,
                      rpc::ReplyBuilderInterface* replyBuilder) override {
+#ifdef MONGO_CONFIG_DEBUG_BUILD
+            // TODO SERVER-115113: This writeConflictRetry loop shouldn't exist as the operation is
+            // exclusively performing a read. Temporarily disable the consistent collection checker
+            // until this gets resolved.
+            DisableCollectionConsistencyChecks disableChecks{opCtx};
+#endif
+            writeConflictRetry(
+                opCtx, "find explain cmd WriteConflictException loop", _ns, [&]() -> void {
+                    this->explainFind(opCtx, verbosity, replyBuilder);
+                });
+        }
+
+        void explainFind(OperationContext* opCtx,
+                         ExplainOptions::Verbosity verbosity,
+                         rpc::ReplyBuilderInterface* replyBuilder) {
             // We want to start the query planning timer right after parsing. In the explain code
             // path, we have already parsed the FindCommandRequest, so start timing here.
             CurOp::get(opCtx)->beginQueryPlanningTimer();
@@ -503,6 +532,10 @@ public:
                     .fromRequest(opCtx, *_cmdRequest, collator, allowDiskUseByDefault.load())
                     .explain(verbosity)
                     .tmpDir(boost::filesystem::path(storageGlobalParams.dbpath) / "_tmp")
+                    .mainCollPathArrayness(
+                        collectionPtr && feature_flags::gFeatureFlagPathArrayness.isEnabled()
+                            ? CollectionQueryInfo::get(collectionPtr).getPathArrayness()
+                            : nullptr)
                     .build();
             expCtx->startExpressionCounters();
 
@@ -546,7 +579,7 @@ public:
                 timeseries::requiresViewlessTimeseriesTranslation(opCtx, *collectionOrView)) {
                 // Relinquish locks. The aggregation command will re-acquire them.
                 collectionOrView.reset();
-                CurOp::get(opCtx)->debug().queryStatsInfo.disableForSubqueryExecution = true;
+                CurOp::get(opCtx)->debug().getQueryStatsInfo().disableForSubqueryExecution = true;
                 return runFindAsAgg(opCtx, *cq, verbosity, replyBuilder);
             }
 
@@ -604,6 +637,26 @@ public:
         }
 
         /**
+         * Entry point for execution of find command.
+         * Wraps a 'runFind' invocation while ensuring that for any read queries will retry
+         * execution if the query throws a WriteConflictException.
+         * WriteConflictException may appear in a read path mostly due to storage failures.
+         * A known location such error may occur is during access of wildcard index multikeyness
+         * information in 'getExecutorFind' invocation.
+         */
+        void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* replyBuilder) override {
+#ifdef MONGO_CONFIG_DEBUG_BUILD
+            // TODO SERVER-115113: This writeConflictRetry loop shouldn't exist as the operation is
+            // exclusively performing a read. Temporarily disable the consistent collection checker
+            // until this gets resolved.
+            DisableCollectionConsistencyChecks disableChecks{opCtx};
+#endif
+            writeConflictRetry(opCtx, "find cmd WriteConflictException loop", _ns, [&]() -> void {
+                this->runFind(opCtx, replyBuilder);
+            });
+        }
+
+        /**
          * Runs a query using the following steps:
          *   --Parsing.
          *   --Acquire locks.
@@ -612,7 +665,7 @@ public:
          *   --Save state for getMore, transferring ownership of the executor to a ClientCursor.
          *   --Generate response to send to the client.
          */
-        void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* replyBuilder) override {
+        void runFind(OperationContext* opCtx, rpc::ReplyBuilderInterface* replyBuilder) {
             CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
 
             const BSONObj& cmdObj = _request.body;

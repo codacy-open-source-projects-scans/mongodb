@@ -464,7 +464,7 @@ StatusWith<ResolvedNamespaceMap> AggExState::resolveInvolvedNamespaces() const {
     return resolvedNamespaces;
 }
 
-void AggExState::performValidationChecks() {
+void AggExState::performValidationChecks() const {
     auto request = getRequest();
     auto& liteParsedPipeline = _aggReqDerivatives->liteParsedPipeline;
 
@@ -595,11 +595,11 @@ std::unique_ptr<AggCatalogState> AggExState::createAggCatalogState() {
 }
 
 ResolvedViewAggExState::ResolvedViewAggExState(AggExState&& baseState,
-                                               std::unique_ptr<AggCatalogState>& aggCatalogStage,
+                                               const AggCatalogState& aggCatalogState,
                                                const ViewDefinition& view)
     : AggExState(std::move(baseState)),
       _originalAggReqDerivatives(std::move(_aggReqDerivatives)),
-      _resolvedView(uassertStatusOK(aggCatalogStage->resolveView(
+      _resolvedView(uassertStatusOK(aggCatalogState.resolveView(
           _opCtx,
           _originalAggReqDerivatives->request.getNamespace(),
           view.timeseries() ? _originalAggReqDerivatives->request.getCollation() : boost::none))),
@@ -621,18 +621,18 @@ ResolvedViewAggExState::ResolvedViewAggExState(AggExState&& baseState,
 }
 
 StatusWith<std::unique_ptr<ResolvedViewAggExState>> ResolvedViewAggExState::create(
-    AggExState&& aggExState, std::unique_ptr<AggCatalogState>& aggCatalogState) {
-    invariant(aggCatalogState->lockAcquired());
+    std::shared_ptr<AggExState> aggExState, const AggCatalogState& aggCatalogState) {
+    invariant(aggCatalogState.lockAcquired());
 
     // Resolve the request's collation and check that the default collation of 'view' is compatible
     // with the operation's collation. The collation resolution and check are both skipped if the
     // request did not specify a collation.
-    tassert(10240800, "Expected a view", aggCatalogState->getMainCollectionOrView().isView());
+    tassert(10240800, "Expected a view", aggCatalogState.getMainCollectionOrView().isView());
     const auto& viewDefinition =
-        aggCatalogState->getMainCollectionOrView().getView().getViewDefinition();
+        aggCatalogState.getMainCollectionOrView().getView().getViewDefinition();
 
-    if (!aggExState.getRequest().getCollation().get_value_or(BSONObj()).isEmpty()) {
-        auto [collatorToUse, collatorToUseMatchesDefault] = aggCatalogState->resolveCollator();
+    if (!aggExState->getRequest().getCollation().get_value_or(BSONObj()).isEmpty()) {
+        auto [collatorToUse, collatorToUseMatchesDefault] = aggCatalogState.resolveCollator();
         if (!CollatorInterface::collatorsMatch(viewDefinition.defaultCollator(),
                                                collatorToUse.get()) &&
             !viewDefinition.timeseries()) {
@@ -644,7 +644,7 @@ StatusWith<std::unique_ptr<ResolvedViewAggExState>> ResolvedViewAggExState::crea
     // Create the ResolvedViewAggExState object which will resolve the view upon
     // initialization.
     return std::make_unique<ResolvedViewAggExState>(
-        std::move(aggExState), aggCatalogState, viewDefinition);
+        std::move(*aggExState), aggCatalogState, viewDefinition);
 }
 
 std::unique_ptr<Pipeline> ResolvedViewAggExState::applyViewToPipeline(
@@ -687,7 +687,8 @@ ScopedSetShardRole ResolvedViewAggExState::setShardRole(const CollectionRoutingI
                 OperationShardingState::get(_opCtx).getShardVersion(underlyingNss);
         }
 
-        return originalShardVersion ? originalShardVersion->placementConflictTime() : boost::none;
+        return originalShardVersion ? originalShardVersion->placementConflictTime_DEPRECATED()
+                                    : boost::none;
     }();
 
     if (cri.hasRoutingTable()) {
@@ -695,17 +696,19 @@ ScopedSetShardRole ResolvedViewAggExState::setShardRole(const CollectionRoutingI
 
         auto sv = cri.getShardVersion(myShardId);
         if (optPlacementConflictTimestamp) {
-            sv.setPlacementConflictTime(*optPlacementConflictTimestamp);
+            sv.setPlacementConflictTime_DEPRECATED(*optPlacementConflictTimestamp);
         }
         return ScopedSetShardRole(
             _opCtx, underlyingNss, sv /*shardVersion*/, boost::none /*databaseVersion*/);
     } else {
         auto sv = ShardVersion::UNTRACKED();
+        auto dbv = cri.getDbVersion();
         if (optPlacementConflictTimestamp) {
-            sv.setPlacementConflictTime(*optPlacementConflictTimestamp);
+            sv.setPlacementConflictTime_DEPRECATED(*optPlacementConflictTimestamp);
+            dbv.setPlacementConflictTime_DEPRECATED(*optPlacementConflictTimestamp);
         }
         return ScopedSetShardRole(
-            _opCtx, underlyingNss, sv /*shardVersion*/, cri.getDbVersion() /*databaseVersion*/);
+            _opCtx, underlyingNss, sv /*shardVersion*/, dbv /*databaseVersion*/);
     }
 }
 
@@ -773,6 +776,17 @@ boost::intrusive_ptr<ExpressionContext> AggCatalogState::createExpressionContext
     }
 
     return expCtx;
+}
+
+BSONObj AggCatalogState::getShardKey() const {
+    if (lockAcquired() && getMainCollectionOrView().isCollection()) {
+        const auto& mainCollShardingDescription =
+            getMainCollectionOrView().getCollection().getShardingDescription();
+        if (mainCollShardingDescription.isSharded()) {
+            return mainCollShardingDescription.getShardKeyPattern().toBSON();
+        }
+    }
+    return BSONObj();
 }
 
 void AggCatalogState::validate() const {

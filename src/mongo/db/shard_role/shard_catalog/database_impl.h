@@ -44,14 +44,12 @@
 #include "mongo/db/shard_role/shard_catalog/virtual_collection_options.h"
 #include "mongo/util/modules.h"
 
-#include <memory>
-
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 
 namespace mongo {
 
-class DatabaseImpl final : public Database {
+class MONGO_MOD_PRIVATE DatabaseImpl final : public Database {
 public:
     explicit DatabaseImpl(const DatabaseName& dbName);
 
@@ -111,17 +109,8 @@ public:
                                  const BSONObj& idIndex = BSONObj(),
                                  bool fromMigrate = false) const final;
 
-    Collection* createVirtualCollection(OperationContext* opCtx,
-                                        const NamespaceString& nss,
-                                        const CollectionOptions& opts,
-                                        const VirtualCollectionOptions& vopts) const final;
-
     StatusWith<std::unique_ptr<CollatorInterface>> validateCollator(
         OperationContext* opCtx, CollectionOptions& opts) const final;
-
-    Status createView(OperationContext* opCtx,
-                      const NamespaceString& viewName,
-                      const CollectionOptions& options) const final;
 
     Status renameCollection(OperationContext* opCtx,
                             NamespaceString fromNss,
@@ -133,6 +122,8 @@ public:
     const NamespaceString& getSystemViewsName() const final {
         return _viewsName;
     }
+
+    void createSystemDotViewsIfNecessary(OperationContext* opCtx) const final;
 
 private:
     StatusWith<std::unique_ptr<CollatorInterface>> _validateCollator(OperationContext* opCtx,
@@ -146,6 +137,10 @@ private:
         bool createDefaultIndexes,
         const BSONObj& idIndex,
         bool fromMigrate) const;
+
+    Status _createView(OperationContext* opCtx,
+                       const NamespaceString& viewName,
+                       const CollectionOptions& options) const;
 
     /**
      * Throws if there is a reason 'ns' cannot be created as a user collection. Namespace pattern

@@ -11,11 +11,13 @@
  */
 import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
 import {AllCommandsTest} from "jstests/libs/all_commands_test.js";
+import {withRetryOnTransientTxnError} from "jstests/libs/auto_retry_transaction_in_sharding.js";
 import {getCommandName} from "jstests/libs/cmd_object_utils.js";
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {Thread} from "jstests/libs/parallelTester.js";
 import {assertWriteConcernError} from "jstests/libs/write_concern_util.js";
+import {isUweEnabled} from "jstests/libs/query/uwe_utils.js";
 
 const dbName = "testDB";
 const collName = "testColl";
@@ -233,48 +235,50 @@ const wcCommandsTests = {
                 lsid: getLSID(),
             }),
             setupFunc: (coll, cluster, clusterType, secondariesRunning, optionalArgs) => {
-                assert.commandWorked(coll.insert({_id: 0}));
+                withRetryOnTransientTxnError(() => {
+                    assert.commandWorked(coll.insert({_id: 0}));
 
-                if (clusterType == "sharded" && bsonWoCompare(getShardKey(coll, fullNs), {}) == 0) {
-                    // Set the primary shard to shard0 so we can assume that it's okay to run
-                    // prepareTransaction on it
+                    if (clusterType == "sharded" && bsonWoCompare(getShardKey(coll, fullNs), {}) == 0) {
+                        // Set the primary shard to shard0 so we can assume that it's okay to run
+                        // prepareTransaction on it
+                        assert.commandWorked(
+                            coll.getDB().adminCommand({moveCollection: fullNs, toShard: cluster.shard0.shardName}),
+                        );
+                    }
+
                     assert.commandWorked(
-                        coll.getDB().adminCommand({moveCollection: fullNs, toShard: cluster.shard0.shardName}),
+                        coll.getDB().runCommand({
+                            insert: collName,
+                            documents: [{_id: 1}],
+                            lsid: getLSID(),
+                            stmtIds: [NumberInt(0)],
+                            txnNumber: getTxnNumber(),
+                            startTransaction: true,
+                            autocommit: false,
+                        }),
                     );
-                }
 
-                assert.commandWorked(
-                    coll.getDB().runCommand({
-                        insert: collName,
-                        documents: [{_id: 1}],
-                        lsid: getLSID(),
-                        stmtIds: [NumberInt(0)],
-                        txnNumber: getTxnNumber(),
-                        startTransaction: true,
-                        autocommit: false,
-                    }),
-                );
+                    assert.commandWorked(
+                        coll.getDB().runCommand({
+                            update: collName,
+                            updates: [{q: {}, u: {$set: {a: 1}}}],
+                            lsid: getLSID(),
+                            stmtIds: [NumberInt(1)],
+                            txnNumber: getTxnNumber(),
+                            autocommit: false,
+                        }),
+                    );
 
-                assert.commandWorked(
-                    coll.getDB().runCommand({
-                        update: collName,
-                        updates: [{q: {}, u: {$set: {a: 1}}}],
-                        lsid: getLSID(),
-                        stmtIds: [NumberInt(1)],
-                        txnNumber: getTxnNumber(),
-                        autocommit: false,
-                    }),
-                );
-
-                let primary = clusterType == "sharded" ? cluster.rs0.getPrimary() : cluster.getPrimary();
-                assert.commandWorked(
-                    primary.getDB(dbName).adminCommand({
-                        prepareTransaction: 1,
-                        lsid: getLSID(),
-                        txnNumber: getTxnNumber(),
-                        autocommit: false,
-                    }),
-                );
+                    let primary = clusterType == "sharded" ? cluster.rs0.getPrimary() : cluster.getPrimary();
+                    assert.commandWorked(
+                        primary.getDB(dbName).adminCommand({
+                            prepareTransaction: 1,
+                            lsid: getLSID(),
+                            txnNumber: getTxnNumber(),
+                            autocommit: false,
+                        }),
+                    );
+                });
             },
             confirmFunc: (res, coll) => {
                 assert.commandWorkedIgnoringWriteConcernErrors(res);
@@ -291,25 +295,27 @@ const wcCommandsTests = {
                 lsid: getLSID(),
             }),
             setupFunc: (coll) => {
-                assert.commandWorked(
-                    coll.getDB().runCommand({
-                        insert: collName,
-                        documents: [{_id: 1}],
-                        lsid: getLSID(),
-                        stmtIds: [NumberInt(0)],
-                        txnNumber: getTxnNumber(),
-                        startTransaction: true,
-                        autocommit: false,
-                    }),
-                );
-                assert.commandWorked(
-                    coll.getDB().adminCommand({
-                        commitTransaction: 1,
-                        lsid: getLSID(),
-                        txnNumber: getTxnNumber(),
-                        autocommit: false,
-                    }),
-                );
+                withRetryOnTransientTxnError(() => {
+                    assert.commandWorked(
+                        coll.getDB().runCommand({
+                            insert: collName,
+                            documents: [{_id: 1}],
+                            lsid: getLSID(),
+                            stmtIds: [NumberInt(0)],
+                            txnNumber: getTxnNumber(),
+                            startTransaction: true,
+                            autocommit: false,
+                        }),
+                    );
+                    assert.commandWorked(
+                        coll.getDB().adminCommand({
+                            commitTransaction: 1,
+                            lsid: getLSID(),
+                            txnNumber: getTxnNumber(),
+                            autocommit: false,
+                        }),
+                    );
+                });
             },
             confirmFunc: (res, coll) => {
                 assert.commandFailedWithCode(res, ErrorCodes.TransactionCommitted);
@@ -673,25 +679,27 @@ const wcCommandsTests = {
                 lsid: getLSID(),
             }),
             setupFunc: (coll) => {
-                assert.commandWorked(
-                    coll.getDB().runCommand({
-                        insert: collName,
-                        documents: [{_id: 1}],
-                        lsid: getLSID(),
-                        stmtIds: [NumberInt(0)],
-                        txnNumber: getTxnNumber(),
-                        startTransaction: true,
-                        autocommit: false,
-                    }),
-                );
-                assert.commandWorked(
-                    coll.getDB().adminCommand({
-                        commitTransaction: 1,
-                        txnNumber: getTxnNumber(),
-                        autocommit: false,
-                        lsid: getLSID(),
-                    }),
-                );
+                withRetryOnTransientTxnError(() => {
+                    assert.commandWorked(
+                        coll.getDB().runCommand({
+                            insert: collName,
+                            documents: [{_id: 1}],
+                            lsid: getLSID(),
+                            stmtIds: [NumberInt(0)],
+                            txnNumber: getTxnNumber(),
+                            startTransaction: true,
+                            autocommit: false,
+                        }),
+                    );
+                    assert.commandWorked(
+                        coll.getDB().adminCommand({
+                            commitTransaction: 1,
+                            txnNumber: getTxnNumber(),
+                            autocommit: false,
+                            lsid: getLSID(),
+                        }),
+                    );
+                });
             },
             confirmFunc: (res, coll) => {
                 assert.commandWorkedIgnoringWriteConcernErrors(res);
@@ -708,17 +716,19 @@ const wcCommandsTests = {
                 lsid: getLSID(),
             }),
             setupFunc: (coll) => {
-                assert.commandWorked(
-                    coll.getDB().runCommand({
-                        insert: collName,
-                        documents: [{_id: 1}],
-                        lsid: getLSID(),
-                        stmtIds: [NumberInt(0)],
-                        txnNumber: getTxnNumber(),
-                        startTransaction: true,
-                        autocommit: false,
-                    }),
-                );
+                withRetryOnTransientTxnError(() => {
+                    assert.commandWorked(
+                        coll.getDB().runCommand({
+                            insert: collName,
+                            documents: [{_id: 1}],
+                            lsid: getLSID(),
+                            stmtIds: [NumberInt(0)],
+                            txnNumber: getTxnNumber(),
+                            startTransaction: true,
+                            autocommit: false,
+                        }),
+                    );
+                });
             },
             confirmFunc: (res, coll) => {
                 assert.commandWorkedIgnoringWriteConcernErrors(res);
@@ -6043,7 +6053,7 @@ const shardedDDLCommandsRequiringMajorityCommit = [
     "shardCollection",
 ];
 
-function shouldSkipTestCase(clusterType, command, testCase, shardedCollection, writeWithoutSk, coll) {
+function shouldSkipTestCase(clusterType, command, testCase, shardedCollection, writeWithoutSk, timeseriesViews, coll) {
     if (
         !shardedCollection &&
         (command == "moveChunk" ||
@@ -6116,6 +6126,19 @@ function shouldSkipTestCase(clusterType, command, testCase, shardedCollection, w
             jsTestLog("Skipping " + command + " test for failure case.");
             return true;
         }
+
+        // When UWE is enabled, a findAndModify update on sharded viewful timeseries collection
+        // may fail on mongos directly, so there's no write concern error to check.
+        if (
+            clusterType == "sharded" &&
+            ["findAndModify", "findOneAndUpdate"].includes(command) &&
+            shardedCollection &&
+            timeseriesViews &&
+            isUweEnabled(coll.getDB())
+        ) {
+            jsTestLog("Skipping " + command + " test for failure case.");
+            return true;
+        }
     }
 }
 
@@ -6148,6 +6171,7 @@ function executeWriteConcernBehaviorTests(
     secondariesRunning,
     shardedCollection,
     writeWithoutSk,
+    timeseriesViews,
 ) {
     commandsToRun.forEach((command) => {
         let cmd = masterCommandsList[command];
@@ -6161,7 +6185,17 @@ function executeWriteConcernBehaviorTests(
         let forceUseMajorityWC = clusterType == "sharded" && umcRequireMajority.includes(command);
 
         if (cmd.noop) {
-            if (!shouldSkipTestCase(clusterType, command, "noop", shardedCollection, writeWithoutSk, coll))
+            if (
+                !shouldSkipTestCase(
+                    clusterType,
+                    command,
+                    "noop",
+                    shardedCollection,
+                    writeWithoutSk,
+                    timeseriesViews,
+                    coll,
+                )
+            )
                 runCommandTest(
                     cmd.noop,
                     conn,
@@ -6175,7 +6209,17 @@ function executeWriteConcernBehaviorTests(
         }
 
         if (cmd.success) {
-            if (!shouldSkipTestCase(clusterType, command, "success", shardedCollection, writeWithoutSk, coll))
+            if (
+                !shouldSkipTestCase(
+                    clusterType,
+                    command,
+                    "success",
+                    shardedCollection,
+                    writeWithoutSk,
+                    timeseriesViews,
+                    coll,
+                )
+            )
                 runCommandTest(
                     cmd.success,
                     conn,
@@ -6189,7 +6233,17 @@ function executeWriteConcernBehaviorTests(
         }
 
         if (cmd.failure) {
-            if (!shouldSkipTestCase(clusterType, command, "failure", shardedCollection, writeWithoutSk, coll))
+            if (
+                !shouldSkipTestCase(
+                    clusterType,
+                    command,
+                    "failure",
+                    shardedCollection,
+                    writeWithoutSk,
+                    timeseriesViews,
+                    coll,
+                )
+            )
                 runCommandTest(
                     cmd.failure,
                     conn,
@@ -6224,7 +6278,19 @@ export function checkWriteConcernBehaviorForAllCommands(
 
         stopSecondaries(cluster, clusterType);
 
-        executeWriteConcernBehaviorTests(conn, coll, cluster, clusterType, preSetup, commandsList, commandsToTest);
+        executeWriteConcernBehaviorTests(
+            conn,
+            coll,
+            cluster,
+            clusterType,
+            preSetup,
+            commandsList,
+            commandsToTest,
+            [] /* secondariesRunning */,
+            shardedCollection,
+            false /* writeWithoutSk */,
+            limitToTimeseriesViews,
+        );
 
         restartSecondaries(cluster, clusterType);
 
@@ -6276,6 +6342,8 @@ export function checkWriteConcernBehaviorForAllCommands(
             commandsToTest,
             [csrsSecondaries[1]],
             shardedCollection,
+            false /* writeWithoutSk */,
+            limitToTimeseriesViews,
         );
 
         cluster.configRS.restart(csrsSecondaries[0]);
@@ -6297,6 +6365,8 @@ export function checkWriteConcernBehaviorForAllCommands(
             commandsToTest,
             secondariesRunning,
             shardedCollection,
+            false /* writeWithoutSk */,
+            limitToTimeseriesViews,
         );
 
         restartSecondaries(cluster, clusterType);
@@ -6332,6 +6402,8 @@ export function checkWriteConcernBehaviorAdditionalCRUDOps(
         commandsToTest,
         [] /* secondariesRunning */,
         shardedCollection,
+        writeWithoutSk,
+        limitToTimeseriesViews,
     );
 
     restartSecondaries(cluster, clusterType);

@@ -77,7 +77,6 @@ public:
     ExpressionContextBuilder& inLookup(bool);
     ExpressionContextBuilder& inUnionWith(bool);
     ExpressionContextBuilder& isParsingViewDefinition(bool);
-    ExpressionContextBuilder& isParsingPipelineUpdate(bool);
     ExpressionContextBuilder& isParsingCollectionValidator(bool);
     ExpressionContextBuilder& isIdHackQuery(bool);
     ExpressionContextBuilder& isFleQuery(bool);
@@ -105,6 +104,8 @@ public:
         boost::optional<std::pair<NamespaceString, std::vector<BSONObj>>>);
     ExpressionContextBuilder& originalNs(NamespaceString);
     ExpressionContextBuilder& isHybridSearch(bool);
+    ExpressionContextBuilder& mainCollPathArrayness(
+        std::shared_ptr<const PathArrayness> mainCollPathArrayness);
 
     /**
      * Add kSessionTransactionsTableNamespace, and kRsOplogNamespace
@@ -125,6 +126,10 @@ public:
     ExpressionContextBuilder& fromRequest(OperationContext*,
                                           const AggregateCommandRequest&,
                                           bool useDisk = false);
+    ExpressionContextBuilder& fromRequest(OperationContext*,
+                                          const UpdateRequest& request,
+                                          bool forgoOpCounterIncrements = false);
+    ExpressionContextBuilder& fromRequest(OperationContext*, const DeleteRequest& request);
 
     boost::intrusive_ptr<ExpressionContext> build();
 

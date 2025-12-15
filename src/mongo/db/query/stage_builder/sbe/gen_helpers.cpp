@@ -238,8 +238,8 @@ bool indexKeyConsistencyCheckCallback(OperationContext* opCtx,
             // If 'entryMap' doesn't contain an entry for 'indexIdent', create one.
             if (it == entryMap.end()) {
                 auto indexCatalog = collection->getIndexCatalog();
-                auto indexDesc = indexCatalog->findIndexByIdent(opCtx, indexIdent);
-                auto entry = indexDesc ? indexDesc->getEntry() : nullptr;
+                auto entry = indexCatalog->findIndexByIdent(opCtx, indexIdent);
+                auto indexDesc = entry ? entry->descriptor() : nullptr;
 
                 // Throw an error if we can't get the IndexDescriptor or the IndexCatalogEntry
                 // (or if the index is dropped).
@@ -288,8 +288,8 @@ bool indexKeyConsistencyCheckCallback(OperationContext* opCtx,
     return true;
 }
 
-sbe::ScanCallbacks makeScanCallbacks() {
-    return sbe::ScanCallbacks(indexKeyCorruptionCheckCallback, indexKeyConsistencyCheckCallback);
+sbe::FetchCallbacks makeFetchCallbacks() {
+    return sbe::FetchCallbacks(indexKeyCorruptionCheckCallback, indexKeyConsistencyCheckCallback);
 }
 
 std::tuple<SbStage, SbSlot, SbSlot, SbSlotVector> makeLoopJoinForFetch(
@@ -312,7 +312,8 @@ std::tuple<SbStage, SbSlot, SbSlot, SbSlotVector> makeLoopJoinForFetch(
     // in the QSN tree to indicate which collection we are fetching over.
     tassert(6355301, "Cannot fetch from a collection that doesn't exist", collToFetch);
 
-    sbe::ScanCallbacks callbacks(indexKeyCorruptionCheckCallback, indexKeyConsistencyCheckCallback);
+    sbe::FetchCallbacks callbacks(indexKeyCorruptionCheckCallback,
+                                  indexKeyConsistencyCheckCallback);
 
     SbIndexInfoSlots indexInfoSlots;
     indexInfoSlots.indexIdentSlot = indexIdentSlot;

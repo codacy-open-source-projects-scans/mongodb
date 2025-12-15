@@ -45,7 +45,6 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
-#include "mongo/db/global_catalog/shard_key_pattern_query_util.h"
 #include "mongo/db/global_catalog/type_collection_common_types_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -92,6 +91,7 @@
 #include "mongo/s/query/exec/router_exec_stage.h"
 #include "mongo/s/query/exec/router_stage_merge.h"
 #include "mongo/s/query/exec/router_stage_remove_metadata_fields.h"
+#include "mongo/s/query/shard_key_pattern_query_util.h"
 #include "mongo/s/request_types/cluster_commands_without_shard_key_gen.h"
 #include "mongo/s/write_ops/write_without_shard_key_util.h"
 #include "mongo/util/assert_util.h"
@@ -428,11 +428,9 @@ public:
             // Get all shard ids for shards that have chunks in the desired namespace.
             hangBeforeMetadataRefreshClusterQuery.pauseWhileSet(opCtx);
 
-            sharding::router::CollectionRouter router{opCtx->getServiceContext(), nss};
+            sharding::router::CollectionRouter router(opCtx, nss);
             return router.routeWithRoutingContext(
-                opCtx,
-                Request::kCommandName,
-                [&](OperationContext* opCtx, RoutingContext& routingCtx) {
+                Request::kCommandName, [&](OperationContext* opCtx, RoutingContext& routingCtx) {
                     const auto& cri = routingCtx.getCollectionRoutingInfo(nss);
 
                     auto allShardsContainingChunksForNs =
@@ -464,15 +462,11 @@ public:
                         ? cm.getTimeseriesFields()
                         : boost::none;
 
-                    auto cmdObj =
+                    const auto cmdObj =
                         createAggregateCmdObj(opCtx, parsedInfoFromRequest, nss, timeseriesFields);
 
-                    std::vector<AsyncRequestsSender::Request> requests;
-                    requests.reserve(allShardsContainingChunksForNs.size());
-                    for (const auto& shardId : allShardsContainingChunksForNs) {
-                        requests.emplace_back(
-                            shardId, appendShardVersion(cmdObj, cri.getShardVersion(shardId)));
-                    }
+                    const auto requests = buildVersionedRequests(
+                        opCtx, nss, cri, allShardsContainingChunksForNs, cmdObj);
 
                     MultiStatementTransactionRequestsSender ars(
                         opCtx,
@@ -603,27 +597,20 @@ public:
 
             // Get all shard ids for shards that have chunks in the desired namespace.
             const auto& nss = parsedInfoFromRequest.nss;
-            sharding::router::CollectionRouter router{opCtx->getServiceContext(), nss};
+            sharding::router::CollectionRouter router(opCtx, nss);
             return router.routeWithRoutingContext(
-                opCtx,
                 "explain queryWithoutShardKey"_sd,
                 [&](OperationContext* opCtx, RoutingContext& routingCtx) {
                     const auto& cri = routingCtx.getCollectionRoutingInfo(nss);
 
-                    auto allShardsContainingChunksForNs =
-                        getShardsToTarget(opCtx, cri, nss, parsedInfoFromRequest);
-                    auto cmdObj =
+                    const auto cmdObj =
                         createAggregateCmdObj(opCtx, parsedInfoFromRequest, nss, boost::none);
-
-                    const auto aggExplainCmdObj = ClusterExplain::wrapAsExplain(cmdObj, verbosity);
-
-                    std::vector<AsyncRequestsSender::Request> requests;
-                    requests.reserve(allShardsContainingChunksForNs.size());
-                    for (const auto& shardId : allShardsContainingChunksForNs) {
-                        requests.emplace_back(
-                            shardId,
-                            appendShardVersion(aggExplainCmdObj, cri.getShardVersion(shardId)));
-                    }
+                    const auto requests = buildVersionedRequests(
+                        opCtx,
+                        nss,
+                        cri,
+                        getShardsToTarget(opCtx, cri, nss, parsedInfoFromRequest),
+                        ClusterExplain::wrapAsExplain(cmdObj, verbosity));
 
                     Timer timer;
                     MultiStatementTransactionRequestsSender ars(

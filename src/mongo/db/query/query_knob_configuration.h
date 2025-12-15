@@ -76,6 +76,8 @@ public:
     bool getRandomJoinReorderDefaultToHashJoin() const;
     size_t getRandomJoinOrderSeed() const;
     JoinReorderModeEnum getJoinReorderMode() const;
+    JoinPlanTreeShapeEnum getJoinPlanTreeShape() const;
+    size_t getMaxNumberNodesConsideredForImplicitEdges() const;
 
     /**
      * Returns whether we can push down fully compatible stages to sbe. This is only true when the
@@ -84,6 +86,9 @@ public:
     bool canPushDownFullyCompatibleStages() const;
 
     int64_t getInternalQuerySpillingMinAvailableDiskSpaceBytes() const;
+
+    bool getMeasureQueryExecutionTimeInNanoseconds() const;
+    bool getUseMultiplannerForSingleSolutions() const;
 
 private:
     QueryFrameworkControlEnum _queryFrameworkControlValue;
@@ -101,12 +106,16 @@ private:
     bool _sbeDisableGroupPushdownValue;
     bool _sbeDisableLookupPushdownValue;
     bool _sbeDisableTimeSeriesValue;
+    bool _measureQueryExecutionTimeInNanoseconds;
+    bool _useMultiplannerForSingleSolutions;
 
     // Join-ordering values.
     bool _isJoinOrderingEnabled;
     bool _randomJoinReorderDefaultToHashJoin;
     int64_t _randomJoinOrderSeed;
     JoinReorderModeEnum _joinReorderMode;
+    JoinPlanTreeShapeEnum _joinPlanTreeShape;
+    int64_t _maxNumberNodesConsideredForImplicitEdges;
 
     int64_t _internalQuerySpillingMinAvailableDiskSpaceBytes;
 };

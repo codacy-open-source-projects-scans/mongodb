@@ -88,10 +88,27 @@
 namespace mongo {
 namespace {
 const auto rangeDeleterServiceDecorator = ServiceContext::declareDecoration<RangeDeleterService>();
+
+void resetTermScopedPromise(WithLock,
+                            boost::optional<SharedPromise<void>>& promise,
+                            StringData message) {
+    if (promise.has_value() && !promise->getFuture().isReady()) {
+        promise->setError({ErrorCodes::PrimarySteppedDown, message});
+    }
+    promise = boost::none;
+}
+
+void ensureSet(WithLock, SharedPromise<void>& promise) {
+    if (!promise.getFuture().isReady()) {
+        promise.emplaceValue();
+    }
+}
+
 }  // namespace
 
 const ReplicaSetAwareServiceRegistry::Registerer<RangeDeleterService>
-    rangeDeleterServiceRegistryRegisterer("RangeDeleterService");
+    rangeDeleterServiceRegistryRegisterer("RangeDeleterService",
+                                          {"ShardingInitializationMongoDRegistry"});
 
 RangeDeleterService* RangeDeleterService::get(ServiceContext* serviceContext) {
     return &rangeDeleterServiceDecorator(serviceContext);
@@ -109,6 +126,10 @@ void RangeDeleterService::onStartup(OperationContext* opCtx) {
 
 void RangeDeleterService::onStepUpBegin(OperationContext* opCtx, long long term) {
     registerRecoveryJob(term);
+
+    auto lock = _acquireMutexUnconditionally();
+    _termInitializationPromise.emplace();
+    _serviceUpPromise.emplace();
 }
 
 void RangeDeleterService::onStepUpComplete(OperationContext* opCtx, long long term) {
@@ -132,24 +153,27 @@ void RangeDeleterService::onStepUpComplete(OperationContext* opCtx, long long te
     _readyRangeDeletionsProcessorPtr =
         std::make_unique<ReadyRangeDeletionsProcessor>(opCtx, _executor);
 
-    _stepUpCompletedFuture =
-        _recoveryState.getRecoveryFuture(term)
-            .thenRunOn(_executor)
-            .then([this, term](RangeDeletionRecoveryTracker::Outcome outcome) {
-                LOGV2_INFO(11079601,
-                           "Range deleter service task recovery finished",
-                           "term"_attr = term,
-                           "outcome"_attr = outcome);
-                auto lock = _acquireMutexUnconditionally();
-                // Since the recovery is only spawned on step-up but may complete later, it's not
-                // guaranteed that the node is still primary when the all resubmissions finish.
-                if (_state != kDown) {
-                    _state = kUp;
-                    LOGV2_INFO(11079600, "Range deleter service is now up", "term"_attr = term);
-                    _readyRangeDeletionsProcessorPtr->beginProcessing();
-                }
-            })
-            .share();
+    _recoveryState.getRecoveryFuture(term)
+        .thenRunOn(_executor)
+        .then([this, term](RangeDeletionRecoveryTracker::Outcome outcome) {
+            LOGV2_INFO(11079601,
+                       "Range deleter service task recovery finished",
+                       "term"_attr = term,
+                       "outcome"_attr = outcome);
+            auto lock = _acquireMutexUnconditionally();
+            // Since the recovery is only spawned on step-up but may complete later, it's not
+            // guaranteed that the node is still primary when the all resubmissions finish.
+            if (_state != kDown) {
+                _state = kUp;
+                LOGV2_INFO(11079600, "Range deleter service is now up", "term"_attr = term);
+                _readyRangeDeletionsProcessorPtr->beginProcessing();
+                ensureSet(lock, *_serviceUpPromise);
+            }
+        })
+        .getAsync([](auto) {});
+
+    ensureSet(lock, *_termInitializationPromise);
+
     _launchRangeDeletionRecoveryTask(opCtx, term);
 }
 
@@ -201,8 +225,7 @@ void RangeDeleterService::_launchRangeDeletionRecoveryTask(OperationContext* opC
                 (void)this->registerTask(
                     RangeDeletionTask::parse(cursor->next(),
                                              IDLParserContext("rangeDeletionRecovery")),
-                    SemiFuture<void>::makeReady(),
-                    true /* fromResubmitOnStepUp */);
+                    SemiFuture<void>::makeReady());
                 nRescheduledTasks++;
             }
 
@@ -225,8 +248,7 @@ void RangeDeleterService::_launchRangeDeletionRecoveryTask(OperationContext* opC
                     (void)this->registerTask(
                         RangeDeletionTask::parse(cursor->next(),
                                                  IDLParserContext("rangeDeletionRecovery")),
-                        SemiFuture<void>::makeReady(),
-                        true /* fromResubmitOnStepUp */);
+                        SemiFuture<void>::makeReady());
                 }
             }
 
@@ -240,8 +262,6 @@ void RangeDeleterService::_launchRangeDeletionRecoveryTask(OperationContext* opC
 
 void RangeDeleterService::_joinAndResetState() {
     invariant(_state == kDown);
-    // Join the thread spawned on step-up to resume range deletions
-    _stepUpCompletedFuture.getNoThrow().ignore();
 
     // Join and destruct the executor
     if (_executor) {
@@ -258,11 +278,18 @@ void RangeDeleterService::_joinAndResetState() {
 
 void RangeDeleterService::_stopService() {
     auto lock = _acquireMutexUnconditionally();
+
+    resetTermScopedPromise(
+        lock, _termInitializationPromise, "Term ended before RangeDeleterService could initialize");
+    resetTermScopedPromise(
+        lock, _serviceUpPromise, "Term ended before RangeDeleterService could be brought up");
+
     if (_state == kDown)
         return;
 
     _state = kDown;
     _activeTerm.reset();
+
     if (_initOpCtxHolder) {
         stdx::lock_guard<Client> lk(*_initOpCtxHolder->getClient());
         _initOpCtxHolder->markKilled(ErrorCodes::Interrupted);
@@ -300,6 +327,26 @@ long long RangeDeleterService::totalNumOfRegisteredTasks() {
     return _rangeDeletionTasks.getTaskCount();
 }
 
+SemiFuture<void> RangeDeleterService::getTermInitializationFuture() {
+    auto lock = _acquireMutexUnconditionally();
+    return _getTermInitializationFuture(lock);
+}
+
+SemiFuture<void> RangeDeleterService::_getTermInitializationFuture(WithLock) {
+    uassert(ErrorCodes::NotWritablePrimary,
+            "RangeDeleterService is not initializing because this node is not primary",
+            _termInitializationPromise.has_value());
+    return _termInitializationPromise->getFuture().semi();
+}
+
+SemiFuture<void> RangeDeleterService::getServiceUpFuture() {
+    auto lock = _acquireMutexUnconditionally();
+    uassert(ErrorCodes::NotWritablePrimary,
+            "RangeDeleterService is not recovering because this node is not primary",
+            _serviceUpPromise.has_value());
+    return _serviceUpPromise->getFuture().semi();
+}
+
 void RangeDeleterService::registerRecoveryJob(long long term) {
     _recoveryState.registerRecoveryJob(term);
 }
@@ -310,12 +357,43 @@ void RangeDeleterService::notifyRecoveryJobComplete(long long term) {
 SharedSemiFuture<void> RangeDeleterService::registerTask(
     const RangeDeletionTask& rdt,
     SemiFuture<void>&& waitForActiveQueriesToComplete,
-    bool fromResubmitOnStepUp,
-    bool pending) {
+    TaskPending pending) {
+
+    auto overlappingRangeDeletions =
+        _rangeDeletionTasks.getOverlappingTasks(rdt.getCollectionUuid(), rdt.getRange());
+
     auto scheduleRangeDeletionChain = [&](SharedSemiFuture<void> pendingFuture) {
         (void)pendingFuture.thenRunOn(_executor)
+            .then([this]() {
+                // Wait for all recovery tasks to be registered first.
+                return getServiceUpFuture();
+            })
             .then([this,
-                   waitForOngoingQueries = std::move(waitForActiveQueriesToComplete).share()]() {
+                   overlappingTasks = std::move(overlappingRangeDeletions),
+                   registrationTime = rdt.getTimestamp().value_or(
+                       Timestamp(getGlobalServiceContext()->getFastClockSource()->now())),
+                   taskId = rdt.getId()]() {
+                std::vector<ExecutorFuture<void>> futures;
+                for (const auto& [_, task] : overlappingTasks) {
+                    if ((task->getRegistrationTime() < registrationTime) ||
+                        (task->getRegistrationTime() == registrationTime &&
+                         taskId < task->getTaskId())) {
+                        futures.emplace_back(task->getCompletionFuture().thenRunOn(_executor));
+                    }
+                }
+                // We want to wait for all overlapping range deletion tasks to finish before
+                // proceeding with this task. This is because the range deleter service assumes that
+                // there are no overlapping range deletion tasks and attempting to union tasks or
+                // splice incoming tasks could lead to unexpected behavior with the current
+                // implementation.
+                if (futures.empty()) {
+                    return SemiFuture<std::vector<Status>>::makeReady(std::vector<Status>{});
+                }
+                return whenAll(std::move(futures));
+            })
+            .then([this, waitForOngoingQueries = std::move(waitForActiveQueriesToComplete).share()](
+                      std::vector<Status> /*statuses*/) {
+                // We do not care about the statuses of the overlapping tasks we waited on.
                 // Step 1: wait for ongoing queries retaining the range to drain
                 return waitForOngoingQueries;
             })
@@ -355,8 +433,10 @@ SharedSemiFuture<void> RangeDeleterService::registerTask(
             });
     };
 
-    auto lock =
-        fromResubmitOnStepUp ? _acquireMutexUnconditionally() : _acquireMutexFailIfServiceNotUp();
+    auto lock = _acquireMutexUnconditionally();
+    uassert(ErrorCodes::NotYetInitialized,
+            "RangeDeleterService is not yet initialized for the current term",
+            _getTermInitializationFuture(lock).isReady());
 
     LOGV2_DEBUG(7536600,
                 2,
@@ -373,7 +453,7 @@ SharedSemiFuture<void> RangeDeleterService::registerTask(
     }
 
     // Allow future chain to progress in case the task is flagged as non-pending
-    if (!pending) {
+    if (pending == TaskPending::kNotPending) {
         task->clearPending();
     }
 

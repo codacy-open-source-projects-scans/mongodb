@@ -38,6 +38,7 @@
 #include "mongo/db/client.h"
 #include "mongo/db/exec/sbe/expressions/compile_ctx.h"
 #include "mongo/db/exec/sbe/size_estimator.h"
+#include "mongo/db/exec/sbe/stages/generic_scan.h"
 #include "mongo/db/exec/sbe/stages/random_scan.h"
 #include "mongo/db/exec/sbe/stages/scan.h"
 #include "mongo/db/exec/sbe/values/bson.h"
@@ -77,7 +78,7 @@ ScanStageBase::ScanStageBase(UUID collUuid,
                              value::SlotVector scanFieldSlots,
                              PlanYieldPolicy* yieldPolicy,
                              PlanNodeId nodeId,
-                             ScanCallbacks scanCallbacks,
+                             ScanOpenCallback scanOpenCallback,
                              bool forward,
                              // Optional arguments:
                              bool participateInTrialRunTracking)
@@ -96,7 +97,7 @@ ScanStageBase::ScanStageBase(UUID collUuid,
                                                   indexKeyPatternSlot,
                                                   scanFieldNames,
                                                   scanFieldSlots,
-                                                  scanCallbacks,
+                                                  scanOpenCallback,
                                                   forward)) {}  // ScanStageBase regular constructor
 
 /**
@@ -192,53 +193,78 @@ void ScanStageBase::getStatsShared(BSONObjBuilder& bob) const {
 }
 
 void ScanStageBase::debugPrintShared(std::vector<DebugPrinter::Block>& ret) const {
+    bool first = true;
+    ret.emplace_back(DebugPrinter::Block("[`"));
     if (_state->recordSlot) {
         DebugPrinter::addIdentifier(ret, _state->recordSlot.value());
-    } else {
-        DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
+        ret.emplace_back("=");
+        DebugPrinter::addKeyword(ret, "record");
+        first = false;
     }
 
     if (_state->recordIdSlot) {
+        if (!first) {
+            ret.emplace_back(DebugPrinter::Block("`,"));
+        }
         DebugPrinter::addIdentifier(ret, _state->recordIdSlot.value());
-    } else {
-        DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
+        ret.emplace_back("=");
+        DebugPrinter::addKeyword(ret, "recordId");
+        first = false;
     }
 
     if (_state->snapshotIdSlot) {
+        if (!first) {
+            ret.emplace_back(DebugPrinter::Block("`,"));
+        }
         DebugPrinter::addIdentifier(ret, _state->snapshotIdSlot.value());
-    } else {
-        DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
+        ret.emplace_back("=");
+        DebugPrinter::addKeyword(ret, "snapshotId");
+        first = false;
     }
 
     if (_state->indexIdentSlot) {
+        if (!first) {
+            ret.emplace_back(DebugPrinter::Block("`,"));
+        }
         DebugPrinter::addIdentifier(ret, _state->indexIdentSlot.value());
-    } else {
-        DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
+        ret.emplace_back("=");
+        DebugPrinter::addKeyword(ret, "indexIdent");
+        first = false;
     }
 
     if (_state->indexKeySlot) {
+        if (!first) {
+            ret.emplace_back(DebugPrinter::Block("`,"));
+        }
         DebugPrinter::addIdentifier(ret, _state->indexKeySlot.value());
-    } else {
-        DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
+        ret.emplace_back("=");
+        DebugPrinter::addKeyword(ret, "indexKey");
+        first = false;
     }
 
     if (_state->indexKeyPatternSlot) {
-        DebugPrinter::addIdentifier(ret, _state->indexKeyPatternSlot.value());
-    } else {
-        DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
-    }
-
-    ret.emplace_back(DebugPrinter::Block("[`"));
-    for (size_t idx = 0; idx < _state->scanFieldNames.size(); ++idx) {
-        if (idx) {
+        if (!first) {
             ret.emplace_back(DebugPrinter::Block("`,"));
         }
-
-        DebugPrinter::addIdentifier(ret, _state->scanFieldSlots[idx]);
+        DebugPrinter::addIdentifier(ret, _state->indexKeyPatternSlot.value());
         ret.emplace_back("=");
-        DebugPrinter::addIdentifier(ret, _state->scanFieldNames[idx]);
+        DebugPrinter::addKeyword(ret, "indexKeyPattern");
+        first = false;
     }
     ret.emplace_back(DebugPrinter::Block("`]"));
+
+    if (_state->scanFieldNames.size()) {
+        ret.emplace_back(DebugPrinter::Block("[`"));
+        for (size_t idx = 0; idx < _state->scanFieldNames.size(); ++idx) {
+            if (idx) {
+                ret.emplace_back(DebugPrinter::Block("`,"));
+            }
+            DebugPrinter::addIdentifier(ret, _state->scanFieldSlots[idx]);
+            ret.emplace_back("=");
+            DebugPrinter::addIdentifier(ret, _state->scanFieldNames[idx]);
+        }
+        ret.emplace_back(DebugPrinter::Block("`]"));
+    }
 
     ret.emplace_back("@\"`");
     DebugPrinter::addIdentifier(ret, _state->collUuid.toString());
@@ -409,8 +435,8 @@ void ScanStageBaseImpl<Derived>::open(bool reOpen) {
         tassert(5959701, "restoreCollection() unexpectedly returned null in ScanStageBase", _coll);
     }
 
-    if (_state->scanCallbacks.scanOpenCallback) {
-        _state->scanCallbacks.scanOpenCallback(_opCtx, _coll.getPtr());
+    if (_state->scanOpenCallback) {
+        _state->scanOpenCallback(_opCtx, _coll.getPtr());
     }
 
     self()->scanResetState(reOpen);
@@ -430,7 +456,7 @@ ScanStageBaseImpl<Derived>::ScanStageBaseImpl(UUID collUuid,
                                               value::SlotVector scanFieldSlots,
                                               PlanYieldPolicy* yieldPolicy,
                                               PlanNodeId nodeId,
-                                              ScanCallbacks scanCallbacks,
+                                              ScanOpenCallback scanOpenCallback,
                                               bool forward,
                                               // Optional arguments:
                                               bool participateInTrialRunTracking)
@@ -446,7 +472,7 @@ ScanStageBaseImpl<Derived>::ScanStageBaseImpl(UUID collUuid,
                     scanFieldSlots,
                     yieldPolicy,
                     nodeId,
-                    scanCallbacks,
+                    scanOpenCallback,
                     forward,
                     // Optional arguments:
                     participateInTrialRunTracking){};
@@ -474,7 +500,7 @@ ScanStage::ScanStage(UUID collUuid,
                      bool forward,
                      PlanYieldPolicy* yieldPolicy,
                      PlanNodeId nodeId,
-                     ScanCallbacks scanCallbacks,
+                     ScanOpenCallback scanOpenCallback,
                      // Optional arguments:
                      bool participateInTrialRunTracking,
                      bool includeScanStartRecordId,
@@ -491,7 +517,7 @@ ScanStage::ScanStage(UUID collUuid,
                         scanFieldSlots,
                         yieldPolicy,
                         nodeId,
-                        scanCallbacks,
+                        scanOpenCallback,
                         forward,
                         participateInTrialRunTracking),
       _includeScanStartRecordId(includeScanStartRecordId),
@@ -579,23 +605,7 @@ PlanState ScanStage::getNext() {
         return trackPlanState(PlanState::IS_EOF);
     }
 
-    // Return EOF if the index key is found to be inconsistent.
-    if (_state->scanCallbacks.indexKeyConsistencyCheckCallback &&
-        !_state->scanCallbacks.indexKeyConsistencyCheckCallback(_opCtx,
-                                                                _indexCatalogEntryMap,
-                                                                _snapshotIdAccessor,
-                                                                _indexIdentAccessor,
-                                                                _indexKeyAccessor,
-                                                                _coll.getPtr(),
-                                                                *nextRecord)) {
-        return trackPlanState(PlanState::IS_EOF);
-    }
-
-    if (_state->recordSlot) {
-        _recordAccessor.reset(false,
-                              value::TypeTags::bsonObject,
-                              value::bitcastFrom<const char*>(nextRecord->data.data()));
-    }
+    resetRecordId(nextRecord);
 
     if (_state->recordIdSlot) {
         _recordId = std::move(nextRecord->id);
@@ -668,22 +678,25 @@ std::unique_ptr<PlanStageStats> ScanStage::getStats(bool includeDebugInfo) const
     return ret;
 }
 
-std::vector<DebugPrinter::Block> ScanStage::debugPrint() const {
-    std::vector<DebugPrinter::Block> ret = PlanStage::debugPrint();
+std::vector<DebugPrinter::Block> ScanStage::debugPrint(const DebugPrintInfo& debugPrintInfo) const {
+    std::vector<DebugPrinter::Block> ret = PlanStage::debugPrint(debugPrintInfo);
+    bool first = true;
     if (_minRecordIdSlot) {
         DebugPrinter::addIdentifier(ret, _minRecordIdSlot.value());
-    } else {
-        DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
+        ret.emplace_back("=");
+        DebugPrinter::addKeyword(ret, "minRecordId");
+        first = false;
     }
-
     if (_maxRecordIdSlot) {
+        if (!first) {
+            ret.emplace_back(DebugPrinter::Block("`,"));
+        }
         DebugPrinter::addIdentifier(ret, _maxRecordIdSlot.value());
-    } else {
-        DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
+        ret.emplace_back("=");
+        DebugPrinter::addKeyword(ret, "maxRecordId");
     }
     debugPrintShared(ret);
-    ret.emplace_back(_state->forward ? "true" : "false");
-
+    ret.emplace_back(_state->forward ? "forward" : "reverse");
     return ret;
 }
 
@@ -704,3 +717,4 @@ size_t ScanStageBase::estimateCompileTimeSize() const {
 
 template class mongo::sbe::ScanStageBaseImpl<mongo::sbe::ScanStage>;
 template class mongo::sbe::ScanStageBaseImpl<mongo::sbe::RandomScanStage>;
+template class mongo::sbe::ScanStageBaseImpl<mongo::sbe::GenericScanStage>;

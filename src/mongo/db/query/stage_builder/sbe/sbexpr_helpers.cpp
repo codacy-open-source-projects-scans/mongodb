@@ -36,6 +36,7 @@
 #include "mongo/db/exec/sbe/stages/co_scan.h"
 #include "mongo/db/exec/sbe/stages/fetch.h"
 #include "mongo/db/exec/sbe/stages/filter.h"
+#include "mongo/db/exec/sbe/stages/generic_scan.h"
 #include "mongo/db/exec/sbe/stages/hash_agg.h"
 #include "mongo/db/exec/sbe/stages/hash_agg_accumulator.h"
 #include "mongo/db/exec/sbe/stages/hash_join.h"
@@ -467,7 +468,7 @@ std::tuple<SbStage, SbSlot, SbSlot, SbSlotVector> SbBuilder::makeScan(
     std::vector<std::string> scanFieldNames,
     const SbScanBounds& scanBounds,
     const SbIndexInfoSlots& indexInfoSlots,
-    sbe::ScanCallbacks scanCallbacks,
+    sbe::ScanOpenCallback scanOpenCallback,
     boost::optional<SbSlot> oplogTsSlot) {
     auto resultSlot = SbSlot{_state.slotId()};
     auto recordIdSlot = SbSlot{_state.slotId()};
@@ -479,25 +480,45 @@ std::tuple<SbStage, SbSlot, SbSlot, SbSlotVector> SbBuilder::makeScan(
         scanFieldSlots.emplace_back(SbSlot{_state.slotId()});
     }
 
-    auto scanStage = sbe::makeS<sbe::ScanStage>(collectionUuid,
-                                                std::move(dbName),
-                                                lower(resultSlot),
-                                                lower(recordIdSlot),
-                                                lower(indexInfoSlots.snapshotIdSlot),
-                                                lower(indexInfoSlots.indexIdentSlot),
-                                                lower(indexInfoSlots.indexKeySlot),
-                                                lower(indexInfoSlots.indexKeyPatternSlot),
-                                                std::move(scanFieldNames),
-                                                lower(scanFieldSlots),
-                                                lower(scanBounds.minRecordIdSlot),
-                                                lower(scanBounds.maxRecordIdSlot),
-                                                forward,
-                                                _state.yieldPolicy,
-                                                _nodeId,
-                                                std::move(scanCallbacks),
-                                                true /* participateInTrialRunTracking */,
-                                                scanBounds.includeScanStartRecordId,
-                                                scanBounds.includeScanEndRecordId);
+    if (scanBounds.minRecordIdSlot || scanBounds.maxRecordIdSlot) {
+        auto scanStage = sbe::makeS<sbe::ScanStage>(collectionUuid,
+                                                    std::move(dbName),
+                                                    lower(resultSlot),
+                                                    lower(recordIdSlot),
+                                                    lower(indexInfoSlots.snapshotIdSlot),
+                                                    lower(indexInfoSlots.indexIdentSlot),
+                                                    lower(indexInfoSlots.indexKeySlot),
+                                                    lower(indexInfoSlots.indexKeyPatternSlot),
+                                                    std::move(scanFieldNames),
+                                                    lower(scanFieldSlots),
+                                                    lower(scanBounds.minRecordIdSlot),
+                                                    lower(scanBounds.maxRecordIdSlot),
+                                                    forward,
+                                                    _state.yieldPolicy,
+                                                    _nodeId,
+                                                    std::move(scanOpenCallback),
+                                                    true /* participateInTrialRunTracking */,
+                                                    scanBounds.includeScanStartRecordId,
+                                                    scanBounds.includeScanEndRecordId);
+
+        return {std::move(scanStage), resultSlot, recordIdSlot, std::move(scanFieldSlots)};
+    }
+
+    auto scanStage = sbe::makeS<sbe::GenericScanStage>(collectionUuid,
+                                                       std::move(dbName),
+                                                       lower(resultSlot),
+                                                       lower(recordIdSlot),
+                                                       lower(indexInfoSlots.snapshotIdSlot),
+                                                       lower(indexInfoSlots.indexIdentSlot),
+                                                       lower(indexInfoSlots.indexKeySlot),
+                                                       lower(indexInfoSlots.indexKeyPatternSlot),
+                                                       std::move(scanFieldNames),
+                                                       lower(scanFieldSlots),
+                                                       forward,
+                                                       _state.yieldPolicy,
+                                                       _nodeId,
+                                                       std::move(scanOpenCallback),
+                                                       true /* participateInTrialRunTracking */);
 
     return {std::move(scanStage), resultSlot, recordIdSlot, std::move(scanFieldSlots)};
 }
@@ -1169,7 +1190,7 @@ SbBuilder::FetchBuildResult SbBuilder::makeFetch(SbStage child,
                                                  SbSlot seekSlot,
                                                  std::vector<std::string> scanFieldNames,
                                                  const SbIndexInfoSlots& indexInfoSlots,
-                                                 sbe::ScanCallbacks scanCallbacks) {
+                                                 sbe::FetchCallbacks scanCallbacks) {
     auto resultSlot = SbSlot{_state.slotId()};
     auto recordIdSlot = SbSlot{_state.slotId()};
 

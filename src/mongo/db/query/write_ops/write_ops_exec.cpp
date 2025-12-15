@@ -75,6 +75,7 @@
 #include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/query/query_stats/update_key.h"
 #include "mongo/db/query/shard_key_diagnostic_printer.h"
+#include "mongo/db/query/write_ops/canonical_update.h"
 #include "mongo/db/query/write_ops/delete_request_gen.h"
 #include "mongo/db/query/write_ops/insert.h"
 #include "mongo/db/query/write_ops/parsed_delete.h"
@@ -232,7 +233,7 @@ void finishCurOp(OperationContext* opCtx, CurOp* curOp) {
     try {
         curOp->done();
         auto executionTimeMicros = curOp->elapsedTimeExcludingPauses();
-        curOp->debug().additiveMetrics.executionTime = executionTimeMicros;
+        curOp->debug().getAdditiveMetrics().executionTime = executionTimeMicros;
 
         recordCurOpMetrics(opCtx);
         Top::getDecoration(opCtx).record(opCtx,
@@ -688,7 +689,7 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
                 if (source != OperationSource::kTimeseriesInsert) {
                     ServerWriteConcernMetrics::get(opCtx)->recordWriteConcernForInserts(
                         opCtx->getWriteConcern(), batch.size());
-                    curOp.debug().additiveMetrics.incrementNinserted(batch.size());
+                    curOp.debug().getAdditiveMetrics().incrementNinserted(batch.size());
                 }
                 return true;
             }
@@ -723,7 +724,7 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
                     result.setN(1);
                     out->results.emplace_back(std::move(result));
                     if (source != OperationSource::kTimeseriesInsert) {
-                        curOp.debug().additiveMetrics.incrementNinserted(1);
+                        curOp.debug().getAdditiveMetrics().incrementNinserted(1);
                     }
                 } catch (...) {
                     // Release the lock following any error if we are not in multi-statement
@@ -851,17 +852,34 @@ UpdateResult performUpdate(OperationContext* opCtx,
                                                              updateRequest);
     }
 
-    ParsedUpdate parsedUpdate(opCtx,
-                              updateRequest,
-                              collection.getCollectionPtr(),
-                              false /*forgoOpCounterIncrements*/,
-                              isTimeseriesLogicalRequest);
-    uassertStatusOK(parsedUpdate.parseRequest());
+    auto [collatorToUse, expCtxCollationMatchesDefault] =
+        resolveCollator(opCtx, updateRequest->getCollation(), collection.getCollectionPtr());
+
+    auto expCtx =
+        ExpressionContextBuilder{}
+            .fromRequest(opCtx, *updateRequest)
+            .collator(std::move(collatorToUse))
+            .collationMatchesDefault(expCtxCollationMatchesDefault)
+            .requiresTimeseriesExtendedRangeSupport(
+                isTimeseriesLogicalRequest && collection.getCollectionPtr() &&
+                collection.getCollectionPtr()->getRequiresTimeseriesExtendedRangeSupport())
+            .build();
+
+    auto parsedUpdate = uassertStatusOK(parsed_update_command::parse(
+        expCtx,
+        updateRequest,
+        makeExtensionsCallback<ExtensionsCallbackReal>(opCtx, &updateRequest->getNsString())));
+
+    auto canonicalUpdate = uassertStatusOK(CanonicalUpdate::make(expCtx,
+                                                                 std::move(parsedUpdate),
+                                                                 collection.getCollectionPtr(),
+                                                                 isTimeseriesLogicalRequest));
 
     // Create an RAII object that prints useful information about the ExpressionContext in the case
     // of a tassert or crash.
     ScopedDebugInfo expCtxDiagnostics(
-        "ExpCtxDiagnostics", diagnostic_printers::ExpressionContextPrinter{parsedUpdate.expCtx()});
+        "ExpCtxDiagnostics",
+        diagnostic_printers::ExpressionContextPrinter{canonicalUpdate->expCtx()});
 
     if (auto scoped = failAllUpdates.scoped(); MONGO_unlikely(scoped.isActive())) {
         tassert(9276701,
@@ -871,7 +889,7 @@ UpdateResult performUpdate(OperationContext* opCtx,
     }
 
     const auto exec = uassertStatusOK(
-        getExecutorUpdate(&curOp->debug(), collection, &parsedUpdate, boost::none /* verbosity
+        getExecutorUpdate(&curOp->debug(), collection, canonicalUpdate.get(), boost::none /* verbosity
         */));
     // Capture diagnostics to be logged in the case of a failure.
     ScopedDebugInfo explainDiagnostics("explainDiagnostics",
@@ -884,7 +902,7 @@ UpdateResult performUpdate(OperationContext* opCtx,
 
     if (updateRequest->shouldReturnAnyDocs()) {
         docFound = exec->executeFindAndModify();
-        curOp->debug().additiveMetrics.nreturned = docFound ? 1 : 0;
+        curOp->debug().getAdditiveMetrics().nreturned = docFound ? 1 : 0;
     } else {
         // The 'UpdateResult' object will be obtained later, so discard the return value.
         (void)exec->executeUpdate();
@@ -1018,7 +1036,7 @@ long long performDelete(OperationContext* opCtx,
 
     if (deleteRequest->getReturnDeleted()) {
         docFound = exec->executeFindAndModify();
-        curOp->debug().additiveMetrics.nreturned = docFound ? 1 : 0;
+        curOp->debug().getAdditiveMetrics().nreturned = docFound ? 1 : 0;
     } else {
         // The number of deleted documents will be obtained from the plan executor later, so discard
         // the return value.
@@ -1041,7 +1059,7 @@ long long performDelete(OperationContext* opCtx,
 
     // Fill out OpDebug with the number of deleted docs.
     auto nDeleted = exec->getDeleteResult();
-    curOp->debug().additiveMetrics.ndeleted = nDeleted;
+    curOp->debug().getAdditiveMetrics().ndeleted = nDeleted;
 
     if (curOp->shouldDBProfile()) {
         auto&& explainer = exec->getPlanExplainer();
@@ -1215,7 +1233,7 @@ WriteResult performInserts(
         curOp.setLogicalOp(lk, LogicalOp::opInsert);
         curOp.ensureStarted();
         // Initialize 'ninserted' for the operation if is not yet.
-        curOp.debug().additiveMetrics.incrementNinserted(0);
+        curOp.debug().getAdditiveMetrics().incrementNinserted(0);
     }
 
     uassertStatusOK(userAllowedWriteNS(opCtx, actualNs));
@@ -1346,10 +1364,10 @@ static SingleWriteResult performSingleUpdateOpNoRetry(OperationContext* opCtx,
                                                       OperationSource source,
                                                       CurOp& curOp,
                                                       CollectionAcquisition collection,
-                                                      ParsedUpdate& parsedUpdate,
+                                                      CanonicalUpdate& canonicalUpdate,
                                                       bool* containsDotsAndDollarsField) {
-    auto exec = uassertStatusOK(
-        getExecutorUpdate(&curOp.debug(), collection, &parsedUpdate, boost::none /* verbosity */));
+    auto exec = uassertStatusOK(getExecutorUpdate(
+        &curOp.debug(), collection, &canonicalUpdate, boost::none /* verbosity */));
     // Capture diagnostics to be logged in the case of a failure.
     ScopedDebugInfo explainDiagnostics("explainDiagnostics",
                                        diagnostic_printers::ExplainDiagnosticPrinter{exec.get()});
@@ -1399,16 +1417,17 @@ static SingleWriteResult performSingleUpdateOpNoRetry(OperationContext* opCtx,
     // Collect query stats for the update operation if a QueryStats key was generated during
     // registration. This ensures that we minimize the overhead of query stats collection for
     // updates even if it does not have query stats enabled.
-    auto key = std::move(curOp.debug().queryStatsInfo.key);
+    auto key = std::move(curOp.debug().getQueryStatsInfo().key);
     if (key) {
         curOp.setEndOfOpMetrics(0 /* no documents returned */);
-        collectQueryStatsMongod(opCtx, parsedUpdate.expCtx(), std::move(key));
+        collectQueryStatsMongod(opCtx, canonicalUpdate.expCtx(), std::move(key));
     }
 
     return result;
 }
 
 void registerRequestForQueryStats(OperationContext* opCtx,
+                                  const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                   const NamespaceString& ns,
                                   const CollectionAcquisition& collection,
                                   const write_ops::UpdateCommandRequest& wholeOp,
@@ -1423,7 +1442,7 @@ void registerRequestForQueryStats(OperationContext* opCtx,
     // TODO(SERVER-111930): Support recording query stats for updates with simple ID query
     // Skip if the parse query is unavailable. This could happen if the query is a simple Id query:
     // an exact-match query on _id.
-    if (!parsedUpdate.hasParsedQuery()) {
+    if (!parsedUpdate.hasParsedFindCommand()) {
         return;
     }
 
@@ -1434,19 +1453,28 @@ void registerRequestForQueryStats(OperationContext* opCtx,
         return;
     }
 
-    // Skip unsupported update types.
-    // TODO(SERVER-110344) Support modifier updates.
-    if (parsedUpdate.getRequest()->getUpdateModification().type() !=
-            write_ops::UpdateModification::Type::kReplacement &&
-        parsedUpdate.getRequest()->getUpdateModification().type() !=
-            write_ops::UpdateModification::Type::kPipeline) {
-        return;
+    // Skip unsupported update types, such as delta and transform.
+    auto modType = parsedUpdate.getRequest()->getUpdateModification().type();
+    switch (modType) {
+        case write_ops::UpdateModification::Type::kReplacement:
+        case write_ops::UpdateModification::Type::kModifier:
+        case write_ops::UpdateModification::Type::kPipeline:
+            break;
+        default:
+            return;
+    }
+
+    // TODO (SERVER-113907): Implement query shape for update with array filters.
+    if (modType == write_ops::UpdateModification::Type::kModifier) {
+        // Skip modifier updates that contains array filters.
+        if (!parsedUpdate.getRequest()->getArrayFilters().empty()) {
+            return;
+        }
     }
 
     // TODO(SERVER-113688): Support recording query stats for pipeline updates containing
     // $_internalApplyOplogUpdate.
-    if (parsedUpdate.getRequest()->getUpdateModification().type() ==
-        write_ops::UpdateModification::Type::kPipeline) {
+    if (modType == write_ops::UpdateModification::Type::kPipeline) {
         if (parsedUpdate.getDriver()
                 ->getUpdateExecutor()
                 ->getCheckExistenceForDiffInsertOperations()) {
@@ -1457,29 +1485,26 @@ void registerRequestForQueryStats(OperationContext* opCtx,
     // Compute QueryShapeHash and record it in CurOp.
     query_shape::DeferredQueryShape deferredShape{[&]() {
         return shape_helpers::tryMakeShape<query_shape::UpdateCmdShape>(
-            wholeOp, parsedUpdate, parsedUpdate.expCtx());
+            wholeOp, parsedUpdate, expCtx);
     }};
 
     // QueryShapeHash(QSH) will be recorded in CurOp, but it is not being used for anything else
     // downstream yet until we support updates in PQS. Using std::ignore to indicate that discarding
     // the returned QSH is intended.
     std::ignore = CurOp::get(opCtx)->debug().ensureQueryShapeHash(opCtx, [&]() {
-        return shape_helpers::computeQueryShapeHash(
-            parsedUpdate.expCtx(), deferredShape, wholeOp.getNamespace());
+        return shape_helpers::computeQueryShapeHash(expCtx, deferredShape, wholeOp.getNamespace());
     });
 
 
     // Register query stats collection.
     query_stats::registerWriteRequest(opCtx, ns, [&]() {
         uassertStatusOKWithContext(deferredShape->getStatus(), "Failed to compute query shape");
-        return std::make_unique<query_stats::UpdateKey>(parsedUpdate.expCtx(),
+        return std::make_unique<query_stats::UpdateKey>(expCtx,
                                                         wholeOp,
                                                         parsedUpdate.getRequest()->getHint(),
                                                         std::move(deferredShape->getValue()),
                                                         collection.getCollectionType());
     });
-
-    // TODO(SERVER-110348) Support collecting data-bearing node metrics here.
 }
 
 /**
@@ -1566,22 +1591,39 @@ static SingleWriteResult performSingleUpdateOp(
         uassertStatusOK(checkIfTransactionOnCappedColl(opCtx, coll));
     }
 
-    ParsedUpdate parsedUpdate(opCtx,
-                              updateRequest,
-                              collection.getCollectionPtr(),
-                              forgoOpCounterIncrements,
-                              updateRequest->source() == OperationSource::kTimeseriesUpdate);
-    uassertStatusOK(parsedUpdate.parseRequest());
+    bool isRequestToTimeseries = updateRequest->source() == OperationSource::kTimeseriesUpdate;
 
-    // Register query shape here once we obtain the ParsedUpdate, before executing the update
-    // command. After parsedUpdate.parseRequest(), the parsed query and the update driver become
+    auto [collatorToUse, expCtxCollationMatchesDefault] =
+        resolveCollator(opCtx, updateRequest->getCollation(), collection.getCollectionPtr());
+
+    auto expCtx =
+        ExpressionContextBuilder{}
+            .fromRequest(opCtx, *updateRequest, forgoOpCounterIncrements)
+            .collator(std::move(collatorToUse))
+            .collationMatchesDefault(expCtxCollationMatchesDefault)
+            .requiresTimeseriesExtendedRangeSupport(
+                isRequestToTimeseries && collection.getCollectionPtr() &&
+                collection.getCollectionPtr()->getRequiresTimeseriesExtendedRangeSupport())
+            .build();
+
+    auto parsedUpdate = uassertStatusOK(parsed_update_command::parse(
+        expCtx,
+        updateRequest,
+        makeExtensionsCallback<ExtensionsCallbackReal>(opCtx, &updateRequest->getNsString())));
+
+    // Register query shape here once we obtain 'parsedUpdate', before executing the update
+    // command. Inside 'parsedUpdate', the parsed preoptimized query and the update driver are
     // available for computing query shape.
-    registerRequestForQueryStats(opCtx, ns, collection, wholeOp, parsedUpdate);
+    registerRequestForQueryStats(opCtx, expCtx, ns, collection, wholeOp, parsedUpdate);
+
+    std::unique_ptr<CanonicalUpdate> canonicalUpdate = uassertStatusOK(CanonicalUpdate::make(
+        expCtx, std::move(parsedUpdate), collection.getCollectionPtr(), isRequestToTimeseries));
 
     // Create an RAII object that prints useful information about the ExpressionContext in the case
     // of a tassert or crash.
     ScopedDebugInfo expCtxDiagnostics(
-        "ExpCtxDiagnostics", diagnostic_printers::ExpressionContextPrinter{parsedUpdate.expCtx()});
+        "ExpCtxDiagnostics",
+        diagnostic_printers::ExpressionContextPrinter{canonicalUpdate->expCtx()});
 
     if (auto scoped = failAllUpdates.scoped(); MONGO_unlikely(scoped.isActive())) {
         tassert(9276702,
@@ -1607,7 +1649,7 @@ static SingleWriteResult performSingleUpdateOp(
     const auto inTransaction = opCtx->inMultiDocumentTransaction();
     if (updateRequest->getSort().isEmpty() || inTransaction) {
         return performSingleUpdateOpNoRetry(
-            opCtx, source, curOp, collection, parsedUpdate, containsDotsAndDollarsField);
+            opCtx, source, curOp, collection, *canonicalUpdate, containsDotsAndDollarsField);
     } else {
         // Call writeConflictRetry() if we have a sort, since we express the sort with a limit of 1.
         // In the case that the predicate of the currently matching document changes due to a
@@ -1615,7 +1657,7 @@ static SingleWriteResult performSingleUpdateOp(
         // document.
         return writeConflictRetry(opCtx, "update", ns, [&]() -> SingleWriteResult {
             return performSingleUpdateOpNoRetry(
-                opCtx, source, curOp, collection, parsedUpdate, containsDotsAndDollarsField);
+                opCtx, source, curOp, collection, *canonicalUpdate, containsDotsAndDollarsField);
         });
     }
 }
@@ -1695,7 +1737,21 @@ static SingleWriteResult performSingleUpdateOpWithDupKeyRetry(
 
             return ret;
         } catch (ExceptionFor<ErrorCodes::DuplicateKey>& ex) {
-            auto cq = uassertStatusOK(parseWriteQueryToCQ(opCtx, nullptr /* expCtx */, request));
+            // The function shouldRetryDuplicateKeyException() will check the collation from
+            // the collection using 'ex'. So we only need to resolve the collator from the
+            // request and pass it into 'expCtx'.
+            auto requestCollator = [&]() -> std::unique_ptr<CollatorInterface> {
+                if (request.getCollation().isEmpty()) {
+                    return nullptr;
+                }
+                return uassertStatusOK(CollatorFactoryInterface::get(opCtx->getServiceContext())
+                                           ->makeFromBSON(request.getCollation()));
+            }();
+            auto expCtx = ExpressionContextBuilder{}
+                              .fromRequest(opCtx, request)
+                              .collator(std::move(requestCollator))
+                              .build();
+            auto cq = uassertStatusOK(parseWriteQueryToCQ(expCtx.get(), request));
 
             if (!write_ops_exec::shouldRetryDuplicateKeyException(
                     opCtx, request, *cq, *ex.extraInfo<DuplicateKeyErrorInfo>(), retryAttempts)) {
@@ -1886,10 +1942,20 @@ WriteResult performUpdates(
         if (source != OperationSource::kTimeseriesInsert) {
             curOp.emplace(cmd);
             curOp->push(opCtx);
+            if (singleOp.getIncludeQueryStatsMetrics()) {
+                curOp->debug().getQueryStatsInfo().metricsRequested = true;
+            }
         }
         ON_BLOCK_EXIT([&] {
             if (curOp) {
                 finishCurOp(opCtx, &*curOp);
+                // The last SingleWriteResult will be for the operation we just executed. If it
+                // succeeded, and metrics were requested, set them now.
+                if (curOp->debug().getQueryStatsInfo().metricsRequested &&
+                    out.results.back().isOK()) {
+                    out.results.back().getValue().setQueryStatsMetrics(
+                        curOp->debug().getCursorMetrics());
+                }
             }
         });
 
@@ -2095,7 +2161,7 @@ static SingleWriteResult performSingleDeleteOp(
     }
 
     auto nDeleted = exec->executeDelete();
-    curOp.debug().additiveMetrics.ndeleted = nDeleted;
+    curOp.debug().getAdditiveMetrics().ndeleted = nDeleted;
 
     PlanSummaryStats summary;
     auto&& explainer = exec->getPlanExplainer();
@@ -2254,9 +2320,10 @@ WriteResult performDeletes(
 
 void recordUpdateResultInOpDebug(const UpdateResult& updateResult, OpDebug* opDebug) {
     tassert(11052015, "Expected non-null OpDebug pointer", opDebug);
-    opDebug->additiveMetrics.nMatched = updateResult.numMatched;
-    opDebug->additiveMetrics.nModified = updateResult.numDocsModified;
-    opDebug->additiveMetrics.nUpserted = static_cast<long long>(!updateResult.upsertedId.isEmpty());
+    opDebug->getAdditiveMetrics().nMatched = updateResult.numMatched;
+    opDebug->getAdditiveMetrics().nModified = updateResult.numDocsModified;
+    opDebug->getAdditiveMetrics().nUpserted =
+        static_cast<long long>(!updateResult.upsertedId.isEmpty());
 }
 
 namespace {
@@ -2429,15 +2496,29 @@ void explainUpdate(OperationContext* opCtx,
                                                              &updateRequest);
     }
 
-    ParsedUpdate parsedUpdate(opCtx,
-                              &updateRequest,
-                              collection.getCollectionPtr(),
-                              false /* forgoOpCounterIncrements */,
-                              isTimeseriesViewRequest);
-    uassertStatusOK(parsedUpdate.parseRequest());
+    auto [collatorToUse, expCtxCollationMatchesDefault] =
+        resolveCollator(opCtx, updateRequest.getCollation(), collection.getCollectionPtr());
 
-    auto exec = uassertStatusOK(
-        getExecutorUpdate(&CurOp::get(opCtx)->debug(), collection, &parsedUpdate, verbosity));
+    auto expCtx =
+        ExpressionContextBuilder{}
+            .fromRequest(opCtx, updateRequest)
+            .collator(std::move(collatorToUse))
+            .collationMatchesDefault(expCtxCollationMatchesDefault)
+            .requiresTimeseriesExtendedRangeSupport(
+                isTimeseriesViewRequest && collection.getCollectionPtr() &&
+                collection.getCollectionPtr()->getRequiresTimeseriesExtendedRangeSupport())
+            .build();
+
+    auto parsedUpdate = uassertStatusOK(parsed_update_command::parse(
+        expCtx,
+        &updateRequest,
+        makeExtensionsCallback<ExtensionsCallbackReal>(opCtx, &updateRequest.getNsString())));
+
+    auto canonicalUpdate = uassertStatusOK(CanonicalUpdate::make(
+        expCtx, std::move(parsedUpdate), collection.getCollectionPtr(), isTimeseriesViewRequest));
+
+    auto exec = uassertStatusOK(getExecutorUpdate(
+        &CurOp::get(opCtx)->debug(), collection, canonicalUpdate.get(), verbosity));
     auto bodyBuilder = result->getBodyBuilder();
 
     // Capture diagnostics to be logged in the case of a failure.

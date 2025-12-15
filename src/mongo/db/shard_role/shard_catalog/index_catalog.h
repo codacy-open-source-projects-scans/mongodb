@@ -46,6 +46,7 @@
 #include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/db/storage/record_store.h"
+#include "mongo/util/modules.h"
 
 #include <cstdint>
 #include <functional>
@@ -65,7 +66,7 @@ class IndexDescriptor;
 
 struct InsertDeleteOptions;
 
-struct BsonRecord {
+struct MONGO_MOD_NEEDS_REPLACEMENT BsonRecord {
     RecordId id;
     Timestamp ts;
     const BSONObj* docPtr;
@@ -77,9 +78,9 @@ struct BsonRecord {
  * WiredTiger to do blind unindexing for efficacy. When set to 'On', disables blind deletes and
  * forces recordid-matching for unindex operations.
  */
-enum class CheckRecordId { Off, On };
+enum class MONGO_MOD_NEEDS_REPLACEMENT CheckRecordId { Off, On };
 
-enum class CreateIndexEntryFlags : int {
+enum class MONGO_MOD_PRIVATE CreateIndexEntryFlags : int {
     kNone = 0x0,
     /**
      * kInitFromDisk avoids registering a change to undo this operation when set to true. You
@@ -112,11 +113,12 @@ enum class CreateIndexEntryFlags : int {
     kForceUpdateMetadata = 0x10,
 };
 
-inline bool operator&(CreateIndexEntryFlags lhs, CreateIndexEntryFlags rhs) {
+MONGO_MOD_PRIVATE inline bool operator&(CreateIndexEntryFlags lhs, CreateIndexEntryFlags rhs) {
     return (static_cast<int>(lhs) & static_cast<int>(rhs)) != 0;
 }
 
-inline CreateIndexEntryFlags operator|(CreateIndexEntryFlags lhs, CreateIndexEntryFlags rhs) {
+MONGO_MOD_PRIVATE inline CreateIndexEntryFlags operator|(CreateIndexEntryFlags lhs,
+                                                         CreateIndexEntryFlags rhs) {
     return CreateIndexEntryFlags(static_cast<int>(lhs) | static_cast<int>(rhs));
 }
 
@@ -138,7 +140,7 @@ inline CreateIndexEntryFlags operator|(CreateIndexEntryFlags lhs, CreateIndexEnt
  *     int numIndexesReady();
  *     int numIndexesInProgress();
  */
-class IndexCatalog {
+class MONGO_MOD_NEEDS_REPLACEMENT IndexCatalog {
 public:
     class IndexIterator {
     public:
@@ -204,14 +206,14 @@ public:
      */
     virtual BSONObj getDefaultIdIndexSpec(const CollectionPtr& collection) const = 0;
 
-    virtual const IndexDescriptor* findIdIndex(OperationContext* opCtx) const = 0;
+    virtual const IndexCatalogEntry* findIdIndex(OperationContext* opCtx) const = 0;
 
     /**
      * Find index by name.  The index name uniquely identifies an index.
      *
      * @return null if cannot find
      */
-    virtual const IndexDescriptor* findIndexByName(
+    virtual const IndexCatalogEntry* findIndexByName(
         OperationContext* opCtx,
         StringData name,
         InclusionPolicy inclusionPolicy = InclusionPolicy::kReady) const = 0;
@@ -222,7 +224,7 @@ public:
      *
      * @return null if cannot find index, otherwise the index with a matching signature.
      */
-    virtual const IndexDescriptor* findIndexByKeyPatternAndOptions(
+    virtual const IndexCatalogEntry* findIndexByKeyPatternAndOptions(
         OperationContext* opCtx,
         const BSONObj& key,
         const BSONObj& indexSpec,
@@ -237,11 +239,11 @@ public:
     virtual void findIndexesByKeyPattern(OperationContext* opCtx,
                                          const BSONObj& key,
                                          InclusionPolicy inclusionPolicy,
-                                         std::vector<const IndexDescriptor*>* matches) const = 0;
+                                         std::vector<const IndexCatalogEntry*>* matches) const = 0;
     virtual void findIndexByType(
         OperationContext* opCtx,
         const std::string& type,
-        std::vector<const IndexDescriptor*>& matches,
+        std::vector<const IndexCatalogEntry*>& matches,
         InclusionPolicy inclusionPolicy = InclusionPolicy::kReady) const = 0;
 
     /**
@@ -249,33 +251,27 @@ public:
      *
      * Returns nullptr if the index is not found.
      */
-    virtual const IndexDescriptor* findIndexByIdent(
+    virtual const IndexCatalogEntry* findIndexByIdent(
         OperationContext* opCtx,
         StringData ident,
         InclusionPolicy inclusionPolicy = InclusionPolicy::kReady) const = 0;
 
     /**
-     * Reload the index definition for 'oldDesc' from the CollectionCatalogEntry.  'oldDesc'
+     * Reload the index definition for 'oldEntry' from the CollectionCatalogEntry.  'oldEntry'
      * must be a ready index that is already registered with the index catalog.  Returns an
-     * unowned pointer to the descriptor for the new index definition.
+     * unowned pointer to the entry for the new index definition.
      *
      * Use this method to notify the IndexCatalog that the spec for this index has changed.
      *
-     * It is invalid to dereference 'oldDesc' after calling this method.
+     * It is invalid to dereference 'oldEntry' after calling this method.
      *
      * The caller must hold the collection X lock and ensure no index builds are in progress
      * on the collection.
      */
-    virtual const IndexDescriptor* refreshEntry(OperationContext* opCtx,
-                                                Collection* collection,
-                                                const IndexDescriptor* oldDesc,
-                                                CreateIndexEntryFlags flags) = 0;
-
-    /**
-     * Returns a pointer to the index catalog entry associated with 'desc'. Throws if there is no
-     * such index. Never returns nullptr.
-     */
-    virtual const IndexCatalogEntry* getEntry(const IndexDescriptor* desc) const = 0;
+    virtual const IndexCatalogEntry* refreshEntry(OperationContext* opCtx,
+                                                  Collection* collection,
+                                                  const IndexCatalogEntry* oldEntry,
+                                                  CreateIndexEntryFlags flags) = 0;
 
     /**
      * Returns a writable IndexCatalogEntry copy that will be returned by current and future calls
@@ -291,13 +287,6 @@ public:
         const BSONObj& key,
         const BSONObj& indexSpec,
         InclusionPolicy inclusionPolicy = InclusionPolicy::kReady) = 0;
-
-    /**
-     * Returns a pointer to the index catalog entry associated with 'desc', where the caller assumes
-     * shared ownership of the entry. Returns null if the entry does not exist.
-     */
-    virtual std::shared_ptr<const IndexCatalogEntry> getEntryShared(
-        const IndexDescriptor*) const = 0;
 
     /**
      * Returns a vector of shared pointers to all index entries.
@@ -418,8 +407,8 @@ public:
      */
     virtual void dropIndexes(OperationContext* opCtx,
                              Collection* collection,
-                             std::function<bool(const IndexDescriptor*)> matchFn,
-                             std::function<void(const IndexDescriptor*)> onDropFn) = 0;
+                             std::function<bool(const IndexCatalogEntry*)> matchFn,
+                             std::function<void(const IndexCatalogEntry*)> onDropFn) = 0;
 
     /**
      * Drops all indexes in the index catalog, optionally dropping the id index depending on the
@@ -429,7 +418,7 @@ public:
     virtual void dropAllIndexes(OperationContext* opCtx,
                                 Collection* collection,
                                 bool includingIdIndex,
-                                std::function<void(const IndexDescriptor*)> onDropFn) = 0;
+                                std::function<void(const IndexCatalogEntry*)> onDropFn) = 0;
 
     /**
      * Truncates all indexes in the index catalog.
@@ -480,7 +469,7 @@ public:
      */
     virtual void setMultikeyPaths(OperationContext* opCtx,
                                   const CollectionPtr& coll,
-                                  const IndexDescriptor* desc,
+                                  const IndexCatalogEntry* desc,
                                   const KeyStringSet& multikeyMetadataKeys,
                                   const MultikeyPaths& multikeyPaths) const = 0;
 
@@ -588,14 +577,15 @@ public:
                           const BSONObj& indexSpec) const;
 };
 
-inline IndexCatalog::InclusionPolicy operator|(IndexCatalog::InclusionPolicy lhs,
-                                               IndexCatalog::InclusionPolicy rhs) {
+MONGO_MOD_NEEDS_REPLACEMENT inline IndexCatalog::InclusionPolicy operator|(
+    IndexCatalog::InclusionPolicy lhs, IndexCatalog::InclusionPolicy rhs) {
     return static_cast<IndexCatalog::InclusionPolicy>(
         static_cast<std::underlying_type_t<IndexCatalog::InclusionPolicy>>(lhs) |
         static_cast<std::underlying_type_t<IndexCatalog::InclusionPolicy>>(rhs));
 }
 
-inline bool operator&(IndexCatalog::InclusionPolicy lhs, IndexCatalog::InclusionPolicy rhs) {
+MONGO_MOD_PRIVATE inline bool operator&(IndexCatalog::InclusionPolicy lhs,
+                                        IndexCatalog::InclusionPolicy rhs) {
     return static_cast<std::underlying_type_t<IndexCatalog::InclusionPolicy>>(lhs) &
         static_cast<std::underlying_type_t<IndexCatalog::InclusionPolicy>>(rhs);
 }

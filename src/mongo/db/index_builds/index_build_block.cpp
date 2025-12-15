@@ -280,12 +280,10 @@ void IndexBuildBlock::success(OperationContext* opCtx, Collection* collection) {
 
 const IndexCatalogEntry* IndexBuildBlock::getEntry(OperationContext* opCtx,
                                                    const CollectionPtr& collection) const {
-    auto descriptor = collection->getIndexCatalog()->findIndexByName(
+    return collection->getIndexCatalog()->findIndexByName(
         opCtx,
         getIndexName(),
         IndexCatalog::InclusionPolicy::kReady | IndexCatalog::InclusionPolicy::kUnfinished);
-
-    return descriptor->getEntry();
 }
 
 IndexCatalogEntry* IndexBuildBlock::getWritableEntry(OperationContext* opCtx,
@@ -322,6 +320,10 @@ Status IndexBuildBlock::buildEmptyIndex(OperationContext* opCtx,
 
     // sanity check
     invariant(collection->isIndexReady(descriptor->indexName()));
+    // We can rebuild the path arrayness information once this index is ready.
+    if (feature_flags::gFeatureFlagPathArrayness.isEnabled()) {
+        CollectionQueryInfo::get(collection).rebuildPathArrayness(opCtx, collection);
+    }
 
     return Status::OK();
 }

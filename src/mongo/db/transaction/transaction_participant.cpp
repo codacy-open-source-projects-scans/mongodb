@@ -348,7 +348,7 @@ ActiveTransactionHistory fetchActiveTransactionHistory(OperationContext* opCtx,
         try {
             const auto entry = it.next(opCtx);
 
-            auto stmtIds = entry.getStatementIds();
+            const auto& stmtIds = entry.getStatementIds();
 
             if (isInternalSessionForRetryableWrite(lsid) ||
                 entry.getCommandType() == repl::OplogEntry::CommandType::kApplyOps) {
@@ -494,14 +494,13 @@ void updateSessionEntry(OperationContext* opCtx,
                     << NamespaceString::kSessionTransactionsTableNamespace.toStringForErrorMsg(),
                 idIndex);
 
-        const IndexCatalogEntry* entry = collectionPtr->getIndexCatalog()->getEntry(idIndex);
-        auto indexAccess = entry->accessMethod()->asSortedData();
+        auto indexAccess = idIndex->accessMethod()->asSortedData();
         // Since we are looking up a key inside the _id index, create a key object consisting of
         // only the _id field.
         recordId = indexAccess->findSingle(opCtx,
                                            *shard_role_details::getRecoveryUnit(opCtx),
                                            collectionPtr,
-                                           entry,
+                                           idIndex,
                                            toUpdateIdDoc);
     }
 
@@ -880,14 +879,34 @@ bool TransactionParticipant::Participant::_shouldRestartTransactionOnReuseActive
                               << " in state " << txnParticipant.o().txnState,
                 txnParticipant.transactionIsAbortedWithoutPrepare());
         }
-
+        LOGV2_DEBUG(
+            11362500,
+            3,
+            "Restarting transaction and reusing active txnNumber because transaction state is "
+            "None.",
+            "sessionId"_attr = _sessionId(),
+            "txnNumber"_attr = o().activeTxnNumberAndRetryCounter.getTxnNumber());
         return true;
     } else if (o().txnState.isInSet(TransactionState::kAbortedWithoutPrepare)) {
+        LOGV2_DEBUG(
+            11362501,
+            3,
+            "Restarting transaction and reusing active txnNumber because transaction was aborted "
+            "and not part of a two phase transaction.",
+            "sessionId"_attr = _sessionId(),
+            "txnNumber"_attr = o().activeTxnNumberAndRetryCounter.getTxnNumber());
         return true;
     } else if (_isInternalSessionForRetryableWrite() &&
                o().txnState.isInSet(TransactionState::kCommitted)) {
         // We won't actually restart the transaction, we'll early return later on and skip resetting
         // any state and metrics
+        LOGV2_DEBUG(
+            11362502,
+            3,
+            "Restarting transaction and reusing active txnNumber because transaction participant "
+            "is in retryable write mode and TransactionState is Committed.",
+            "sessionId"_attr = _sessionId(),
+            "txnNumber"_attr = o().activeTxnNumberAndRetryCounter.getTxnNumber());
         return true;
     } else {
         uassert(
@@ -941,7 +960,8 @@ void TransactionParticipant::Participant::_beginOrContinueRetryableWrite(
 void TransactionParticipant::Participant::_continueMultiDocumentTransaction(
     OperationContext* opCtx,
     const TxnNumberAndRetryCounter& txnNumberAndRetryCounter,
-    TransactionActions action) {
+    TransactionActions action,
+    const boost::optional<TransactionRuntimeContext>& transactionRuntimeContext) {
     uassert(ErrorCodes::NoSuchTransaction,
             str::stream()
                 << "Given transaction number " << txnNumberAndRetryCounter.getTxnNumber()
@@ -1014,10 +1034,38 @@ void TransactionParticipant::Participant::_continueMultiDocumentTransaction(
                     o().txnResourceStash->getReadConcernArgs().getArgsAtClusterTime() ==
                         repl::ReadConcernArgs::get(opCtx).getArgsAtClusterTime());
     }
+
+    {
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        if (o(lk).transactionRuntimeContext.has_value() &&
+            o(lk).transactionRuntimeContext->getPlacementConflictTime().has_value() &&
+            transactionRuntimeContext.has_value()) {
+            tassert(
+                9758703,
+                str::stream()
+                    << "placementConflictTime must not change during the lifetime of "
+                       "the transaction. "
+                    << "Expected "
+                    << o(lk).transactionRuntimeContext->getPlacementConflictTime()->asTimestamp()
+                    << ", got "
+                    << (transactionRuntimeContext->getPlacementConflictTime()
+                            ? transactionRuntimeContext->getPlacementConflictTime()
+                                  ->asTimestamp()
+                                  .toString()
+                            : "null"),
+                o(lk).transactionRuntimeContext->getPlacementConflictTime() ==
+                    transactionRuntimeContext->getPlacementConflictTime());
+        }
+        if (transactionRuntimeContext.has_value()) {
+            o(lk).transactionRuntimeContext = transactionRuntimeContext;
+        }
+    }
 }
 
 void TransactionParticipant::Participant::_beginMultiDocumentTransaction(
-    OperationContext* opCtx, const TxnNumberAndRetryCounter& txnNumberAndRetryCounter) {
+    OperationContext* opCtx,
+    const TxnNumberAndRetryCounter& txnNumberAndRetryCounter,
+    const boost::optional<TransactionRuntimeContext>& transactionRuntimeContext) {
     // Aborts any in-progress txns.
     _setNewTxnNumberAndRetryCounter(opCtx, txnNumberAndRetryCounter);
     p().autoCommit = false;
@@ -1057,6 +1105,29 @@ void TransactionParticipant::Participant::_beginMultiDocumentTransaction(
             *o().transactionExpireDate);
         o(lk).readConcernArgs = repl::ReadConcernArgs::get(opCtx);
 
+        if (o(lk).transactionRuntimeContext.has_value() &&
+            o(lk).transactionRuntimeContext->getPlacementConflictTime().has_value() &&
+            transactionRuntimeContext.has_value()) {
+            tassert(
+                9758704,
+                str::stream()
+                    << "placementConflictTime must not change during the lifetime of "
+                       "the transaction. "
+                    << "Expected "
+                    << o(lk).transactionRuntimeContext->getPlacementConflictTime()->asTimestamp()
+                    << ", got "
+                    << (transactionRuntimeContext->getPlacementConflictTime()
+                            ? transactionRuntimeContext->getPlacementConflictTime()
+                                  ->asTimestamp()
+                                  .toString()
+                            : "null"),
+                o(lk).transactionRuntimeContext->getPlacementConflictTime() ==
+                    transactionRuntimeContext->getPlacementConflictTime());
+        }
+        if (transactionRuntimeContext.has_value()) {
+            o(lk).transactionRuntimeContext = transactionRuntimeContext;
+        }
+
         invariant(p().transactionOperations.isEmpty());
     }
 }
@@ -1065,7 +1136,8 @@ void TransactionParticipant::Participant::beginOrContinue(
     OperationContext* opCtx,
     TxnNumberAndRetryCounter txnNumberAndRetryCounter,
     boost::optional<bool> autocommit,
-    TransactionActions action) {
+    TransactionActions action,
+    const boost::optional<TransactionRuntimeContext>& transactionRuntimeContext) {
     opCtx->setActiveTransactionParticipant();
 
     if (_isInternalSessionForRetryableWrite()) {
@@ -1074,7 +1146,8 @@ void TransactionParticipant::Participant::beginOrContinue(
         parentTxnParticipant.beginOrContinue(opCtx,
                                              {*_sessionId().getTxnNumber(), boost::none},
                                              boost::none,
-                                             TransactionActions::kNone);
+                                             TransactionActions::kNone,
+                                             transactionRuntimeContext);
     }
 
     // Make sure we are still a primary. We need to hold on to the RSTL through the end of this
@@ -1156,7 +1229,7 @@ void TransactionParticipant::Participant::beginOrContinue(
         txnNumberAndRetryCounter.setTxnRetryCounter(0);
     }
 
-    // If the request conatined startTransaction, we should always choose to start the transaction.
+    // If the request contained startTransaction, we should always choose to start the transaction.
     // If the request contained startOrContinueTransaction, we should always choose to start the
     // transaction unless the txnNumber and retryCounter are equal to the active txnNumber and
     // retryCounter. In this case, we must decide whether we should start or continue the
@@ -1181,7 +1254,8 @@ void TransactionParticipant::Participant::beginOrContinue(
     if (!startTransaction) {
         invariant(action == TransactionActions::kContinue ||
                   action == TransactionActions::kStartOrContinue);
-        _continueMultiDocumentTransaction(opCtx, txnNumberAndRetryCounter, action);
+        _continueMultiDocumentTransaction(
+            opCtx, txnNumberAndRetryCounter, action, transactionRuntimeContext);
         return;
     }
 
@@ -1192,7 +1266,7 @@ void TransactionParticipant::Participant::beginOrContinue(
         return;
     }
 
-    _beginMultiDocumentTransaction(opCtx, txnNumberAndRetryCounter);
+    _beginMultiDocumentTransaction(opCtx, txnNumberAndRetryCounter, transactionRuntimeContext);
 
     // Remember whether or not this operation is starting a transaction, in case something later
     // in the execution needs to adjust its behavior based on this.
@@ -1200,7 +1274,9 @@ void TransactionParticipant::Participant::beginOrContinue(
 }
 
 void TransactionParticipant::Participant::beginOrContinueTransactionUnconditionally(
-    OperationContext* opCtx, TxnNumberAndRetryCounter txnNumberAndRetryCounter) {
+    OperationContext* opCtx,
+    TxnNumberAndRetryCounter txnNumberAndRetryCounter,
+    const boost::optional<TransactionRuntimeContext>& transactionRuntimeContext) {
     invariant(opCtx->inMultiDocumentTransaction());
     opCtx->setActiveTransactionParticipant();
 
@@ -1216,7 +1292,7 @@ void TransactionParticipant::Participant::beginOrContinueTransactionUnconditiona
         if (!txnNumberAndRetryCounter.getTxnRetryCounter()) {
             txnNumberAndRetryCounter.setTxnRetryCounter(0);
         }
-        _beginMultiDocumentTransaction(opCtx, txnNumberAndRetryCounter);
+        _beginMultiDocumentTransaction(opCtx, txnNumberAndRetryCounter, transactionRuntimeContext);
     } else {
         invariant(o().txnState.isInSet(TransactionState::kInProgress | TransactionState::kPrepared),
                   str::stream() << "Current state: " << o().txnState);
@@ -1558,7 +1634,7 @@ void TransactionParticipant::Participant::_stashActiveTransaction(OperationConte
 
         auto curop = CurOp::get(opCtx);
         o(lk).transactionMetricsObserver.onTransactionOperation(opCtx,
-                                                                curop->debug().additiveMetrics,
+                                                                curop->debug().getAdditiveMetrics(),
                                                                 curop->getPrepareReadConflicts(),
                                                                 curop->getOperationStorageMetrics(),
                                                                 o().txnState.isPrepared());
@@ -1997,6 +2073,73 @@ TransactionParticipant::Participant::prepareTransaction(
     return {prepareOplogSlot.getTimestamp(), o().affectedNamespaces};
 }
 
+void TransactionParticipant::Participant::refreshPreparedTransactionFromTxnRecord(
+    OperationContext* opCtx, SessionTxnRecord txnRecord) {
+    // This should only be called during replication recovery after both checking out the prepared
+    // transaction's session, reclaiming its storage engine transaction, and retaking the
+    // appropriate locks.
+    invariant(shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
+    invariant(shard_role_details::getLocker(opCtx)->isRSTLLocked());
+    invariant(opCtx->getTxnNumber() == txnRecord.getTxnNum());
+    invariant(txnRecord.getState());
+    invariant(*txnRecord.getState() == DurableTxnStateEnum::kPrepared);
+    invariant(!o().txnResourceStash);
+
+    // These should always have their default value.
+    invariant(p().overwrittenStatus);
+    invariant(!p().inShutdown);
+
+    // We always need to write an abort entry for a prepared transaction.
+    p().needToWriteAbortEntry = true;
+
+    // A prepared transaction must always have used autocommit=false.
+    p().autoCommit = false;
+
+    // TODO SERVER-113740: These will be unset and we need a way to ensure callers can handle that
+    // and won't introduce new dependencies on it.
+    // p().transactionOperations
+
+    {
+        stdx::lock_guard<Client> lg(*opCtx->getClient());
+        o(lg).txnState.transitionTo(TransactionState::kPrepared);
+        o(lg).activeTxnNumberAndRetryCounter.setTxnNumber(txnRecord.getTxnNum());
+        o(lg).activeTxnNumberAndRetryCounter.setTxnRetryCounter([&] {
+            if (txnRecord.getState()) {
+                if (txnRecord.getTxnRetryCounter().has_value()) {
+                    return *txnRecord.getTxnRetryCounter();
+                }
+                return 0;
+            }
+            return kUninitializedTxnRetryCounter;
+        }());
+        o(lg).lastWriteOpTime = txnRecord.getLastWriteOpTime();
+
+        o(lg).prepareOpTime = txnRecord.getLastWriteOpTime();
+        shard_role_details::getRecoveryUnit(opCtx)->setPrepareTimestamp(
+            o(lg).prepareOpTime.getTimestamp());
+        shard_role_details::getRecoveryUnit(opCtx)->setPreparedId(
+            o(lg).prepareOpTime.getTimestamp().asULL());
+
+        uassert(11372600,
+                "Can't reclaim a prepared transaction without affectedNamespaces",
+                txnRecord.getAffectedNamespaces());
+        for (auto&& ns : *txnRecord.getAffectedNamespaces()) {
+            o(lg).affectedNamespaces.emplace(std::move(ns));
+        }
+
+        // TODO SERVER-113731: Handle recovering history when we support retryable transactions.
+        p().activeTxnCommittedStatements = {};
+        o(lg).hasIncompleteHistory = true;
+
+        // This should be called after checking out the session without refresh, which already sets
+        // isValid.
+        invariant(o().isValid);
+    }
+
+    const bool unlocked = shard_role_details::getLocker(opCtx)->unlockRSTLforPrepare();
+    invariant(unlocked || gFeatureFlagIntentRegistration.isEnabled());
+}
+
 void TransactionParticipant::Participant::setPrepareOpTimeForRecovery(OperationContext* opCtx,
                                                                       repl::OpTime prepareOpTime) {
     stdx::lock_guard<Client> lk(*opCtx->getClient());
@@ -2335,8 +2478,7 @@ void TransactionParticipant::Participant::_commitSplitPreparedTxnOnPrimary(
         TransactionParticipant::Participant newTxnParticipant =
             TransactionParticipant::get(splitOpCtx.get());
         newTxnParticipant.beginOrContinueTransactionUnconditionally(
-            splitOpCtx.get(), {*(splitOpCtx->getTxnNumber())});
-
+            splitOpCtx.get(), {*(splitOpCtx->getTxnNumber())}, boost::none);
         // We cannot throw exceptions in the middle of committing multiple split transactions,
         // and therefore our lock acquisitions cannot be interruptible. We also must set the
         // UninterruptibleLockGuard before unstashTransactionResources because this function
@@ -2390,7 +2532,7 @@ void TransactionParticipant::Participant::_finishCommitTransaction(
 
         auto curop = CurOp::get(opCtx);
         o(lk).transactionMetricsObserver.onTransactionOperation(opCtx,
-                                                                curop->debug().additiveMetrics,
+                                                                curop->debug().getAdditiveMetrics(),
                                                                 curop->getPrepareReadConflicts(),
                                                                 curop->getOperationStorageMetrics(),
                                                                 o().txnState.isPrepared());
@@ -2509,7 +2651,7 @@ void TransactionParticipant::Participant::_abortActiveTransaction(
         stdx::lock_guard<Client> lk(*opCtx->getClient());
         auto curop = CurOp::get(opCtx);
         o(lk).transactionMetricsObserver.onTransactionOperation(opCtx,
-                                                                curop->debug().additiveMetrics,
+                                                                curop->debug().getAdditiveMetrics(),
                                                                 curop->getPrepareReadConflicts(),
                                                                 curop->getOperationStorageMetrics(),
                                                                 o().txnState.isPrepared());
@@ -2605,7 +2747,7 @@ void TransactionParticipant::Participant::_abortSplitPreparedTxnOnPrimary(
         TransactionParticipant::Participant newTxnParticipant =
             TransactionParticipant::get(splitOpCtx.get());
         newTxnParticipant.beginOrContinueTransactionUnconditionally(
-            splitOpCtx.get(), {*(splitOpCtx->getTxnNumber())});
+            splitOpCtx.get(), {*(splitOpCtx->getTxnNumber())}, boost::none);
 
         // We cannot throw exceptions in the middle of aborting multiple split transactions,
         // and therefore our lock acquisitions cannot be interruptible. We also must set the
@@ -2817,6 +2959,23 @@ void TransactionParticipant::Observer::reportUnstashedState(OperationContext* op
     }
 }
 
+boost::optional<LogicalTime>
+TransactionParticipant::Observer::getPlacementConflictTimeForNonSnapshotReadConcern() const {
+    if (!o().transactionRuntimeContext.has_value()) {
+        return boost::none;
+    }
+    return o().transactionRuntimeContext->getPlacementConflictTime();
+}
+
+std::span<const DatabaseName> TransactionParticipant::Observer::getDatabasesCreatedAtTopRouter()
+    const {
+    if (!o().transactionRuntimeContext.has_value()) {
+        return {};
+    }
+    const auto& v = o().transactionRuntimeContext->getCreatedDatabases();
+    return std::span<const DatabaseName>(v);
+}
+
 std::string TransactionParticipant::TransactionState::toString(StateFlag state) {
     switch (state) {
         case TransactionParticipant::TransactionState::kNone:
@@ -2982,7 +3141,7 @@ void TransactionParticipant::Participant::_transactionInfoForLog(
 
     attrs.addDeepCopy("readTimestamp", singleTransactionStats.getReadTimestamp().toString());
 
-    singleTransactionStats.getOpDebug()->additiveMetrics.report(&attrs);
+    singleTransactionStats.getOpDebug()->getAdditiveMetrics().report(&attrs);
 
     const auto& storageMetrics = singleTransactionStats.getTransactionStorageMetrics();
     attrs.add("writeConflicts", storageMetrics.writeConflicts.loadRelaxed());
@@ -3467,6 +3626,7 @@ void TransactionParticipant::Participant::_invalidate(WithLock wl) {
     o(wl).isValid = false;
     o(wl).activeTxnNumberAndRetryCounter = {kUninitializedTxnNumber, kUninitializedTxnRetryCounter};
     o(wl).lastWriteOpTime = repl::OpTime();
+    o(wl).transactionRuntimeContext = boost::none;
 
     // Reset the transactions metrics.
     o(wl).transactionMetricsObserver.resetSingleTransactionStats(
@@ -3497,6 +3657,7 @@ void TransactionParticipant::Participant::_resetTransactionStateAndUnlock(
     o(*lk).affectedNamespaces.clear();
     o(*lk).prepareOpTime = repl::OpTime();
     o(*lk).recoveryPrepareOpTime = repl::OpTime();
+    o(*lk).transactionRuntimeContext = boost::none;
     p().autoCommit = boost::none;
     p().needToWriteAbortEntry = false;
 
@@ -3574,13 +3735,13 @@ TransactionParticipant::Participant::checkStatementExecutedAndFetchOplogEntry(
             std::vector<repl::OplogEntry> innerEntries;
             repl::ApplyOps::extractOperationsTo(entry, entry.getEntry().toBSON(), &innerEntries);
             for (const auto& innerEntry : innerEntries) {
-                auto stmtIds = innerEntry.getStatementIds();
+                const auto& stmtIds = innerEntry.getStatementIds();
                 if (std::find(stmtIds.begin(), stmtIds.end(), stmtId) != stmtIds.end()) {
                     return innerEntry;
                 }
             }
         } else {
-            auto stmtIds = entry.getStatementIds();
+            const auto& stmtIds = entry.getStatementIds();
             invariant(!stmtIds.empty());
             if (std::find(stmtIds.begin(), stmtIds.end(), stmtId) != stmtIds.end()) {
                 return entry;

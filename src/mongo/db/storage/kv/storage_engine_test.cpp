@@ -413,6 +413,20 @@ TEST_F(StorageEngineTest, TemporaryRecordStoreClustered) {
     ASSERT_EQ(0, memcmp(data, rd.data(), strlen(data)));
 }
 
+TEST_F(StorageEngineTest, TemporaryRecordStoreReuseOrErrorExistingIdent) {
+    const std::string ident = ident::generateNewInternalIdent();
+    auto opCtx = cc().makeOperationContext();
+    auto tempRs = _storageEngine->makeTemporaryRecordStore(opCtx.get(), ident, KeyFormat::Long);
+    ASSERT(tempRs);
+
+    // makeTemporaryRecordStore colliding with an empty on disk ident is tolerated.
+    auto& retryRu = *shard_role_details::getRecoveryUnit(opCtx.get());
+    auto reused = _storageEngine->makeTemporaryRecordStore(opCtx.get(), ident, KeyFormat::Long);
+    ASSERT(reused);
+    auto cursor = reused->rs()->getCursor(opCtx.get(), retryRu);
+    ASSERT_FALSE(cursor->next());
+}
+
 class StorageEngineReconcileTest : public StorageEngineTest {
 protected:
     UUID collectionUUID = UUID::gen();
@@ -1140,10 +1154,8 @@ TEST_F(StorageEngineTest, IdentMissingForNonReadyIndex) {
     auto collection =
         CollectionCatalog::get(opCtx.get())->lookupCollectionByNamespace(opCtx.get(), ns);
     ASSERT(collection);
-    auto indexDesc = collection->getIndexCatalog()->findIndexByName(
+    auto indexEntry = collection->getIndexCatalog()->findIndexByName(
         opCtx.get(), indexName, IndexCatalog::InclusionPolicy::kUnfinished);
-    ASSERT(indexDesc);
-    auto indexEntry = indexDesc->getEntry();
     ASSERT(indexEntry);
     // Even though the index was rebuilt it's not ready due to that it's waiting for commit quorum
     ASSERT_FALSE(indexEntry->isReady());

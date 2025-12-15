@@ -123,4 +123,12 @@ WiredTigerBulkLoadCursor::WiredTigerBulkLoadCursor(OperationContext* opCtx,
 
     invariantWTOK(_session->open_cursor(indexUri.c_str(), nullptr, nullptr, &_cursor), *_session);
 }
+
+WiredTigerPrepareCursor::WiredTigerPrepareCursor(WiredTigerSession& session) : _session(session) {
+    _cursor = session.getNewCursor("prepared_discover:", nullptr);
+}
+
+WiredTigerPrepareCursor::~WiredTigerPrepareCursor() {
+    _session.closeCursor(_cursor);
+}
 }  // namespace mongo

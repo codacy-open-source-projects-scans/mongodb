@@ -105,6 +105,7 @@ std::unique_ptr<ce::SamplingEstimator> JoinOrderingTestFixture::samplingEstimato
     auto samplingEstimator = std::make_unique<ce::SamplingEstimatorImpl>(
         operationContext(),
         mca,
+        nss,
         PlanYieldPolicy::YieldPolicy::YIELD_MANUAL,
         sampleSize,
         ce::SamplingEstimatorImpl::SamplingStyle::kRandom,
@@ -116,13 +117,5 @@ std::unique_ptr<ce::SamplingEstimator> JoinOrderingTestFixture::samplingEstimato
 
 NamespaceString makeNSS(StringData collName) {
     return NamespaceString::makeLocalCollection(collName);
-}
-
-NodeSet makeNodeSetFromIds(std::set<NodeId> ids) {
-    NodeSet result;
-    for (auto id : ids) {
-        result.set(id);
-    }
-    return result;
 }
 }  // namespace mongo::join_ordering

@@ -102,13 +102,13 @@ common:windows --repo_env=MONGO_VC_REDIST_FULL_VERSION=v143
 common --strategy=CppLink=local
 common --strategy=CppArchive=local
 common --strategy=SolibSymlink=local
-common --strategy=StripDebuginfo=local
-common --strategy=ExtractDebuginfo=local
+common --strategy=StripDebugInfo=local
+common --strategy=ExtractDebugInfo=local
 common --strategy=TestRunner=local
 common --strategy=CoverageReport=local
 common --strategy=CcGenerateIntermediateDwp=local
 common --strategy=CcGenerateDwp=local
-common --modify_execution_info=^(TestRunner|CppLink|CppArchive|SolibSymlink|ExtractDebuginfo|StripDebuginfo|CcGenerateIntermediateDwp|CcGenerateDwp)$=+no-remote-cache
+common --modify_execution_info=^(TestRunner|CppLink|CppArchive|SolibSymlink|ExtractDebugInfo|StripDebugInfo|CcGenerateIntermediateDwp|CcGenerateDwp)$=+no-remote-cache
 
 # Global clang tidy flags to avoid invalidating analysis cache between clang-tidy / regular runs
 common --@bazel_clang_tidy//:clang_tidy_excludes=".pb.cc,icu_init.cpp"
@@ -418,9 +418,8 @@ common:remote_test --strategy=TestRunner=remote
 common:remote_test --features=-thin_archive
 common:remote_test --remote_download_outputs=minimal
 common:remote_test --test_output=summary
-common:remote_test --modify_execution_info=^(CppLink|CppArchive|SolibSymlink|ExtractDebuginfo|StripDebuginfo|CcGenerateIntermediateDwp|CcGenerateDwp)$=-no-remote-cache
+common:remote_test --modify_execution_info=^(CppLink|CppArchive|SolibSymlink|ExtractDebugInfo|StripDebugInfo|CcGenerateIntermediateDwp|CcGenerateDwp)$=-no-remote-cache
 common:remote_test --remote_download_regex=.*(TestLogs.*|report.*\.json$|\.core$|data_archives.*\.tgz$) # Resmoke TestLogs directory, report, core dumps, and data directory archives.
-test:remote_test --test_timeout=660 # Allow extra 60s for coredump on abort
 test:remote_test --test_tag_filters=-incompatible_with_bazel_remote_test
 
 # Coverage
@@ -488,6 +487,10 @@ common:macos -c dbg
 common:linux --remote_executor=grpcs://sodalite.cluster.engflow.com
 common:windows --remote_executor=
 common:macos --remote_executor=
+
+# Disable atlas module by default on Windows and MacOS since Atlas is only deployed on Linux
+common:windows --//bazel/config:build_atlas=False
+common:macos --//bazel/config:build_atlas=False
 
 # Enable remote cache (also necessary for remote build execution):
 common --experimental_remote_downloader=grpcs://sodalite.cluster.engflow.com
@@ -578,6 +581,10 @@ common --experimental_repository_downloader_retries=3
 # Place golden test output files where buildscripts/golden_tests.py can find them
 common --test_env=GOLDEN_TEST_CONFIG_PATH
 
+# Upload build events to EngFlow
+common --experimental_build_event_upload_strategy=remote
+
+
 # TODO(WT-12780): delete this once wiredtiger switches to /.bazelrc.evergreen.
 try-import %workspace%/.bazelrc.evergreen_engflow_creds
 
@@ -601,3 +608,6 @@ try-import %workspace%/.bazelrc.bazelisk
 
 # Flags synced from Flag Sync
 try-import %workspace%/.bazelrc.sync
+
+# Repository root absolute path to set --execution_log_compact_file
+try-import %workspace%/.bazelrc.exec_log_file

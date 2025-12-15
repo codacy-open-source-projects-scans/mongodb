@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include "mongo/db/exec/sbe/stages/fetch.h"
 #include "mongo/db/exec/sbe/stages/loop_join.h"
 #include "mongo/db/exec/sbe/stages/scan.h"
 #include "mongo/db/exec/sbe/stages/window.h"
@@ -340,7 +341,7 @@ public:
         std::vector<std::string> scanFieldNames = {},
         const SbScanBounds& scanBounds = {},
         const SbIndexInfoSlots& indexInfoSlots = {},
-        sbe::ScanCallbacks scanCallbacks = {},
+        sbe::ScanOpenCallback scanOpenCallback = {},
         boost::optional<SbSlot> oplogTsSlot = boost::none);
 
     std::tuple<SbStage, SbSlot, SbSlotVector, SbIndexInfoSlots> makeSimpleIndexScan(
@@ -721,7 +722,7 @@ public:
                                SbSlot seekSlot,
                                std::vector<std::string> scanFieldNames,
                                const SbIndexInfoSlots& indexInfoSlots,
-                               sbe::ScanCallbacks scanCallbacks);
+                               sbe::FetchCallbacks scanCallbacks);
 
 
 protected:
@@ -737,14 +738,14 @@ private:
                               SbeHashAggIncreasedSpillingModeEnum forceIncreasedSpillingMode) {
         switch (forceIncreasedSpillingMode) {
             case SbeHashAggIncreasedSpillingModeEnum::kAlways:
-                return true;
+                return allowDiskUse;
             case SbeHashAggIncreasedSpillingModeEnum::kNever:
                 return false;
             case SbeHashAggIncreasedSpillingModeEnum::kInDebug:
                 return kDebugBuild && allowDiskUse;
-            default:
-                tasserted(9915702, "Unknown forceIncreasedSpillingMode");
         }
+
+        tasserted(9915702, "Unknown forceIncreasedSpillingMode");
     }
 };
 }  // namespace mongo::stage_builder

@@ -83,7 +83,8 @@ PlanExecutorSBE::PlanExecutorSBE(OperationContext* opCtx,
                                  std::unique_ptr<RemoteCursorMap> remoteCursors,
                                  std::unique_ptr<RemoteExplainVector> remoteExplains,
                                  std::unique_ptr<MultiPlanStage> classicRuntimePlannerStage,
-                                 const MultipleCollectionAccessor& mca)
+                                 const MultipleCollectionAccessor& mca,
+                                 bool usedJoinOpt)
     : _state{isOpen ? State::kOpened : State::kClosed},
       _opCtx(opCtx),
       _nss(std::move(nss)),
@@ -148,6 +149,7 @@ PlanExecutorSBE::PlanExecutorSBE(OperationContext* opCtx,
     }
 
     _planExplainer = plan_explainer_factory::make(_root.get(),
+                                                  _nss,
                                                   &_rootData,
                                                   querySolutionPtr,  ///< May be a nullptr.
                                                   isMultiPlan,
@@ -155,7 +157,8 @@ PlanExecutorSBE::PlanExecutorSBE(OperationContext* opCtx,
                                                   cachedPlanHash,
                                                   _rootData.debugInfo,
                                                   std::move(classicRuntimePlannerStage),
-                                                  _remoteExplains.get());
+                                                  _remoteExplains.get(),
+                                                  usedJoinOpt);
     _cursorType = _rootData.staticData->cursorType;
 
     if (_remoteCursors) {

@@ -174,19 +174,9 @@ void ValidateState::yieldCursors(OperationContext* opCtx) {
 }
 
 Status ValidateState::initializeCollection(OperationContext* opCtx) {
-    if (isBackground()) {
-        // Background validation reads data from the last stable checkpoint.
-        _validateTs =
-            opCtx->getServiceContext()->getStorageEngine()->getLastStableRecoveryTimestamp();
-        if (!_validateTs) {
-            return Status(
-                ErrorCodes::NamespaceNotFound,
-                fmt::format("Cannot run background validation on collection {} because there "
-                            "is no checkpoint yet",
-                            _nss.toStringForErrorMsg()));
-        }
+    if (getReadTimestamp()) {
         shard_role_details::getRecoveryUnit(opCtx)->setTimestampReadSource(
-            RecoveryUnit::ReadSource::kProvided, *_validateTs);
+            RecoveryUnit::ReadSource::kProvided, *getReadTimestamp());
 
         invariant(!shard_role_details::getRecoveryUnit(opCtx)->isActive());
     }
@@ -263,7 +253,7 @@ void ValidateState::initializeCursors(OperationContext* opCtx) {
         auto indexCursor =
             std::make_unique<SortedDataInterfaceThrottleCursor>(opCtx, iam, &_dataThrottle);
         _indexCursors.emplace(desc->indexName(), std::move(indexCursor));
-        _indexIdents.push_back(desc->getEntry()->getIdent());
+        _indexIdents.push_back(entry->getIdent());
     }
 
     // Because SeekableRecordCursors don't have a method to reset to the start, we save and then

@@ -29,12 +29,30 @@
 
 #include "mongo/db/query/compiler/optimizer/join/plan_enumerator_helpers.h"
 
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQueryCE
 
 namespace mongo::join_ordering {
+namespace {
+std::shared_ptr<const IndexCatalogEntry> betterIndexForProbe(
+    std::shared_ptr<const IndexCatalogEntry> first,
+    std::shared_ptr<const IndexCatalogEntry> second) {
+    const auto& firstKeyPattern = first->descriptor()->keyPattern();
+    const auto& secondKeyPattern = second->descriptor()->keyPattern();
+    if (firstKeyPattern.nFields() < secondKeyPattern.nFields()) {
+        return first;
+    } else if (firstKeyPattern.nFields() > secondKeyPattern.nFields()) {
+        return second;
+    }
+    if (firstKeyPattern.woCompare(secondKeyPattern) > 0) {
+        return second;
+    }
+    return first;
+}
+}  // namespace
 
 CombinationSequence::CombinationSequence(int n) : _n(n), _k(0), _accum(1) {
     tassert(10986302,
@@ -77,21 +95,8 @@ uint64_t combinations(int n, int k) {
 
 JoinPredicateEstimator::JoinPredicateEstimator(const JoinGraph& graph,
                                                const std::vector<ResolvedPath>& resolvedPaths,
-                                               const SamplingEstimatorMap& samplingEstimators,
-                                               const BaseTableCardinalityMap& tableCards)
-    : _graph(graph),
-      _resolvedPaths(resolvedPaths),
-      _samplingEstimators(samplingEstimators),
-      _tableCards(tableCards) {}
-
-namespace {
-
-// Given a NodeSet with a single bit set, return the index of that bit.
-std::size_t getIndexOfBit(const NodeSet& ns) {
-    return std::countr_zero(ns.to_ullong());
-}
-
-}  // namespace
+                                               const SamplingEstimatorMap& samplingEstimators)
+    : _graph(graph), _resolvedPaths(resolvedPaths), _samplingEstimators(samplingEstimators) {}
 
 // This function makes a number of assumptions:
 // * Join predicate are independent from single table predicates. This allows us to estimate them
@@ -136,17 +141,14 @@ std::size_t getIndexOfBit(const NodeSet& ns) {
 // both sides reference the primary key. Again, we use the side with the smaller CE for simplicity.
 cost_based_ranker::SelectivityEstimate JoinPredicateEstimator::joinPredicateSel(
     const JoinEdge& edge) {
-    tassert(11352501,
-            "join predicate selectivity estimation only supports single collection on both sides",
-            edge.left.count() == 1 && edge.right.count() == 1);
 
-    auto& leftNode = _graph.getNode(getIndexOfBit(edge.left));
-    auto& rightNode = _graph.getNode(getIndexOfBit(edge.right));
+    auto& leftNode = _graph.getNode(edge.left);
+    auto& rightNode = _graph.getNode(edge.right);
 
     // Extract the cardinality estimates for left and right nodes before single table predicates are
     // applied.
-    auto leftCard = _tableCards.at(leftNode.collectionName);
-    auto rightCard = _tableCards.at(rightNode.collectionName);
+    auto leftCard = _samplingEstimators.at(leftNode.collectionName)->getCollCard();
+    auto rightCard = _samplingEstimators.at(rightNode.collectionName)->getCollCard();
 
     // For the purposes of estimation, we assume that this edge represents a "primary key" to
     // "foreign key" join, despite these concepts not existing in MongoDB. We also assume that the
@@ -185,6 +187,63 @@ cost_based_ranker::SelectivityEstimate JoinPredicateEstimator::joinPredicateSel(
                 "ndvEstimate"_attr = ndv,
                 "selectivityEstimate"_attr = res);
     return res;
+}
+
+bool indexSatisfiesJoinPredicates(const BSONObj& keyPattern,
+                                  const std::vector<IndexedJoinPredicate>& joinPreds) {
+    StringSet joinFields;
+    for (auto&& joinPred : joinPreds) {
+        joinFields.insert(joinPred.field.fullPath());
+    }
+    for (auto&& elem : keyPattern) {
+        auto it = joinFields.find(elem.fieldName());
+        if (it != joinFields.end()) {
+            joinFields.erase(it);
+        } else {
+            break;
+        }
+    }
+    return joinFields.empty();
+}
+
+std::shared_ptr<const IndexCatalogEntry> bestIndexSatisfyingJoinPredicates(
+    const std::vector<std::shared_ptr<const IndexCatalogEntry>>& ices,
+    const std::vector<IndexedJoinPredicate>& joinPreds) {
+    std::shared_ptr<const IndexCatalogEntry> bestIndex;
+    for (auto&& ice : ices) {
+        const auto& desc = ice->descriptor();
+        if (indexSatisfiesJoinPredicates(desc->keyPattern(), joinPreds)) {
+            if (!bestIndex) {
+                bestIndex = ice;
+            } else {
+                // Keep the better suited index in 'bestIndex'.
+                bestIndex = betterIndexForProbe(bestIndex, ice);
+            }
+        }
+    }
+    return bestIndex;
+}
+
+std::shared_ptr<const IndexCatalogEntry> bestIndexSatisfyingJoinPredicates(
+    const JoinReorderingContext& ctx, NodeId nodeId, const JoinEdge& edge) {
+    tassert(11371700, "Node must be part of edge", edge.left == nodeId || edge.right == nodeId);
+
+    const auto& node = ctx.joinGraph.getNode(nodeId);
+    auto ixes = ctx.perCollIdxs.find(node.collectionName);
+    if (ixes != ctx.perCollIdxs.end() && !ixes->second.empty()) {
+        std::vector<IndexedJoinPredicate> indexedJoinPreds;
+        for (auto&& pred : edge.predicates) {
+            // We may not have re-oriented the edge if we're calling from bottom-up enumeration.
+            const auto pathId = edge.left == nodeId ? pred.left : pred.right;
+            indexedJoinPreds.push_back({
+                .op = QSNJoinPredicate::ComparisonOp::Eq,
+                .field = ctx.resolvedPaths[pathId].fieldName,
+            });
+        }
+
+        return bestIndexSatisfyingJoinPredicates(ixes->second, indexedJoinPreds);
+    }
+    return nullptr;
 }
 
 }  // namespace mongo::join_ordering

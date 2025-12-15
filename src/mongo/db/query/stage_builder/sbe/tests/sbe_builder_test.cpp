@@ -315,9 +315,7 @@ IndexEntry makeIndexEntry(BSONObj keyPattern) {
             false /* sp */,
             false /* unq */,
             CoreIndexInfo::Identifier(DBClientBase::genIndexName(keyPattern)),
-            nullptr /* fe */,
             {} /* io */,
-            nullptr /* ci */,
             nullptr /* wildcardProjection */};
 }
 
@@ -723,7 +721,8 @@ public:
 
         // Print the stage explain output and verify.
         _gctx->outStream() << data.debugString() << std::endl;
-        auto explain = sbe::DebugPrinter().print(*stage.get());
+        sbe::DebugPrintInfo debugPrintInfo{};
+        auto explain = sbe::DebugPrinter().print(*stage.get(), debugPrintInfo);
         _gctx->outStream() << replaceUuid(explain, localColl.uuid());
         _gctx->outStream() << std::endl;
 

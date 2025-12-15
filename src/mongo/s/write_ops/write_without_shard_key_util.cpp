@@ -38,13 +38,13 @@
 #include "mongo/db/field_ref.h"
 #include "mongo/db/field_ref_set.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
-#include "mongo/db/global_catalog/shard_key_pattern_query_util.h"
 #include "mongo/db/global_catalog/type_collection_common_types_gen.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/collation/collation_index_key.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/write_ops/canonical_update.h"
 #include "mongo/db/query/write_ops/update_request.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/router_role/cluster_commands_helpers.h"
@@ -53,6 +53,7 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/shard_role/resource_yielder.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
@@ -69,6 +70,7 @@
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/write_concern_error_detail.h"
+#include "mongo/s/query/shard_key_pattern_query_util.h"
 #include "mongo/s/request_types/cluster_commands_without_shard_key_gen.h"
 #include "mongo/s/transaction_router_resource_yielder.h"
 #include "mongo/s/write_ops/batched_command_response.h"
@@ -111,22 +113,33 @@ std::pair<BSONObj, BSONObj> generateUpsertDocument(
     const UUID& collectionUUID,
     boost::optional<TimeseriesOptions> timeseriesOptions,
     const StringDataComparator* comparator) {
+    auto [collatorToUse, expCtxCollationMatchesDefault] =
+        resolveCollator(opCtx, updateRequest.getCollation(), CollectionPtr::null);
+
+    auto expCtx = ExpressionContextBuilder{}
+                      .fromRequest(opCtx, updateRequest)
+                      .collator(std::move(collatorToUse))
+                      .collationMatchesDefault(expCtxCollationMatchesDefault)
+                      .build();
+
     // We are only using this to parse the query for producing the upsert document.
-    ParsedUpdateForMongos parsedUpdate(opCtx, &updateRequest);
-    uassertStatusOK(parsedUpdate.parseRequest());
+    auto parsedUpdate = uassertStatusOK(parsed_update_command::parse(
+        expCtx, &updateRequest, makeExtensionsCallback<ExtensionsCallbackNoop>()));
+
+    auto canonicalUpdate = uassertStatusOK(CanonicalUpdate::make(expCtx, std::move(parsedUpdate)));
 
     const CanonicalQuery* canonicalQuery =
-        parsedUpdate.hasParsedQuery() ? parsedUpdate.getParsedQuery() : nullptr;
+        canonicalUpdate->hasParsedQuery() ? canonicalUpdate->getParsedQuery() : nullptr;
     FieldRefSet immutablePaths;
     immutablePaths.insert(&idFieldRef);
     update::produceDocumentForUpsert(opCtx,
                                      &updateRequest,
-                                     parsedUpdate.getDriver(),
+                                     canonicalUpdate->getDriver(),
                                      canonicalQuery,
                                      immutablePaths,
-                                     parsedUpdate.getDriver()->getDocument());
+                                     canonicalUpdate->getDriver()->getDocument());
 
-    auto upsertDoc = parsedUpdate.getDriver()->getDocument().getObject();
+    auto upsertDoc = canonicalUpdate->getDriver()->getDocument().getObject();
     if (!timeseriesOptions) {
         return {upsertDoc, BSONObj()};
     }
@@ -151,6 +164,7 @@ BSONObj constructUpsertResponse(BatchedCommandResponse& writeRes,
         BulkWriteReplyItem replyItem(0);
         replyItem.setOk(1);
         replyItem.setN(writeRes.getN());
+        replyItem.setNModified(0);
         replyItem.setUpserted(upsertedId);
         BulkWriteCommandReply bulkWriteReply(
             BulkWriteCommandResponseCursor(
@@ -411,7 +425,8 @@ StatusWith<ClusterWriteWithoutShardKeyResponse> runTwoPhaseWriteProtocol(
     }
 }
 
-BSONObj generateExplainResponseForTwoPhaseWriteProtocol(
+void generateExplainResponseForTwoPhaseWriteProtocol(
+    BSONObjBuilder& explainOutputBuilder,
     const BSONObj& clusterQueryWithoutShardKeyExplainObj,
     const BSONObj& clusterWriteWithoutShardKeyExplainObj) {
     // To express the two phase nature of the two phase write protocol, we use the output of the
@@ -485,7 +500,6 @@ BSONObj generateExplainResponseForTwoPhaseWriteProtocol(
         return newExecutionStatsBuilder.obj();
     }();
 
-    BSONObjBuilder explainOutputBuilder;
     if (!queryPlannerOutput.isEmpty()) {
         explainOutputBuilder.appendObject("queryPlanner", queryPlannerOutput.objdata());
     }
@@ -495,7 +509,6 @@ BSONObj generateExplainResponseForTwoPhaseWriteProtocol(
     // This step is to get 'command', 'serverInfo', and 'serverParamter' fields to return in the
     // final explain output.
     explainOutputBuilder.appendElementsUnique(clusterWriteWithoutShardKeyExplainObj);
-    return explainOutputBuilder.obj();
 }
 }  // namespace write_without_shard_key
 }  // namespace mongo

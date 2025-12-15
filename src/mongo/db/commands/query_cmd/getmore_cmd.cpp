@@ -484,7 +484,8 @@ public:
             // We intentionally set the batch size to the max size_t value for a batch size of 0 in
             // order to simulate "no limit" on the batch size. We will run out of space in the
             // buffer before we reach this limit anyway.
-            size_t batchSize = cmd.getBatchSize().value_or(std::numeric_limits<size_t>::max());
+            size_t batchSize = cmd.getBatchSize() ? static_cast<size_t>(*cmd.getBatchSize())
+                                                  : std::numeric_limits<size_t>::max();
 
             try {
                 return batchedExecute(
@@ -686,7 +687,7 @@ public:
 
             // Collect and increment metrics now that we have enough information. It's important
             // we do so before generating the response so that the response can include metrics.
-            curOp->debug().additiveMetrics.nBatches = 1;
+            curOp->debug().getAdditiveMetrics().nBatches = 1;
             curOp->setEndOfOpMetrics(numResults);
             collectQueryStatsMongod(opCtx, cursorPin);
 
@@ -801,7 +802,7 @@ public:
             }
 
             if (_cmd.getIncludeQueryStatsMetrics()) {
-                curOp->debug().queryStatsInfo.metricsRequested = true;
+                curOp->debug().getQueryStatsInfo().metricsRequested = true;
             }
 
             ClientCursorPin cursorPin = pinCursorWithRetry(opCtx, cursorId, nss);

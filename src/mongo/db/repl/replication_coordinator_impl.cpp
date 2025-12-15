@@ -92,6 +92,7 @@
 #include "mongo/db/repl/update_position_args.h"
 #include "mongo/db/replica_set_endpoint_sharding_state.h"
 #include "mongo/db/replication_state_transition_lock_guard.h"
+#include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/session/internal_session_pool.h"
@@ -3200,6 +3201,10 @@ void ReplicationCoordinatorImpl::appendSecondaryInfoData(BSONObjBuilder* result)
     _topCoord->fillMemberData(result);
 }
 
+ThreadPool* ReplicationCoordinatorImpl::getDbWorkThreadPool() const noexcept {
+    return _externalState->getDbWorkThreadPool();
+}
+
 ReplSetConfig ReplicationCoordinatorImpl::getConfig() const {
     return _getReplSetConfig();
 }
@@ -4232,8 +4237,11 @@ Status ReplicationCoordinatorImpl::_runReplSetInitiate(const BSONObj& configObj,
 
     lk.unlock();
 
+    const auto minumumRequiredFCV =
+        rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider().getMinimumRequiredFCV();
+
     // Initiate FCV in local storage. This will propagate to other nodes via initial sync.
-    FeatureCompatibilityVersion::setIfCleanStartup(opCtx, _storage);
+    FeatureCompatibilityVersion::setIfCleanStartup(opCtx, _storage, minumumRequiredFCV);
 
     ReplSetConfig newConfig;
     try {
@@ -4872,7 +4880,7 @@ ReadPreference ReplicationCoordinatorImpl::_getSyncSourceReadPreference(WithLock
         enableOverrideClusterChainingSetting.load()) {
         // No update to read preference necessary.
 
-    } else if (!memberState.primary()) {
+    } else if (!memberState.primary() && _selfIndex >= 0) {
         // SERVER-105416: If we are the only electable node, then we need to be able to sync from
         // secondaries.
         // Otherwise, if we are not the primary and chaining is disabled in the config (without

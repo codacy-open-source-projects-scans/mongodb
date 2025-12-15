@@ -238,7 +238,7 @@ public:
      *     - validation of time-series related stages
      *     - validation of command parameters
      */
-    void performValidationChecks();
+    void performValidationChecks() const;
 
     /**
      * Increments global stage counters corresponding to the stages in this lite parsed pipeline.
@@ -374,14 +374,14 @@ private:
 class ResolvedViewAggExState : public AggExState {
 public:
     ResolvedViewAggExState(AggExState&& baseState,
-                           std::unique_ptr<AggCatalogState>& catalog,
+                           const AggCatalogState& catalog,
                            const ViewDefinition& view);
 
     /**
      * Returns a new ResolvedViewAggExState object after performing a collation compatibility check.
      */
     static StatusWith<std::unique_ptr<ResolvedViewAggExState>> create(
-        AggExState&& aggExState, std::unique_ptr<AggCatalogState>& aggCatalogState);
+        std::shared_ptr<AggExState> aggExState, const AggCatalogState& aggCatalogState);
 
     bool isView() const override {
         return true;
@@ -536,6 +536,8 @@ public:
      * throughout the lifespan of this query.
      */
     boost::intrusive_ptr<ExpressionContext> createExpressionContext();
+
+    BSONObj getShardKey() const;
 
     virtual ~AggCatalogState() {}
 

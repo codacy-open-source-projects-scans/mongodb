@@ -100,7 +100,16 @@ GetNextResult ExtensionStage::doGetNext() {
             tassert(11357602,
                     "No result BSONObj returned even though the result is in the advanced state.",
                     _lastGetNextResult.resultDocument.has_value());
-            return GetNextResult(Document{_lastGetNextResult.resultDocument->getUnownedBSONObj()});
+
+            auto nextDocument = [&]() {
+                if (_lastGetNextResult.resultMetadata.has_value()) {
+                    return Document::createDocumentWithMetadata(
+                        _lastGetNextResult.resultDocument->getUnownedBSONObj(),
+                        _lastGetNextResult.resultMetadata->getUnownedBSONObj());
+                }
+                return Document{_lastGetNextResult.resultDocument->getUnownedBSONObj()};
+            }();
+            return GetNextResult(std::move(nextDocument));
         }
         case GetNextCode::kPauseExecution:
             return GetNextResult::makePauseExecution();
@@ -111,6 +120,17 @@ GetNextResult ExtensionStage::doGetNext() {
                       str::stream()
                           << "Invalid GetNextCode: " << static_cast<int>(_lastGetNextResult.code));
     }
+}
+
+Document ExtensionStage::getExplainOutput(const SerializationOptions& opts) const {
+    MutableDocument output(Stage::getExplainOutput(opts));
+
+    BSONObj explainSerialization = _execAggStageHandle.explain(*opts.verbosity);
+    for (auto elem : explainSerialization) {
+        output.addField(elem.fieldName(), Value(elem));
+    }
+
+    return output.freeze();
 }
 }  // namespace exec::agg
 }  // namespace mongo

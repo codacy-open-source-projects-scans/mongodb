@@ -48,6 +48,7 @@
 #include "mongo/db/index/index_constants.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
 #include "mongo/db/keypattern.h"
+#include "mongo/db/matcher/extensions_callback_real.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/periodic_runner_cache_pressure_rollback.h"
 #include "mongo/db/query/canonical_query.h"
@@ -57,9 +58,9 @@
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/query/query_utils.h"
 #include "mongo/db/query/record_id_bound.h"
+#include "mongo/db/query/write_ops/canonical_update.h"
 #include "mongo/db/query/write_ops/delete_request_gen.h"
 #include "mongo/db/query/write_ops/parsed_delete.h"
-#include "mongo/db/query/write_ops/parsed_update.h"
 #include "mongo/db/query/write_ops/update_request.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
 #include "mongo/db/record_id.h"
@@ -690,6 +691,17 @@ StatusWith<std::vector<BSONObj>> _findOrDeleteDocuments(
     auto isFind = mode == FindDeleteMode::kFind;
     auto opStr = isFind ? "StorageInterfaceImpl::find" : "StorageInterfaceImpl::delete";
 
+#ifdef MONGO_CONFIG_DEBUG_BUILD
+    // TODO SERVER-114535: If a lock-free read is active and we enter this function the operation
+    // could force us to abandon the snapshot opened. This could cause the acquisition held above
+    // this call to become invalid by accident. We disable the checks temporarily until a more
+    // permanent fix is in place.
+    boost::optional<DisableCollectionConsistencyChecks> disableChecks;
+    if (isFind) {
+        disableChecks.emplace(opCtx);
+    }
+#endif
+
     return writeConflictRetry(opCtx, opStr, nsOrUUID, [&]() -> StatusWith<std::vector<BSONObj>> {
         // We need to explicitly use this in a few places to help the type inference.  Use a
         // shorthand.
@@ -798,14 +810,17 @@ StatusWith<std::vector<BSONObj>> _findOrDeleteDocuments(
             // Use index scan.
             auto indexCatalog = collection.getCollectionPtr()->getIndexCatalog();
             invariant(indexCatalog);
-            const IndexDescriptor* indexDescriptor = indexCatalog->findIndexByName(
+            const auto indexEntry = indexCatalog->findIndexByName(
                 opCtx, *indexName, IndexCatalog::InclusionPolicy::kReady);
-            if (!indexDescriptor) {
+            if (!indexEntry) {
                 return Result(ErrorCodes::IndexNotFound,
                               str::stream()
                                   << "Index not found, ns:" << nsOrUUID.toStringForErrorMsg()
                                   << ", index: " << *indexName);
             }
+
+            const auto indexDescriptor = indexEntry->descriptor();
+
             if (indexDescriptor->isPartial()) {
                 return Result(ErrorCodes::IndexOptionsConflict,
                               str::stream()
@@ -827,7 +842,7 @@ StatusWith<std::vector<BSONObj>> _findOrDeleteDocuments(
             planExecutor = isFind
                 ? InternalPlanner::indexScan(opCtx,
                                              collection,
-                                             indexDescriptor,
+                                             indexEntry,
                                              bounds.first,
                                              bounds.second,
                                              boundInclusion,
@@ -837,7 +852,7 @@ StatusWith<std::vector<BSONObj>> _findOrDeleteDocuments(
                 : InternalPlanner::deleteWithIndexScan(opCtx,
                                                        collection,
                                                        makeDeleteStageParamsForDeleteDocuments(),
-                                                       indexDescriptor,
+                                                       indexEntry,
                                                        bounds.first,
                                                        bounds.second,
                                                        boundInclusion,
@@ -1010,14 +1025,28 @@ Status _updateWithQuery(OperationContext* opCtx,
                               << " using query " << request.getQuery()};
         }
 
-        // ParsedUpdate needs to be inside the write conflict retry loop because it may create a
+        auto [collatorToUse, expCtxCollationMatchesDefault] =
+            resolveCollator(opCtx, request.getCollation(), collection.getCollectionPtr());
+
+        auto expCtx = ExpressionContextBuilder{}
+                          .fromRequest(opCtx, request)
+                          .collator(std::move(collatorToUse))
+                          .collationMatchesDefault(expCtxCollationMatchesDefault)
+                          .build();
+
+        // CanonicalUpdate needs to be inside the write conflict retry loop because it may create a
         // CanonicalQuery whose ownership will be transferred to the plan executor in
         // getExecutorUpdate().
-        ParsedUpdate parsedUpdate(opCtx, &request, collection.getCollectionPtr());
-        auto parsedUpdateStatus = parsedUpdate.parseRequest();
-        if (!parsedUpdateStatus.isOK()) {
-            return parsedUpdateStatus;
+        auto swParsedUpdate = parsed_update_command::parse(
+            expCtx,
+            &request,
+            makeExtensionsCallback<ExtensionsCallbackReal>(opCtx, &request.getNsString()));
+        if (!swParsedUpdate.isOK()) {
+            return swParsedUpdate.getStatus();
         }
+
+        auto canonicalUpdate = uassertStatusOK(CanonicalUpdate::make(
+            expCtx, std::move(swParsedUpdate.getValue()), collection.getCollectionPtr()));
 
         WriteUnitOfWork wuow(opCtx);
         if (!ts.isNull()) {
@@ -1026,7 +1055,7 @@ Status _updateWithQuery(OperationContext* opCtx,
         }
 
         auto planExecutorResult = mongo::getExecutorUpdate(
-            nullptr, collection, &parsedUpdate, boost::none /* verbosity */);
+            nullptr, collection, canonicalUpdate.get(), boost::none /* verbosity */);
         if (!planExecutorResult.isOK()) {
             return planExecutorResult.getStatus();
         }
@@ -1085,12 +1114,23 @@ Status StorageInterfaceImpl::upsertById(OperationContext* opCtx,
         invariant(!request.shouldReturnAnyDocs());
         invariant(PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY == request.getYieldPolicy());
 
-        // ParsedUpdate needs to be inside the write conflict retry loop because it contains
+        auto [collatorToUse, expCtxCollationMatchesDefault] =
+            resolveCollator(opCtx, request.getCollation(), collection.getCollectionPtr());
+
+        auto expCtx = ExpressionContextBuilder{}
+                          .fromRequest(opCtx, request)
+                          .collator(std::move(collatorToUse))
+                          .collationMatchesDefault(expCtxCollationMatchesDefault)
+                          .build();
+
+        // CanonicalUpdate needs to be inside the write conflict retry loop because it contains
         // the UpdateDriver whose state may be modified while we are applying the update.
-        ParsedUpdate parsedUpdate(opCtx, &request, collection.getCollectionPtr());
-        auto parsedUpdateStatus = parsedUpdate.parseRequest();
-        if (!parsedUpdateStatus.isOK()) {
-            return parsedUpdateStatus;
+        auto swParsedUpdate = parsed_update_command::parse(
+            expCtx,
+            &request,
+            makeExtensionsCallback<ExtensionsCallbackReal>(opCtx, &request.getNsString()));
+        if (!swParsedUpdate.isOK()) {
+            return swParsedUpdate.getStatus();
         }
 
         // We're using the ID hack to perform the update so we have to disallow collections
@@ -1102,13 +1142,14 @@ Status StorageInterfaceImpl::upsertById(OperationContext* opCtx,
         }
 
         UpdateStageParams updateStageParams(
-            parsedUpdate.getRequest(), parsedUpdate.getDriver(), nullptr);
-        auto planExecutor = InternalPlanner::updateWithIdHack(opCtx,
-                                                              collection,
-                                                              updateStageParams,
-                                                              descriptor,
-                                                              idKey.wrap(""),
-                                                              parsedUpdate.yieldPolicy());
+            swParsedUpdate.getValue().getRequest(), swParsedUpdate.getValue().getDriver(), nullptr);
+        auto planExecutor =
+            InternalPlanner::updateWithIdHack(opCtx,
+                                              collection,
+                                              updateStageParams,
+                                              descriptor,
+                                              idKey.wrap(""),
+                                              swParsedUpdate.getValue().yieldPolicy());
 
         try {
             // The update result is ignored.

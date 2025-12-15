@@ -147,7 +147,14 @@ typedef struct MongoExtensionStatusVTable {
     /**
      * Set a reason associated with `status`. May be empty.
      */
-    void (*set_reason)(MongoExtensionStatus* status, MongoExtensionByteView newReason);
+    MongoExtensionStatus* (*set_reason)(MongoExtensionStatus* status,
+                                        MongoExtensionByteView newReason);
+
+    /**
+     * Clone this instance of MongoExtensionStatus.
+     */
+    MongoExtensionStatus* (*clone)(const MongoExtensionStatus* status,
+                                   MongoExtensionStatus** output);
 } MongoExtensionStatusVTable;
 
 /**
@@ -355,6 +362,11 @@ typedef struct MongoExtensionLogicalAggStageVTable {
     void (*destroy)(MongoExtensionLogicalAggStage* logicalStage);
 
     /**
+     * Returns a MongoExtensionByteView containing the name of the associated aggregation stage.
+     */
+    MongoExtensionByteView (*get_name)(const MongoExtensionLogicalAggStage* logicalStage);
+
+    /**
      * Serialize `logicalStage` to be potentially sent across the wire to other execution nodes.
      */
     MongoExtensionStatus* (*serialize)(const MongoExtensionLogicalAggStage* logicalStage,
@@ -366,7 +378,8 @@ typedef struct MongoExtensionLogicalAggStageVTable {
      *
      * Output is expected to be in the form {$stageName: {...}}.
      *
-     * Note that this method will be called for all three verbosity levels.
+     * Note that this method will be called for all three verbosity levels, but will only populate
+     * the query plan portion of explain.
      */
     MongoExtensionStatus* (*explain)(const MongoExtensionLogicalAggStage* logicalStage,
                                      MongoExtensionExplainVerbosity verbosity,
@@ -379,6 +392,17 @@ typedef struct MongoExtensionLogicalAggStageVTable {
      */
     MongoExtensionStatus* (*compile)(const MongoExtensionLogicalAggStage* logicalStage,
                                      struct MongoExtensionExecAggStage** output);
+
+    /**
+     * Populates the output with an extension stage's DistributedPlanLogic, which specifies how
+     * results from shards should be merged in a sharded cluster. If a stage can run fully in
+     * parallel on the shards, the output pointer is not populated and is left as a nullptr.
+     *
+     * Ownership of the MongoExtensionDistributedPlanLogic is transferred to the caller.
+     */
+    MongoExtensionStatus* (*get_distributed_plan_logic)(
+        const MongoExtensionLogicalAggStage* logicalStage,
+        struct MongoExtensionDistributedPlanLogic** output);
 
 } MongoExtensionLogicalAggStageVTable;
 
@@ -438,6 +462,9 @@ typedef enum MongoExtensionDPLArrayElementType : uint32_t {
 /**
  * MongoExtensionDPLArrayElement represents a single element in a MongoExtensionDPLArray. Each
  * element can be either a parse node or a logical stage.
+ *
+ * If an element is a logical stage, it must be the same stage type as the logical stage that
+ * generated it.
  */
 typedef struct MongoExtensionDPLArrayElement {
     // Indicates what type the element is.
@@ -500,6 +527,11 @@ typedef struct MongoExtensionDPLArrayContainerVTable {
                                       MongoExtensionDPLArray* array);
 } MongoExtensionDPLArrayContainerVTable;
 
+/**
+ * MongoExtensionDistributedPlanLogic is an abstraction representing the information needed to
+ * execute this stage on a distributed collection. It describes how a pipeline should be split for
+ * sharded execution.
+ */
 typedef struct MongoExtensionDistributedPlanLogic {
     const struct MongoExtensionDistributedPlanLogicVTable* const vtable;
 } MongoExtensionDistributedPlanLogic;
@@ -518,11 +550,15 @@ typedef struct MongoExtensionDistributedPlanLogicVTable {
      * the caller. If a stage must run exclusively on the merging node, the output pointer is
      * returned as a nullptr.
      *
+     * This method may only be called once.
+     *
      * Note: This is currently restricted to only a single shardsStage for parity with the
-     * DistributedPlanLogic shardsStage. If in the future an extension stage may return more than
-     * one shardsStage, we will remove that restriction and modify DistributedPlanLogic.
+     * DistributedPlanLogic shardsStage. This single shardsStage must be fully expanded (i.e. not a
+     * desugar stage) so that it can be converted to a single DocumentSource. If in the future an
+     * extension stage may return more than one shardsStage, we will remove that restriction and
+     * modify DistributedPlanLogic.
      */
-    MongoExtensionStatus* (*get_shards_pipeline)(
+    MongoExtensionStatus* (*extract_shards_pipeline)(
         MongoExtensionDistributedPlanLogic* distributedPlanLogic,
         MongoExtensionDPLArrayContainer** output);
 
@@ -533,8 +569,10 @@ typedef struct MongoExtensionDistributedPlanLogicVTable {
      * extension populates the provided output pointer, transferring ownership of the container to
      * the caller. If nothing can run on the merging node, the output pointer is returned as a
      * nullptr.
+     *
+     * This method may only be called once.
      */
-    MongoExtensionStatus* (*get_merging_pipeline)(
+    MongoExtensionStatus* (*extract_merging_pipeline)(
         MongoExtensionDistributedPlanLogic* distributedPlanLogic,
         MongoExtensionDPLArrayContainer** output);
 
@@ -542,6 +580,11 @@ typedef struct MongoExtensionDistributedPlanLogicVTable {
      * Returns which fields are ascending and which fields are descending when merging streams
      * together. Ownership of the ByteBuf is transferred to the caller. The MongoExtensionByteBuf
      * will not be allocated if no sort pattern is required to merge the streams.
+     *
+     * Note: Specifying a sort pattern via DistributedPlanLogic will not be enough to execute
+     * the distributed sort. get_next() on the MongoExtensionExecAggStage must also set the
+     * $sortKey metadata field on each output document. Returning a non-empty sort pattern here but
+     * not setting the sort key metadata on output documents will result in a runtime error.
      */
     MongoExtensionStatus* (*get_sort_pattern)(
         MongoExtensionDistributedPlanLogic* distributedPlanLogic, MongoExtensionByteBuf** output);
@@ -668,25 +711,14 @@ typedef struct MongoExtensionByteContainer {
 } MongoExtensionByteContainer;
 
 /**
- * MongoExtensionGetNextRequestType is an enum used to instruct an ExecAggStage on how to fetch the
- * next results via getNext().
- */
-typedef enum MongoExtensionGetNextRequestType : uint8_t {
-    kNone = 0,                 // getNext() requests nothing.
-    kDocumentOnly = 1,         // getNext() requests only document data.
-    kMetadataOnly = 2,         // getNext() requests only metadata.
-    kDocumentAndMetadata = 3,  // getNext() requests both document and metadata.
-} MongoExtensionGetNextRequestType;
-
-/**
- * MongoExtensionGetNextResult is a container used to fetch results from an
- * ExecutableStage's get_next() function. Callers of ExecutableStage::get_next() are responsible for
- * instantiating this struct and passing the corresponding pointer to the function invocation.
+ * MongoExtensionGetNextResult is a container used to fetch results (with or without metadata) from
+ * an ExecutableStage's get_next() function. Callers of ExecutableStage::get_next() are responsible
+ * for instantiating this struct and passing the corresponding pointer to the function invocation.
  */
 typedef struct MongoExtensionGetNextResult {
     MongoExtensionGetNextResultCode code;
     MongoExtensionByteContainer resultDocument;
-    MongoExtensionGetNextRequestType requestType;
+    MongoExtensionByteContainer resultMetadata;
 } MongoExtensionGetNextResult;
 
 /**
@@ -764,6 +796,19 @@ typedef struct MongoExtensionExecAggStageVTable {
      * Frees all acquired resources.
      */
     MongoExtensionStatus* (*close)(MongoExtensionExecAggStage* execAggStage);
+
+    /**
+     * Populates the ByteBuf with the stage's explain output as serialized BSON. Ownership is
+     * transferred to the caller.
+     *
+     * Output is expected to be in the form {metricA: val1, metricB: val2, ...}}.
+     *
+     * Note that this method will be called for verbosity levels >= 'executionStats', and will only
+     * populate the execution metrics portion of the explain output.
+     */
+    MongoExtensionStatus* (*explain)(const MongoExtensionExecAggStage* execAggStage,
+                                     MongoExtensionExplainVerbosity verbosity,
+                                     MongoExtensionByteBuf** output);
 } MongoExtensionExecAggStageVTable;
 
 /**

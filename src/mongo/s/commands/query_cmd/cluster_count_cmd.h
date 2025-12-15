@@ -57,7 +57,9 @@
 #include "mongo/s/query/exec/cluster_cursor_manager.h"
 #include "mongo/s/query/exec/collect_query_stats_mongos.h"
 #include "mongo/s/query/planner/cluster_aggregate.h"
+#include "mongo/s/query/shard_targeting_helpers.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/timer.h"
 
 #include <vector>
@@ -178,9 +180,9 @@ public:
                 originalNss.isValid());
 
         try {
-            sharding::router::CollectionRouter router{opCtx->getServiceContext(), originalNss};
+            sharding::router::CollectionRouter router(opCtx, originalNss);
             return router.routeWithRoutingContext(
-                opCtx, getName(), [&](OperationContext* opCtx, RoutingContext& originalRoutingCtx) {
+                getName(), [&](OperationContext* opCtx, RoutingContext& originalRoutingCtx) {
                     // Clear the bodyBuilder since this lambda function may be retried if the router
                     // cache is stale.
                     result.resetToEmpty();
@@ -190,7 +192,7 @@ public:
                     BSONObj cmdObj = originalCmdObj;
                     auto nss = originalNss;
                     const auto targeter = CollectionRoutingInfoTargeter(opCtx, nss);
-                    auto& routingCtx = translateNssForRawDataAccordingToRoutingInfo(
+                    auto& routingCtx = performTimeseriesTranslationAccordingToRoutingInfo(
                         opCtx,
                         originalNss,
                         targeter,
@@ -359,7 +361,8 @@ public:
                                         shardMetrics.Obj(), IDLParserContext("CursorMetrics"));
                                     CurOp::get(opCtx)
                                         ->debug()
-                                        .additiveMetrics.aggregateCursorMetrics(metrics);
+                                        .getAdditiveMetrics()
+                                        .aggregateCursorMetrics(metrics);
                                 }
                                 continue;
                             }
@@ -384,7 +387,7 @@ public:
 
                     if (allShardMetricsReturned) {
                         collectQueryStatsMongos(opCtx,
-                                                std::move(curOp->debug().queryStatsInfo.key));
+                                                std::move(curOp->debug().getQueryStatsInfo().key));
                     }
 
                     return true;
@@ -400,7 +403,7 @@ public:
             auto* curOp = CurOp::get(opCtx);
             curOp->setEndOfOpMetrics(1);
 
-            collectQueryStatsMongos(opCtx, std::move(curOp->debug().queryStatsInfo.key));
+            collectQueryStatsMongos(opCtx, std::move(curOp->debug().getQueryStatsInfo().key));
             return true;
         }
     }
@@ -414,7 +417,7 @@ public:
         const BSONObj& originalCmdObj = request.body;
 
         auto curOp = CurOp::get(opCtx);
-        curOp->debug().queryStatsInfo.disableForSubqueryExecution = true;
+        curOp->debug().getQueryStatsInfo().disableForSubqueryExecution = true;
 
         const auto originalNss = parseNs(request.parseDbName(), originalCmdObj);
         uassert(ErrorCodes::InvalidNamespace,
@@ -422,11 +425,9 @@ public:
                               << originalNss.toStringForErrorMsg() << "'",
                 originalNss.isValid());
 
-        sharding::router::CollectionRouter router{opCtx->getServiceContext(), originalNss};
+        sharding::router::CollectionRouter router(opCtx, originalNss);
         return router.routeWithRoutingContext(
-            opCtx,
-            "explain count"_sd,
-            [&](OperationContext* opCtx, RoutingContext& originalRoutingCtx) {
+            "explain count"_sd, [&](OperationContext* opCtx, RoutingContext& originalRoutingCtx) {
                 // Clear the bodyBuilder since this lambda function may be retried if the router
                 // cache is stale.
                 result->getBodyBuilder().resetToEmpty();
@@ -436,7 +437,7 @@ public:
                 BSONObj cmdObj = originalCmdObj;
                 auto nss = originalNss;
                 const auto targeter = CollectionRoutingInfoTargeter(opCtx, originalNss);
-                auto& routingCtx = translateNssForRawDataAccordingToRoutingInfo(
+                auto& routingCtx = performTimeseriesTranslationAccordingToRoutingInfo(
                     opCtx,
                     originalNss,
                     targeter,

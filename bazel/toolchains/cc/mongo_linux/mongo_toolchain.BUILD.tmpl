@@ -19,6 +19,7 @@ load(
     "SYSTEM_ALLOCATOR_SANITIZER_ERROR_MESSAGE",
     "THREAD_SANITIZER_ERROR_MESSAGE",
 )
+load("@//bazel/toolchains/cc:mongo_defines.bzl", "MONGO_GLOBAL_DEFINES")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -49,7 +50,6 @@ Error:
 LINKER_LINKFLAGS = select(
     {
         "@//bazel/config:linker_default": [],
-        "@//bazel/config:linker_gold": ["-fuse-ld=gold"],
         "@//bazel/config:linker_lld_valid_settings": ["-fuse-ld=lld"],
         "@//bazel/config:linker_mold_valid_settings": ["-fuse-ld=mold", "-B./external/mongo_toolchain_{version}/mold-2.37.1-{arch}-linux/bin/"],
     },
@@ -59,7 +59,6 @@ LINKER_LINKFLAGS = select(
 CHOSEN_LINKER = select(
     {
         "@//bazel/config:linker_default": "",
-        "@//bazel/config:linker_gold": "gold",
         "@//bazel/config:linker_lld_valid_settings": "lld",
         "@//bazel/config:linker_mold_valid_settings": "mold",
     }
@@ -294,6 +293,7 @@ mongo_linux_cc_toolchain_config(
     coverage_enabled = COVERAGE_ENABLED,
     compress_debug_enabled = COMPRESS_DEBUG_ENABLED,
     warnings_as_errors_enabled = WARNINGS_AS_ERRORS_ENABLED,
+    global_defines = MONGO_GLOBAL_DEFINES,
 )
 
 mongo_linux_cc_toolchain_config(
@@ -360,6 +360,7 @@ mongo_linux_cc_toolchain_config(
     coverage_enabled = COVERAGE_ENABLED,
     compress_debug_enabled = COMPRESS_DEBUG_ENABLED,
     warnings_as_errors_enabled = WARNINGS_AS_ERRORS_ENABLED,
+    global_defines = MONGO_GLOBAL_DEFINES,
 )
 
 cc_toolchain(

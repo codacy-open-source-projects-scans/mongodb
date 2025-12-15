@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-
 #include "mongo/db/pipeline/process_interface/common_process_interface.h"
 
 #include "mongo/bson/bsonelement.h"
@@ -234,8 +233,10 @@ void CommonProcessInterface::updateClientOperationTime(OperationContext* opCtx) 
     }
 }
 
-bool CommonProcessInterface::keyPatternNamesExactPaths(const BSONObj& keyPattern,
-                                                       const std::set<FieldPath>& uniqueKeyPaths) {
+namespace {
+
+bool keyPatternNamesExactPaths(const BSONObj& keyPattern,
+                               const std::set<FieldPath>& uniqueKeyPaths) {
     size_t nFieldsMatched = 0;
     for (auto&& elem : keyPattern) {
         if (!elem.isNumber()) {
@@ -247,6 +248,38 @@ bool CommonProcessInterface::keyPatternNamesExactPaths(const BSONObj& keyPattern
         ++nFieldsMatched;
     }
     return nFieldsMatched == uniqueKeyPaths.size();
+}
+
+bool isIdIndexFullyUnique(const ShardKeyPattern* shardKeyPattern, const BSONObj& indexKeyPattern) {
+    // We can't use ShardKeyPattern::isIndexUniquenessCompatible because it has a hard-coded
+    // exception for _id index that we want to bypass. _id is guaranteed to be unique across all
+    // shards only if the shard key is _id.
+    return shardKeyPattern == nullptr ||
+        (shardKeyPattern->getKeyPatternFields().size() == 1 &&
+         shardKeyPattern->getKeyPatternFields()[0]->equalsDottedField(
+             indexKeyPattern.firstElementFieldNameStringData()));
+}
+
+}  // namespace
+
+MongoProcessInterface::SupportingUniqueIndex CommonProcessInterface::supportsUniqueKey(
+    const IndexDescriptor* indexDescriptor,
+    const CollatorInterface* indexCollator,
+    const CollatorInterface* queryCollator,
+    const ShardKeyPattern* shardKeyPattern,
+    const std::set<FieldPath>& uniqueKeyPaths) {
+    const bool isFullyUnique = indexDescriptor->isIdIndex()
+        ? isIdIndexFullyUnique(shardKeyPattern, indexDescriptor->keyPattern())
+        : indexDescriptor->unique();
+    const bool supports =
+        (isFullyUnique && !indexDescriptor->isPartial() &&
+         keyPatternNamesExactPaths(indexDescriptor->keyPattern(), uniqueKeyPaths) &&
+         CollatorInterface::collatorsMatch(indexCollator, queryCollator));
+    if (!supports) {
+        return MongoProcessInterface::SupportingUniqueIndex::None;
+    }
+    return indexDescriptor->isSparse() ? MongoProcessInterface::SupportingUniqueIndex::NotNullish
+                                       : MongoProcessInterface::SupportingUniqueIndex::Full;
 }
 
 std::vector<FieldPath> CommonProcessInterface::shardKeyToDocumentKeyFields(
@@ -400,10 +433,9 @@ std::vector<BSONObj> CommonProcessInterface::_runListCollectionsCommandOnASharde
         return appendPrimaryShardIfRequested(resultCollections.docs, cdb->getPrimary());
     };
 
-    sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), nss.dbName());
+    sharding::router::DBPrimaryRouter router(opCtx, nss.dbName());
     try {
         return router.route(
-            opCtx,
             "CommonMongodProcessInterface::_runListCollectionsCommandOnAShardedCluster",
             runListCollectionsFunc);
     } catch (ExceptionFor<ErrorCodes::NamespaceNotFound>&) {

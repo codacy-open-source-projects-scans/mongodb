@@ -133,40 +133,6 @@
 namespace mongo {
 namespace {
 
-// Returns true if the field names of 'keyPattern' are exactly those in 'uniqueKeyPaths', and each
-// of the elements of 'keyPattern' is numeric, i.e. not "text", "$**", or any other special type of
-// index.
-bool keyPatternNamesExactPaths(const BSONObj& keyPattern,
-                               const std::set<FieldPath>& uniqueKeyPaths) {
-    size_t nFieldsMatched = 0;
-    for (auto&& elem : keyPattern) {
-        if (!elem.isNumber()) {
-            return false;
-        }
-        if (uniqueKeyPaths.find(elem.fieldNameStringData()) == uniqueKeyPaths.end()) {
-            return false;
-        }
-        ++nFieldsMatched;
-    }
-    return nFieldsMatched == uniqueKeyPaths.size();
-}
-
-MongoProcessInterface::SupportingUniqueIndex supportsUniqueKey(
-    const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    const IndexCatalogEntry* index,
-    const std::set<FieldPath>& uniqueKeyPaths) {
-    bool supports =
-        (index->descriptor()->unique() && !index->descriptor()->isPartial() &&
-         keyPatternNamesExactPaths(index->descriptor()->keyPattern(), uniqueKeyPaths) &&
-         CollatorInterface::collatorsMatch(index->getCollator(), expCtx->getCollator()));
-    if (!supports) {
-        return MongoProcessInterface::SupportingUniqueIndex::None;
-    }
-    return index->descriptor()->isSparse()
-        ? MongoProcessInterface::SupportingUniqueIndex::NotNullish
-        : MongoProcessInterface::SupportingUniqueIndex::Full;
-}
-
 // Proactively assert that this operation can safely write before hitting an assertion in the
 // storage engine. We can safely write if we are enforcing prepare conflicts by blocking or if we
 // are ignoring prepare conflicts and explicitly allowing writes. Ignoring prepare conflicts
@@ -489,10 +455,9 @@ std::vector<Document> CommonMongodProcessInterface::getIndexStats(OperationConte
         uassert(ErrorCodes::IndexNotFound,
                 "Could not find entry in IndexCatalog for index " + indexName,
                 idx);
-        auto entry = idxCatalog->getEntry(idx);
-        doc["spec"] = Value(idx->infoObj());
+        doc["spec"] = Value(idx->descriptor()->infoObj());
 
-        if (!entry->isReady()) {
+        if (!idx->isReady()) {
             doc["building"] = Value(true);
         }
 
@@ -1035,7 +1000,15 @@ CommonMongodProcessInterface::fieldsHaveSupportingUniqueIndex(
     auto result = SupportingUniqueIndex::None;
     while (indexIterator->more()) {
         const IndexCatalogEntry* entry = indexIterator->next();
-        result = std::max(result, supportsUniqueKey(expCtx, entry, fieldPaths));
+        result = std::max(
+            result,
+            supportsUniqueKey(entry->descriptor(),
+                              entry->getCollator(),
+                              expCtx->getCollator(),
+                              collection.getShardingDescription().isSharded()
+                                  ? &collection.getShardingDescription().getShardKeyPattern()
+                                  : nullptr,
+                              fieldPaths));
         if (result == SupportingUniqueIndex::Full) {
             break;
         }

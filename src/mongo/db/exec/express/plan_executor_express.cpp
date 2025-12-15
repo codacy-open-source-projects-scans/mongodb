@@ -50,9 +50,9 @@
 #include "mongo/db/query/plan_explainer_express.h"
 #include "mongo/db/query/planner_ixselect.h"
 #include "mongo/db/query/query_planner_params.h"
+#include "mongo/db/query/write_ops/canonical_update.h"
 #include "mongo/db/query/write_ops/delete_request_gen.h"
 #include "mongo/db/query/write_ops/parsed_delete.h"
-#include "mongo/db/query/write_ops/parsed_update.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/shard_role/shard_catalog/clustered_collection_util.h"
 #include "mongo/db/shard_role/shard_catalog/collection.h"
@@ -619,7 +619,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> makeExpressExecutorForFindB
     boost::optional<ScopedCollectionFilter> collectionFilter,
     bool returnOwnedBson) {
     const auto& [index, coversProjection] = indexForExpressEquality;
-    auto indexDescriptor = coll.getCollectionPtr()->getIndexCatalog()->findIndexByName(
+    const auto indexEntry = coll.getCollectionPtr()->getIndexCatalog()->findIndexByName(
         opCtx, index.identifier.catalogName);
     tassert(8884404,
             fmt::format("Attempt to build plan for nonexistent index -- namespace: {}, "
@@ -627,7 +627,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> makeExpressExecutorForFindB
                         coll.getCollectionPtr()->ns().toStringForErrorMsg(),
                         cq->toStringShortForErrorMsg(),
                         index.toString()),
-            indexDescriptor);
+            indexEntry);
 
     const CollatorInterface* collator = cq->getCollator();
     const projection_ast::Projection* projection = cq->getProj();
@@ -639,7 +639,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> makeExpressExecutorForFindB
         return makeExpressExecutor(
             opCtx,
             express::LookupViaUserIndex<FetchCallback>(queryFilter,
-                                                       indexDescriptor->getEntry()->getIdent(),
+                                                       indexEntry->getIdent(),
                                                        index.identifier.catalogName,
                                                        collator,
                                                        projection),
@@ -682,10 +682,10 @@ const express::ExceptionRecoveryPolicy* getExpressRecoveryPolicy(
 std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> makeExpressExecutorForUpdate(
     OperationContext* opCtx,
     CollectionAcquisition collection,
-    ParsedUpdate* parsedUpdate,
+    CanonicalUpdate* canonicalUpdate,
     bool returnOwnedBson) {
 
-    const UpdateRequest* request = parsedUpdate->getRequest();
+    const UpdateRequest* request = canonicalUpdate->getRequest();
 
     using Iterator =
         std::variant<express::IdLookupViaIndex, express::IdLookupOnClusteredCollection>;
@@ -709,11 +709,11 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> makeExpressExecutorForUpdat
 
     bool isUserInitiatedWrite = opCtx->writesAreReplicated() &&
         !(request->isFromOplogApplication() ||
-          parsedUpdate->getDriver()->type() == UpdateDriver::UpdateType::kDelta ||
+          canonicalUpdate->getDriver()->type() == UpdateDriver::UpdateType::kDelta ||
           request->source() == OperationSource::kFromMigrate);
 
     auto writeOperation =
-        express::UpdateOperation(parsedUpdate->getDriver(), isUserInitiatedWrite, request);
+        express::UpdateOperation(canonicalUpdate->getDriver(), isUserInitiatedWrite, request);
 
     using ShardFilter = std::variant<express::NoShardFilter, write_stage_common::PreWriteFilter>;
     auto shardFilter = [&]() -> ShardFilter {
@@ -725,7 +725,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> makeExpressExecutorForUpdat
     }();
 
     fastPathQueryCounters.incrementExpressQueryCounter();
-    auto recoveryPolicy = getExpressRecoveryPolicy(opCtx, parsedUpdate->yieldPolicy());
+    auto recoveryPolicy = getExpressRecoveryPolicy(opCtx, canonicalUpdate->yieldPolicy());
 
     return std::visit(
         [&](auto chosenIterator,

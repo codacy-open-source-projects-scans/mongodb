@@ -66,8 +66,12 @@ TEST_F(DocumentSourceExtensionOptimizableTest, transformConstructionSucceeds) {
 }
 
 TEST_F(DocumentSourceExtensionOptimizableTest, stageCanSerializeForQueryExecution) {
-    auto astNode = new sdk::ExtensionAggStageAstNode(
-        sdk::shared_test_stages::TransformAggStageAstNode::make());
+    using sdk::shared_test_stages::TransformAggStageAstNode;
+    using sdk::shared_test_stages::TransformAggStageDescriptor;
+
+    auto arguments = BSON("serializedForExecution" << true);
+    auto astNode = new sdk::ExtensionAggStageAstNode(std::make_unique<TransformAggStageAstNode>(
+        TransformAggStageDescriptor::kStageName, arguments));
     auto astHandle = AggStageAstNodeHandle(astNode);
 
     auto optimizable =
@@ -76,8 +80,7 @@ TEST_F(DocumentSourceExtensionOptimizableTest, stageCanSerializeForQueryExecutio
     // Test that an extension can provide its own implementation of serialize, that might change
     // the raw spec provided.
     ASSERT_BSONOBJ_EQ(optimizable->serialize(SerializationOptions()).getDocument().toBson(),
-                      BSON(sdk::shared_test_stages::TransformAggStageDescriptor::kStageName
-                           << "serializedForExecution"));
+                      BSON(TransformAggStageDescriptor::kStageName << arguments));
 }
 
 using DocumentSourceExtensionOptimizableTestDeathTest = DocumentSourceExtensionOptimizableTest;
@@ -232,5 +235,100 @@ TEST_F(DocumentSourceExtensionOptimizableTest,
     deps.setMetadataAvailable(DocumentMetadataFields::kSearchScore);
 
     ASSERT_THROWS_CODE(optimizable->getDependencies(&deps), AssertionException, 17308);
+}
+
+TEST_F(DocumentSourceExtensionOptimizableTest, distributedPlanLogicReturnsNoneWhenNoDPL) {
+    // TransformLogicalAggStage returns nullptr for getDistributedPlanLogic(), which should result
+    // in boost::none being returned.
+    auto astNode = new sdk::ExtensionAggStageAstNode(
+        sdk::shared_test_stages::TransformAggStageAstNode::make());
+    auto astHandle = AggStageAstNodeHandle(astNode);
+
+    auto optimizable =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(astHandle));
+
+    auto dpl = optimizable->distributedPlanLogic();
+    ASSERT_FALSE(dpl.has_value());
+}
+
+class InvalidDPLLogicalStage : public sdk::shared_test_stages::TransformLogicalAggStage {
+public:
+    boost::optional<sdk::DistributedPlanLogic> getDistributedPlanLogic() const override {
+        sdk::DistributedPlanLogic dpl;
+
+        {
+            // Create a merging pipeline with a logical stage that is different from this one.
+            std::vector<VariantDPLHandle> elements;
+            elements.emplace_back(
+                extension::LogicalAggStageHandle{new sdk::ExtensionLogicalAggStage(
+                    sdk::shared_test_stages::MergeOnlyDPLLogicalStage::make())});
+            dpl.mergingPipeline = sdk::DPLArrayContainer(std::move(elements));
+        }
+
+        return dpl;
+    }
+};
+
+TEST_F(DocumentSourceExtensionOptimizableTest,
+       distributedPlanLogicReturnsErrorWhenGivenMismatchedLogicalStage) {
+    auto logicalStage =
+        new sdk::ExtensionLogicalAggStage(std::make_unique<InvalidDPLLogicalStage>());
+    auto logicalStageHandle = LogicalAggStageHandle(logicalStage);
+
+    auto optimizable = host::DocumentSourceExtensionOptimizable::create(
+        getExpCtx(), std::move(logicalStageHandle), MongoExtensionStaticProperties{});
+
+    ASSERT_THROWS_CODE(optimizable->distributedPlanLogic(), AssertionException, 11513800);
+}
+
+TEST_F(DocumentSourceExtensionOptimizableTest, distributedPlanLogicWithMergeOnlyStage) {
+    // Create a stage that returns DPL with merge-only stages containing all three types of
+    // VariantDPLHandle.
+    auto logicalStage = new sdk::ExtensionLogicalAggStage(
+        sdk::shared_test_stages::MergeOnlyDPLLogicalStage::make());
+    auto logicalStageHandle = LogicalAggStageHandle(logicalStage);
+
+    // Initialize properties with a non-default value.
+    auto properties =
+        MongoExtensionStaticProperties::parse(BSON("requiresInputDocSource" << false));
+
+    auto optimizable = host::DocumentSourceExtensionOptimizable::create(
+        getExpCtx(), std::move(logicalStageHandle), properties);
+
+    auto dpl = optimizable->distributedPlanLogic();
+    ASSERT_TRUE(dpl.has_value());
+
+    const auto& logic = dpl.get();
+
+    // Verify shards pipeline is empty (nullptr).
+    ASSERT_EQ(logic.shardsStage, nullptr);
+
+    // Verify merging pipeline has three stages, one for each type of VariantDPLHandle.
+    ASSERT_EQ(logic.mergingStages.size(), 3U);
+
+    // Verify the first stage is from a host-defined parse node ($match).
+    auto firstStageIt = logic.mergingStages.begin();
+    ASSERT_NE(*firstStageIt, nullptr);
+    ASSERT_EQ(std::string((*firstStageIt)->getSourceName()), "$match");
+
+    // Verify the second stage is from an extension-defined parse node ($transformStage).
+    auto secondStageIt = std::next(firstStageIt);
+    ASSERT_NE(*secondStageIt, nullptr);
+    ASSERT_EQ(std::string((*secondStageIt)->getSourceName()),
+              sdk::shared_test_stages::TransformAggStageDescriptor::kStageName);
+
+    // Verify the third stage is from a logical stage handle ($transformStage).
+    auto thirdStageIt = std::next(secondStageIt);
+    ASSERT_NE(*thirdStageIt, nullptr);
+    ASSERT_EQ(std::string((*thirdStageIt)->getSourceName()),
+              sdk::shared_test_stages::kMergeOnlyDPLStageName);
+    // The new logical stage should inherit the original stage's static properties.
+    ASSERT_EQ(static_cast<host::DocumentSourceExtensionOptimizable*>(thirdStageIt->get())
+                  ->getStaticProperties()
+                  .getRequiresInputDocSource(),
+              properties.getRequiresInputDocSource());
+
+    // Verify sort pattern is empty.
+    ASSERT_FALSE(logic.mergeSortPattern.has_value());
 }
 }  // namespace mongo::extension

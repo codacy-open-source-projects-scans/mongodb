@@ -58,6 +58,7 @@
 #include "mongo/db/repl/oplog_writer_impl.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/repl_settings.h"
+#include "mongo/db/repl/repl_writer_thread_pool_server_parameters_gen.h"
 #include "mongo/db/repl/replication_consistency_markers_mock.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
@@ -178,9 +179,7 @@ public:
             _svcCtx, std::unique_ptr<repl::ReplicationCoordinator>(_replCoord));
 
         catalog::startUpStorageEngineAndCollectionCatalog(
-            _svcCtx,
-            &cc(),
-            StorageEngineInitFlags::kAllowNoLockFile | StorageEngineInitFlags::kSkipMetadataFile);
+            _svcCtx, &cc(), StorageEngineInitFlags::kSkipMetadataFile);
 
         DatabaseHolder::set(_svcCtx, std::make_unique<DatabaseHolderImpl>());
         repl::StorageInterface::set(_svcCtx, std::make_unique<repl::StorageInterfaceImpl>());
@@ -264,8 +263,7 @@ public:
         catalog::startUpStorageEngineAndCollectionCatalog(
             _svcCtx,
             &cc(),
-            StorageEngineInitFlags::kAllowNoLockFile | StorageEngineInitFlags::kSkipMetadataFile |
-                StorageEngineInitFlags::kForRestart);
+            StorageEngineInitFlags::kSkipMetadataFile | StorageEngineInitFlags::kForRestart);
     }
 
     ServiceContext* getSvcCtx() {

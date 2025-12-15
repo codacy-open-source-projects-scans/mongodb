@@ -33,6 +33,7 @@
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -42,7 +43,7 @@ namespace mongo {
  * placeholder MongoProcessInterface is required by an interface but will not be called. To
  * guarantee the latter, method implementations in this class are marked MONGO_UNREACHABLE.
  */
-class StubMongoProcessInterface : public MongoProcessInterface {
+class MONGO_MOD_OPEN StubMongoProcessInterface : public MongoProcessInterface {
 public:
     StubMongoProcessInterface() : MongoProcessInterface(nullptr) {}
     using MongoProcessInterface::MongoProcessInterface;
@@ -95,19 +96,19 @@ public:
 
     void updateClientOperationTime(OperationContext* opCtx) const override {}
 
-    Status insert(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                  const NamespaceString& ns,
-                  std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
-                  const WriteConcernOptions& wc,
-                  boost::optional<OID>) override {
+    InsertResult insert(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                        const NamespaceString& ns,
+                        std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
+                        const WriteConcernOptions& wc,
+                        boost::optional<OID>) override {
         MONGO_UNREACHABLE;
     }
 
-    Status insertTimeseries(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                            const NamespaceString& ns,
-                            std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
-                            const WriteConcernOptions& wc,
-                            boost::optional<OID> targetEpoch) override {
+    InsertResult insertTimeseries(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                  const NamespaceString& ns,
+                                  std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
+                                  const WriteConcernOptions& wc,
+                                  boost::optional<OID> targetEpoch) override {
         MONGO_UNREACHABLE;
     }
 

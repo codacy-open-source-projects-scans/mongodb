@@ -580,11 +580,12 @@ tasks:
 
   - <<: *task_template
     name: change_streams_mongos_sessions_passthrough
-    tags:
-      [
+    tags: [
         "assigned_to_jira_team_server_query_execution",
         "default",
         "change_streams",
+        # TODO: SERVER-114563 for re-enabling this. Right now very slow for TSAN builds.
+        "incompatible_tsan",
       ]
     commands:
       - func: "do setup"
@@ -592,11 +593,12 @@ tasks:
 
   - <<: *task_template
     name: change_streams_mongos_sessions_passthrough_v2
-    tags:
-      [
+    tags: [
         "assigned_to_jira_team_server_query_execution",
         "default",
         "change_streams",
+        # TODO: SERVER-114563 for re-enabling this. Right now very slow for TSAN builds.
+        "incompatible_tsan",
       ]
     commands:
       - func: "do setup"
@@ -892,19 +894,19 @@ tasks:
         vars:
           use_large_distro: "true"
 
-  - <<: *gen_task_template
-    name: aggregation_pqs_hints_gen
+  - <<: *task_template
+    name: aggregation_pqs_hints
     tags:
       [
         "assigned_to_jira_team_server_query_execution",
         "incompatible_aubsan",
         "incompatible_tsan",
         "default",
+        "requires_large_host",
       ]
     commands:
-      - func: "generate resmoke tasks"
-        vars:
-          use_large_distro: "true"
+      - func: "do setup"
+      - func: "run tests"
 
   - <<: *gen_task_template
     name: aggregation_sharded_collections_pqs_fallback_gen
@@ -963,8 +965,8 @@ tasks:
         vars:
           use_large_distro: "true"
 
-  - <<: *gen_task_template
-    name: replica_sets_jscore_pqs_index_filters_gen
+  - <<: *task_template
+    name: replica_sets_jscore_pqs_index_filters
     # Not every build variant speaks 'sbe_only' and this suite requires SBE
     # which can be enforced by 'requires_all_feature_flags'
     tags:
@@ -973,11 +975,11 @@ tasks:
         "default",
         "sbe_only",
         "requires_all_feature_flags",
+        "requires_large_host",
       ]
     commands:
-      - func: "generate resmoke tasks"
-        vars:
-          use_large_distro: "true"
+      - func: "do setup"
+      - func: "run tests"
 
   - <<: *gen_task_template
     name: sharded_collections_pqs_fallback_gen
@@ -1007,8 +1009,8 @@ tasks:
         vars:
           use_large_distro: "true"
 
-  - <<: *gen_task_template
-    name: sharded_collections_pqs_index_filters_gen
+  - <<: *task_template
+    name: sharded_collections_pqs_index_filters
     # Not every build variant speaks 'sbe_only' and this suite requires SBE
     # which can be enforced by 'requires_all_feature_flags'
     tags:
@@ -1017,11 +1019,11 @@ tasks:
         "default",
         "sbe_only",
         "requires_all_feature_flags",
+        "requires_large_host",
       ]
     commands:
-      - func: "generate resmoke tasks"
-        vars:
-          use_large_distro: "true"
+      - func: "do setup"
+      - func: "run tests"
 
   - <<: *gen_task_template
     name: sharding_pqs_fallback_gen
@@ -1051,8 +1053,8 @@ tasks:
         vars:
           use_large_distro: "true"
 
-  - <<: *gen_task_template
-    name: sharding_pqs_index_filters_gen
+  - <<: *task_template
+    name: sharding_pqs_index_filters
     # Not every build variant speaks 'sbe_only' and this suite requires SBE
     # which can be enforced by 'requires_all_feature_flags'
     tags:
@@ -1061,11 +1063,11 @@ tasks:
         "default",
         "sbe_only",
         "requires_all_feature_flags",
+        "requires_large_host",
       ]
     commands:
-      - func: "generate resmoke tasks"
-        vars:
-          use_large_distro: "true"
+      - func: "do setup"
+      - func: "run tests"
 
   - <<: *gen_task_template
     name: aggregation_sharded_collections_query_shape_hash_stability_gen
@@ -1483,14 +1485,18 @@ tasks:
         vars:
           use_large_distro: "true"
 
-  - <<: *gen_task_template
-    name: sharding_api_strict_passthrough_gen
+  - <<: *task_template
+    name: sharding_api_strict_passthrough
     tags:
-      ["assigned_to_jira_team_server_query_execution", "default", "sharding"]
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "sharding",
+        "requires_large_host",
+      ]
     commands:
-      - func: "generate resmoke tasks"
-        vars:
-          use_large_distro: "true"
+      - func: "do setup"
+      - func: "run tests"
 
   ## jstestfuzz run_commands fuzzer generating find runs ##
   - <<: *jstestfuzz_template
@@ -2530,7 +2536,7 @@ tasks:
     name: query_cbr_histogram_jscore_passthrough
     # Currently disabled due to an OOM in SERVER-109720
     # To be re-enabled in SERVER-109881 Re-enable the cbr_histogram passthroughs
-    activate: false
+    disable: true
     tags: [
         "assigned_to_jira_team_server_query_optimization",
         "experimental",
@@ -2546,7 +2552,7 @@ tasks:
     name: query_cbr_histogram_aggregation_passthrough
     # Currently disabled due to an OOM in SERVER-109720
     # To be re-enabled in SERVER-109881 Re-enable the cbr_histogram passthroughs
-    activate: false
+    disable: true
     tags: [
         "assigned_to_jira_team_server_query_optimization",
         "experimental",
@@ -2562,7 +2568,7 @@ tasks:
     name: query_golden_cbr_histogram
     # Currently disabled due to plan flips due to SERVER-108077
     # To be re-enabled in SERVER-109881 Re-enable the cbr_histogram passthroughs
-    activate: false
+    disable: true
     tags: [
         "assigned_to_jira_team_server_query_optimization",
         "experimental",

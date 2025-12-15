@@ -394,7 +394,10 @@ void OplogApplierUtils::addDerivedCommitsOrAborts(
     // When this commit refers to a split prepare, we split the commit and add them
     // to the writers that have been assigned split prepare ops.
     for (const auto& sessInfo : *sessionInfos) {
-        addToWriterVectorImpl(sessInfo.requesterId,
+        // The number of workers could have changed since the prepare phase: mod by list size to
+        // make sure we are still in bounds.
+        const auto idx = sessInfo.requesterId % writerVectors->size();
+        addToWriterVectorImpl(idx,
                               writerVectors,
                               commitOrAbortOp,
                               ApplicationInstruction::applySplitPreparedTxnOp,
@@ -516,7 +519,7 @@ Status OplogApplierUtils::applyOplogEntryOrGroupedInsertsCommon(
                 // In initial sync and recovery modes we always ignore errors about missing
                 // documents on update, so there is no reason to convert the updates to upsert.
 
-                bool shouldAlwaysUpsert = !oplogApplicationEnforcesSteadyStateConstraints &&
+                bool shouldAlwaysUpsert = !oplogApplicationEnforcesSteadyStateConstraints.load() &&
                     oplogApplicationMode == OplogApplication::Mode::kSecondary;
                 Status status = applyOperation_inlock(opCtx,
                                                       *coll,
@@ -539,7 +542,7 @@ Status OplogApplierUtils::applyOplogEntryOrGroupedInsertsCommon(
                 // only for deletes, on the grounds that deleting from a non-existent collection
                 // is a no-op.
                 if (opType == OpTypeEnum::kDelete &&
-                    !oplogApplicationEnforcesSteadyStateConstraints &&
+                    !oplogApplicationEnforcesSteadyStateConstraints.load() &&
                     oplogApplicationMode == OplogApplication::Mode::kSecondary) {
                     LOGV2_DEBUG(8994800,
                                 1,

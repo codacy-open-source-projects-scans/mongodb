@@ -60,7 +60,6 @@ mongo_cc_library(
         "//src/mongo/db/query/client_cursor:generic_cursor",
         "//src/mongo/db/session:kill_sessions",
         "//src/mongo/db/session:logical_session_cache",
-        "//src/mongo/db/session:logical_session_id",
         "//src/mongo/util/concurrency:spin_lock",
     ],
 )
@@ -122,6 +121,26 @@ mongo_cc_library(
     ],
 )
 
+mongo_cc_library(
+    name = "target_write_op",
+    srcs = [
+        "target_write_op.cpp",
+        "//src/mongo/s/query:shard_key_pattern_query_util.cpp",
+    ],
+    deps = [
+        "//src/mongo:base",
+        "//src/mongo/db:common",
+        "//src/mongo/db/pipeline/process_interface:mongo_process_interface",
+        "//src/mongo/db/query:canonical_query_base",
+        "//src/mongo/db/query:query_planner",
+        "//src/mongo/db/query/collation:collator_interface",
+        "//src/mongo/db/timeseries:timeseries_conversion_util",
+        "//src/mongo/db/update:update_common",
+        "//src/mongo/s:grid",
+        "//src/mongo/s/write_ops:batch_write_types",
+    ],
+)
+
 mongo_cc_unit_test(
     name = "s_query_exec_test",
     srcs = [
@@ -152,8 +171,7 @@ mongo_cc_unit_test(
         "//src/mongo/db/pipeline:expression_context_for_test",
         "//src/mongo/db/query:query_request",
         "//src/mongo/db/query:query_test_service_context",
-        "//src/mongo/db:service_context_non_d",
-        "//src/mongo/db/session:logical_session_id",
+        "//src/mongo/db/shard_role:service_context_non_d",
         "//src/mongo/db:shared_request_handling",
         "//src/mongo/db:vector_clock",
         "//src/mongo/executor:thread_pool_task_executor_test_fixture",
@@ -164,7 +182,7 @@ mongo_cc_unit_test(
         "//src/mongo/s/commands:cluster_commands",
         "//src/mongo/s/commands:cluster_commands_common",
         "//src/mongo/s/query/planner:cluster_aggregate",
-        "//src/mongo/s:sharding_mongos_test_fixture",
+        "//src/mongo/db/sharding_environment:sharding_mongos_test_fixture",
         "//src/mongo/util:clock_source_mock",
     ],
 )

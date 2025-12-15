@@ -61,6 +61,8 @@
 #include "mongo/s/commands/query_cmd/cluster_explain.h"
 #include "mongo/s/query/planner/cluster_aggregate.h"
 #include "mongo/s/query/planner/cluster_find.h"
+#include "mongo/s/query/shard_targeting_helpers.h"
+#include "mongo/util/modules.h"
 
 #include <boost/optional.hpp>
 
@@ -206,7 +208,7 @@ public:
             Impl::checkCanExplainHere(opCtx);
 
             auto curOp = CurOp::get(opCtx);
-            curOp->debug().queryStatsInfo.disableForSubqueryExecution = true;
+            curOp->debug().getQueryStatsInfo().disableForSubqueryExecution = true;
 
             setReadConcern(opCtx);
             doFLERewriteIfNeeded(opCtx);
@@ -222,7 +224,7 @@ public:
                 auto cmdRequest = std::make_unique<FindCommandRequest>(*_cmdRequest);
                 bool cmdShouldBeTranslatedForRawData = false;
                 const auto targeter = CollectionRoutingInfoTargeter(opCtx, ns());
-                auto& routingCtx = translateNssForRawDataAccordingToRoutingInfo(
+                auto& routingCtx = performTimeseriesTranslationAccordingToRoutingInfo(
                     opCtx,
                     ns(),
                     targeter,
@@ -338,8 +340,8 @@ public:
             };
 
             try {
-                sharding::router::CollectionRouter router{opCtx->getServiceContext(), ns()};
-                router.routeWithRoutingContext(opCtx, "explain find"_sd, findBodyFn);
+                sharding::router::CollectionRouter router(opCtx, ns());
+                router.routeWithRoutingContext("explain find"_sd, findBodyFn);
 
             } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
                 auto bodyBuilder = result->getBodyBuilder();

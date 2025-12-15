@@ -17,7 +17,8 @@ mongo_cc_library(
     ],
     deps = [
         ":logical_session_cache",
-        ":logical_session_id",
+        "//src/mongo/crypto:sha_block",
+        "//src/mongo/db:server_base",
         "//src/mongo/db/auth",
         "//src/mongo/db/auth:authprivilege",
     ],
@@ -29,6 +30,7 @@ idl_generator(
     deps = [
         "//src/mongo/crypto:sha256_block_gen",
         "//src/mongo/db:basic_types_gen",
+        "//src/mongo/db/transaction:transaction_runtime_context_gen",
     ],
 )
 
@@ -61,7 +63,6 @@ mongo_cc_library(
         ":logical_session_cache_stats_gen",
     ],
     deps = [
-        ":logical_session_id",
         "//src/mongo/db:server_base",
         "//src/mongo/db:service_context",
     ],
@@ -121,29 +122,15 @@ idl_generator(
 )
 
 mongo_cc_library(
-    name = "logical_session_id",
-    srcs = [
-        "logical_session_id.cpp",
-        ":logical_session_id_gen",
-    ],
-    deps = [
-        "//src/mongo:base",
-        "//src/mongo/crypto:sha256_block",
-        "//src/mongo/crypto:sha_block",
-        "//src/mongo/idl:idl_parser",
-    ],
-)
-
-mongo_cc_library(
     name = "session_catalog",
     srcs = [
         "session_catalog.cpp",
     ],
     deps = [
         ":kill_sessions",
-        ":logical_session_id",
         ":logical_session_id_helpers",
         "//src/mongo/db:internal_transactions_feature_flag",
+        "//src/mongo/db:server_base",
         "//src/mongo/db:service_context",
         "//src/mongo/db/shard_role/lock_manager",
         "//src/mongo/util/concurrency:spin_lock",
@@ -162,13 +149,12 @@ mongo_cc_library(
         "sessions_collection.cpp",
     ],
     deps = [
-        ":logical_session_id",
         ":logical_session_id_helpers",
         ":sessions_server_parameters_idl",
         "//src/mongo/client:clientdriver_minimal",
-        "//src/mongo/db:coll_mod_command_idl",
-        "//src/mongo/db:index_commands_idl",
         "//src/mongo/db:server_base",
+        "//src/mongo/db/shard_role/ddl:coll_mod_command_idl",
+        "//src/mongo/db/shard_role/ddl:index_commands_idl",
         "//src/mongo/rpc:command_status",
     ],
 )
@@ -227,7 +213,6 @@ mongo_cc_library(
     ],
     deps = [
         ":logical_session_cache_impl",
-        ":logical_session_id",
         ":sessions_collection",
         "//src/mongo:base",
         "//src/mongo/db:dbdirectclient",
@@ -251,22 +236,21 @@ mongo_cc_library(
     ],
     deps = [
         ":kill_sessions",
-        ":logical_session_id",
         ":logical_session_id_helpers",
         ":session_catalog",
-        "//src/mongo/db:coll_mod_command_idl",
         "//src/mongo/db:dbdirectclient",
-        "//src/mongo/db:index_commands_idl",
         "//src/mongo/db:internal_transactions_feature_flag",
         "//src/mongo/db:server_base",
         "//src/mongo/db:service_context",
-        "//src/mongo/db:shard_role",
         "//src/mongo/db/commands:mongod_fcv",
         "//src/mongo/db/index_builds:index_builds_coordinator",
         "//src/mongo/db/repl:repl_coordinator_interface",
         "//src/mongo/db/repl:repl_server_parameters",
         "//src/mongo/db/repl:replica_set_aware_service",
         "//src/mongo/db/repl:storage_interface",
+        "//src/mongo/db/shard_role",
+        "//src/mongo/db/shard_role/ddl:coll_mod_command_idl",
+        "//src/mongo/db/shard_role/ddl:index_commands_idl",
         "//src/mongo/db/shard_role/shard_catalog:collection_options",
         "//src/mongo/util/concurrency:thread_pool",
     ],
@@ -292,9 +276,7 @@ mongo_cc_library(
         "sessions_collection_mock.cpp",
     ],
     deps = [
-        ":logical_session_id",
         ":sessions_collection",
-        "//src/mongo:base",
     ],
 )
 

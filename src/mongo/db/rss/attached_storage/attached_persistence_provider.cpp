@@ -30,6 +30,7 @@
 #include "mongo/db/rss/attached_storage/attached_persistence_provider.h"
 
 #include "mongo/db/rss/replicated_storage_service.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/service_context.h"
 
 namespace mongo::rss {
@@ -41,6 +42,7 @@ ServiceContext::ConstructorActionRegisterer registerAttachedPersistenceProvider{
     "AttachedPersistenceProvider", [](ServiceContext* service) {
         auto& rss = ReplicatedStorageService::get(service);
         rss.setPersistenceProvider(std::make_unique<AttachedPersistenceProvider>());
+        rss.setSpillPersistenceProvider(std::make_unique<AttachedPersistenceProvider>());
     }};
 
 }  // namespace
@@ -120,4 +122,20 @@ bool AttachedPersistenceProvider::supportsOplogSampling() const {
 bool AttachedPersistenceProvider::supportsTableVerify() const {
     return true;
 }
+
+bool AttachedPersistenceProvider::shouldDisableTransactionUpdateCoalescing() const {
+    // This is only used for testing purposes.
+    return gFeatureFlagDisableTransactionUpdateCoalescing.checkEnabled();
+}
+
+multiversion::FeatureCompatibilityVersion AttachedPersistenceProvider::getMinimumRequiredFCV()
+    const {
+    // (Generic FCV reference): Attached storage can operate at any FCV.
+    return multiversion::GenericFCV::kLastLTS;
+}
+
+const char* AttachedPersistenceProvider::getWTMemoryPageMaxForOplogStrValue() const {
+    return "10m";  // 10MB
+}
+
 }  // namespace mongo::rss

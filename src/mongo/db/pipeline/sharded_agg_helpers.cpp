@@ -97,6 +97,7 @@
 #include "mongo/s/query/exec/async_results_merger_params_gen.h"
 #include "mongo/s/query/exec/document_source_merge_cursors.h"
 #include "mongo/s/query/exec/establish_cursors.h"
+#include "mongo/s/query/shard_targeting_helpers.h"
 #include "mongo/s/query_analysis_sampler_util.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/util/assert_util.h"
@@ -554,23 +555,31 @@ std::unique_ptr<Pipeline> tryAttachCursorSourceForLocalRead(
     const auto& targetingCri = routingCtx.getCollectionRoutingInfo(nss);
 
     try {
-        auto shardVersion = [&] {
+        boost::optional<LogicalTime> optOriginalPlacementConflictTime;
+        if (auto txnRouter = TransactionRouter::get(opCtx);
+            txnRouter && opCtx->inMultiDocumentTransaction()) {
+            optOriginalPlacementConflictTime = txnRouter.getPlacementConflictTime();
+        }
+
+        ShardVersion shardVersion = std::invoke([&] {
             auto sv = targetingCri.hasRoutingTable() ? targetingCri.getShardVersion(localShardId)
                                                      : ShardVersion::UNTRACKED();
-            if (auto txnRouter = TransactionRouter::get(opCtx);
-                txnRouter && opCtx->inMultiDocumentTransaction()) {
-                if (auto optOriginalPlacementConflictTime = txnRouter.getPlacementConflictTime()) {
-                    sv.setPlacementConflictTime(*optOriginalPlacementConflictTime);
-                }
-            }
+            if (optOriginalPlacementConflictTime.has_value())
+                sv.setPlacementConflictTime_DEPRECATED(*optOriginalPlacementConflictTime);
             return sv;
-        }();
-        ScopedSetShardRole shardRole{
-            opCtx,
-            nss,
-            shardVersion,
-            boost::optional<DatabaseVersion>{!targetingCri.hasRoutingTable(),
-                                             targetingCri.getDbVersion()}};
+        });
+        boost::optional<DatabaseVersion> dbVersion =
+            std::invoke([&]() -> boost::optional<DatabaseVersion> {
+                if (targetingCri.hasRoutingTable()) {
+                    return boost::none;
+                }
+                auto dbv = targetingCri.getDbVersion();
+                if (optOriginalPlacementConflictTime.has_value()) {
+                    dbv.setPlacementConflictTime_DEPRECATED(*optOriginalPlacementConflictTime);
+                }
+                return dbv;
+            });
+        ScopedSetShardRole shardRole{opCtx, nss, shardVersion, dbVersion};
 
         // Mark routing table as validated as we have "sent" the versioned command to a shard by
         // entering the shard role for a local read.
@@ -1586,10 +1595,9 @@ BSONObj finalizePipelineAndTargetShardsForExplain(
             "ExpressionContext is missing explain verbosity when targeting shards for explain",
             expCtx->getExplain());
 
-    sharding::router::CollectionRouter router(expCtx->getOperationContext()->getServiceContext(),
+    sharding::router::CollectionRouter router(expCtx->getOperationContext(),
                                               expCtx->getNamespaceString());
     return router.routeWithRoutingContext(
-        expCtx->getOperationContext(),
         "collecting explain from shards"_sd,
         [&](OperationContext* opCtx, RoutingContext& routingCtx) {
             // We must have a clone of the pipeline in case this loop is retried.
@@ -1848,10 +1856,9 @@ std::unique_ptr<Pipeline> targetShardsAndAddMergeCursors(
 
     // We're not required to read locally, and we need a cursor source. We need to perform routing
     // to see what shard(s) the pipeline targets.
-    sharding::router::CollectionRouter router(expCtx->getOperationContext()->getServiceContext(),
+    sharding::router::CollectionRouter router(expCtx->getOperationContext(),
                                               expCtx->getNamespaceString());
     return router.routeWithRoutingContext(
-        expCtx->getOperationContext(),
         "targeting pipeline to attach cursors"_sd,
         [&](OperationContext* opCtx, RoutingContext& routingCtx) {
             // We must have a clone of the pipeline in case this loop is retried.
@@ -1908,11 +1915,10 @@ std::unique_ptr<Pipeline> finalizeAndMaybePreparePipelineForExecution(
             expCtx, std::move(pipeline), attachCursorAfterOptimizing, optimizePipeline);
     }
 
-    sharding::router::CollectionRouter router(expCtx->getOperationContext()->getServiceContext(),
+    sharding::router::CollectionRouter router(expCtx->getOperationContext(),
                                               expCtx->getNamespaceString());
 
     return router.routeWithRoutingContext(
-        expCtx->getOperationContext(),
         "parsing and executing subpipelines"_sd,
         [&](OperationContext* opCtx, RoutingContext& routingCtx) {
             // We must have a clone of the pipeline in case this loop is retried.

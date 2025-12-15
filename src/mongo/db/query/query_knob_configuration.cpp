@@ -74,6 +74,10 @@ QueryKnobConfiguration::QueryKnobConfiguration(const query_settings::QuerySettin
     _maxScansToExplodeValue = static_cast<size_t>(internalQueryMaxScansToExplode.loadRelaxed());
     _internalQuerySpillingMinAvailableDiskSpaceBytes =
         static_cast<int64_t>(internalQuerySpillingMinAvailableDiskSpaceBytes.loadRelaxed());
+    _measureQueryExecutionTimeInNanoseconds =
+        internalMeasureQueryExecutionTimeInNanoseconds.loadRelaxed();
+    _useMultiplannerForSingleSolutions =
+        internalQueryPlannerUseMultiplannerForSingleSolutions.loadRelaxed();
 
     _isJoinOrderingEnabled = internalEnableJoinOptimization.load();
     _randomJoinReorderDefaultToHashJoin = internalRandomJoinReorderDefaultToHashJoin.load();
@@ -81,6 +85,11 @@ QueryKnobConfiguration::QueryKnobConfiguration(const query_settings::QuerySettin
     _joinReorderMode = ServerParameterSet::getNodeParameterSet()
                            ->get<JoinReorderMode>("internalJoinReorderMode")
                            ->_data.get();
+    _joinPlanTreeShape = ServerParameterSet::getNodeParameterSet()
+                             ->get<JoinPlanTreeShape>("internalJoinPlanTreeShape")
+                             ->_data.get();
+    _maxNumberNodesConsideredForImplicitEdges =
+        internalMaxNumberNodesConsideredForImplicitEdges.load();
 }
 
 QueryFrameworkControlEnum QueryKnobConfiguration::getInternalQueryFrameworkControlForOp() const {
@@ -113,6 +122,14 @@ bool QueryKnobConfiguration::getRandomJoinReorderDefaultToHashJoin() const {
 
 JoinReorderModeEnum QueryKnobConfiguration::getJoinReorderMode() const {
     return _joinReorderMode;
+}
+
+JoinPlanTreeShapeEnum QueryKnobConfiguration::getJoinPlanTreeShape() const {
+    return _joinPlanTreeShape;
+}
+
+size_t QueryKnobConfiguration::getMaxNumberNodesConsideredForImplicitEdges() const {
+    return _maxNumberNodesConsideredForImplicitEdges;
 }
 
 double QueryKnobConfiguration::getSamplingMarginOfError() const {
@@ -178,6 +195,14 @@ bool QueryKnobConfiguration::canPushDownFullyCompatibleStages() const {
 
 int64_t QueryKnobConfiguration::getInternalQuerySpillingMinAvailableDiskSpaceBytes() const {
     return _internalQuerySpillingMinAvailableDiskSpaceBytes;
+}
+
+bool QueryKnobConfiguration::getMeasureQueryExecutionTimeInNanoseconds() const {
+    return _measureQueryExecutionTimeInNanoseconds;
+}
+
+bool QueryKnobConfiguration::getUseMultiplannerForSingleSolutions() const {
+    return _useMultiplannerForSingleSolutions;
 }
 
 }  // namespace mongo

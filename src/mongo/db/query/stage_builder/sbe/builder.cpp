@@ -252,7 +252,10 @@ void prepareSlotBasedExecutableTree(OperationContext* opCtx,
     auto expCtx = cq.getExpCtxRaw();
     tassert(6142207, "No expression context", expCtx);
     if (expCtx->getExplain() || expCtx->getMayDbProfile()) {
-        root->markShouldCollectTimingInfo();
+        root->markShouldCollectTimingInfo(
+            expCtx->getQueryKnobConfiguration().getMeasureQueryExecutionTimeInNanoseconds()
+                ? QueryExecTimerPrecision::kNanos
+                : QueryExecTimerPrecision::kMillis);
     }
 
     // Register this plan to yield according to the configured policy.
@@ -372,18 +375,16 @@ std::unique_ptr<fts::FTSMatcher> makeFtsMatcher(OperationContext* opCtx,
                                                 const CollectionPtr& collection,
                                                 const std::string& indexName,
                                                 const fts::FTSQuery* ftsQuery) {
-    auto desc = collection->getIndexCatalog()->findIndexByName(opCtx, indexName);
-    tassert(5432209,
-            str::stream() << "index descriptor not found for index named '" << indexName
-                          << "' in collection '" << collection->ns().toStringForErrorMsg() << "'",
-            desc);
-
-    auto entry = collection->getIndexCatalog()->getEntry(desc);
+    auto entry = collection->getIndexCatalog()->findIndexByName(opCtx, indexName);
     tassert(5432210,
             str::stream() << "index entry not found for index named '" << indexName
                           << "' in collection '" << collection->ns().toStringForErrorMsg() << "'",
             entry);
-
+    const auto desc = entry->descriptor();
+    tassert(5432209,
+            str::stream() << "index descriptor not found for index named '" << indexName
+                          << "' in collection '" << collection->ns().toStringForErrorMsg() << "'",
+            desc);
     auto accessMethod = static_cast<const FTSAccessMethod*>(entry->accessMethod());
     tassert(5432211,
             str::stream() << "access method is not defined for index named '" << indexName
@@ -1127,9 +1128,9 @@ std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::buildCountScan(
 
     auto collection = getCollection(csn->nss);
     auto indexName = csn->index.identifier.catalogName;
-    auto indexDescriptor = collection->getIndexCatalog()->findIndexByName(_state.opCtx, indexName);
-    auto indexAccessMethod =
-        collection->getIndexCatalog()->getEntry(indexDescriptor)->accessMethod()->asSortedData();
+    const auto indexEntry = collection->getIndexCatalog()->findIndexByName(_state.opCtx, indexName);
+    const auto indexDescriptor = indexEntry->descriptor();
+    auto indexAccessMethod = indexEntry->accessMethod()->asSortedData();
 
     std::unique_ptr<key_string::Value> lowKey, highKey;
     bool isPointInterval = false;
@@ -4873,8 +4874,9 @@ std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::buildSearch(const Quer
 
     // Make a project stage to convert '_id' field value into keystring.
     auto catalog = collection->getIndexCatalog();
-    auto indexDescriptor = catalog->findIndexByName(_state.opCtx, kIdIndexName);
-    auto indexAccessMethod = catalog->getEntry(indexDescriptor)->accessMethod()->asSortedData();
+    auto indexEntry = catalog->findIndexByName(_state.opCtx, kIdIndexName);
+    auto indexDescriptor = indexEntry->descriptor();
+    auto indexAccessMethod = indexEntry->accessMethod()->asSortedData();
     auto sortedData = indexAccessMethod->getSortedDataInterface();
     auto version = sortedData->getKeyStringVersion();
     auto ordering = sortedData->getOrdering();
@@ -5086,6 +5088,8 @@ std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::build(const QuerySolut
         {STAGE_NESTED_LOOP_JOIN_EMBEDDING_NODE,
          &SlotBasedStageBuilder::buildNestedLoopJoinEmbeddingNode},
         {STAGE_HASH_JOIN_EMBEDDING_NODE, &SlotBasedStageBuilder::buildHashJoinEmbeddingNode},
+        {STAGE_INDEXED_NESTED_LOOP_JOIN_EMBEDDING_NODE,
+         &SlotBasedStageBuilder::buildIndexedJoinEmbeddingNode},
     };
 
     tassert(4822884,

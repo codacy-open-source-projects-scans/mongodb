@@ -29,7 +29,7 @@
 
 #include "mongo/db/query/compiler/optimizer/join/adjacency_matrix.h"
 
-#include "mongo/db/query/util/bitset_iterator.h"
+#include "mongo/db/query/util/bitset_util.h"
 
 namespace mongo::join_ordering {
 AdjacencyMatrix makeAdjacencyMatrix(const JoinGraph& joinGraph,
@@ -37,14 +37,8 @@ AdjacencyMatrix makeAdjacencyMatrix(const JoinGraph& joinGraph,
     AdjacencyMatrix matrix;
     for (auto edgeId : subgraph) {
         const auto& edge = joinGraph.getEdge(edgeId);
-
-        for (auto leftNodeId : iterable(edge.left, joinGraph.numNodes())) {
-            matrix[leftNodeId] |= edge.right;
-        }
-
-        for (auto rightNodeId : iterable(edge.right, joinGraph.numNodes())) {
-            matrix[rightNodeId] |= edge.left;
-        }
+        matrix[edge.left].set(edge.right);
+        matrix[edge.right].set(edge.left);
     }
 
     return matrix;

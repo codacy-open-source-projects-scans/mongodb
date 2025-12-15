@@ -51,6 +51,7 @@
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 
 #include <memory>
 #include <set>
@@ -66,6 +67,8 @@ namespace mongo {
 using QueryShapeConfigurationMap = stdx::unordered_map<query_shape::QueryShapeHash,
                                                        query_settings::QueryShapeConfiguration,
                                                        QueryShapeHashHasher>;
+
+DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(QuerySettings);
 
 /**
  * The $querySettings stage returns all QueryShapeConfigurations stored in the cluster.
@@ -87,6 +90,10 @@ public:
                     "$querySettings stage expects a document as argument",
                     spec.type() == BSONType::object);
             return std::make_unique<LiteParsed>(spec, nss.tenantId());
+        }
+
+        std::unique_ptr<StageParams> getStageParams() const override {
+            return std::make_unique<QuerySettingsStageParams>(_originalBson);
         }
 
         LiteParsed(const BSONElement& spec, const boost::optional<TenantId>& tenantId)

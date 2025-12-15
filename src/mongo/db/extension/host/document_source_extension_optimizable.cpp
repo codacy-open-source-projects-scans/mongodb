@@ -29,6 +29,8 @@
 
 #include "mongo/db/extension/host/document_source_extension_optimizable.h"
 
+#include "mongo/db/extension/host/document_source_extension_expandable.h"
+
 namespace mongo::extension::host {
 
 ALLOCATE_DOCUMENT_SOURCE_ID(extensionOptimizable, DocumentSourceExtensionOptimizable::id);
@@ -71,8 +73,6 @@ DocumentSource::Id DocumentSourceExtensionOptimizable::getId() const {
 }
 
 DepsTracker::State DocumentSourceExtensionOptimizable::getDependencies(DepsTracker* deps) const {
-    const auto& properties = getStaticProperties();
-
     auto processFields = [](const auto& fields, auto&& apply) {
         if (fields.has_value()) {
             for (const auto& fieldName : *fields) {
@@ -83,21 +83,93 @@ DepsTracker::State DocumentSourceExtensionOptimizable::getDependencies(DepsTrack
     };
 
     // Report required metadata fields for this stage.
-    processFields(properties.getRequiredMetadataFields(),
+    processFields(_properties.getRequiredMetadataFields(),
                   [&](auto metaType) { deps->setNeedsMetadata(metaType); });
 
     // Drop upstream metadata fields if this stage does not preserve them.
-    if (!properties.getPreservesUpstreamMetadata()) {
+    if (!_properties.getPreservesUpstreamMetadata()) {
         // TODO: SERVER-100443
         deps->clearMetadataAvailable();
     }
 
     // Report provided metadata fields for this stage.
-    processFields(properties.getProvidedMetadataFields(),
+    processFields(_properties.getProvidedMetadataFields(),
                   [&](auto metaType) { deps->setMetadataAvailable(metaType); });
 
     // Retain entire metadata and do not optimize, as it may be needed by the extension.
     return DepsTracker::State::NOT_SUPPORTED;
+}
+
+boost::optional<DocumentSource::DistributedPlanLogic>
+DocumentSourceExtensionOptimizable::distributedPlanLogic() {
+    auto dplHandle = _logicalStage.getDistributedPlanLogic();
+
+    if (!dplHandle.isValid()) {
+        return boost::none;
+    }
+
+    // Convert the returned VariantDPLHandle to a list of DocumentSources.
+    const auto convertDPLHandleToDocumentSources = [&](VariantDPLHandle& handle) {
+        return std::visit(
+            OverloadedVisitor{
+                [&](AggStageParseNodeHandle& dplElement) {
+                    if (HostAggStageParseNode::isHostAllocated(*dplElement.get())) {
+                        // Host-allocated: parse the host-allocated parse node.
+                        const auto& hostParse =
+                            *static_cast<const HostAggStageParseNode*>(dplElement.get());
+                        return DocumentSource::parse(getExpCtx(), hostParse.getBsonSpec());
+                    } else {
+                        // Extension-allocated: expand the parse node.
+                        return DocumentSourceExtensionExpandable::expandParseNode(getExpCtx(),
+                                                                                  dplElement);
+                    }
+                },
+                [&](LogicalAggStageHandle& dplLogicalStage) {
+                    // Create a DocumentSource directly from the logical stage handle. We only allow
+                    // logical stages to be created here if they are the same type as the
+                    // originating stage. Because of this assumption, we can pass in the static
+                    // properties from the originating stage. Otherwise we would not have access to
+                    // the new stage's properties here, since they live on the ASTNode.
+                    uassert(11513800,
+                            "an extension logical stage in a distributed plan pipeline must be the "
+                            "same type as its originating stage",
+                            dplLogicalStage.getName() == _logicalStage.getName());
+                    return std::list<boost::intrusive_ptr<DocumentSource>>{
+                        DocumentSourceExtensionOptimizable::create(
+                            getExpCtx(), std::move(dplLogicalStage), _properties)};
+                }},
+            handle);
+    };
+
+    DistributedPlanLogic logic;
+
+    // Convert shardsPipeline.
+    auto shardsPipeline = dplHandle.extractShardsPipeline();
+    if (!shardsPipeline.empty()) {
+        tassert(11420601,
+                "Shards pipeline must have exactly one element per API specification",
+                shardsPipeline.size() == 1);
+        auto shardsStages = convertDPLHandleToDocumentSources(shardsPipeline[0]);
+        tassert(11420602,
+                "Single shardsStage must expand to exactly one DocumentSource",
+                shardsStages.size() == 1);
+        logic.shardsStage = shardsStages.front();
+    }
+
+    // Convert mergingPipeline.
+    auto mergingPipeline = dplHandle.extractMergingPipeline();
+    for (auto& handle : mergingPipeline) {
+        auto stages = convertDPLHandleToDocumentSources(handle);
+        logic.mergingStages.splice(logic.mergingStages.end(), stages);
+    }
+
+    // Convert sortPattern.
+    const auto sortPattern = dplHandle.getSortPattern();
+    if (!sortPattern.isEmpty()) {
+        logic.mergeSortPattern = sortPattern.getOwned();
+    }
+
+    return logic;
 }
 
 }  // namespace mongo::extension::host

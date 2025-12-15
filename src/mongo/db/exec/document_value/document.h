@@ -357,6 +357,11 @@ public:
      */
     void toBsonWithMetaData(BSONObjBuilder* builder) const;
 
+    /**
+     * Like the 'toBson()' method, but includes only metadata.
+     */
+    void toBsonWithMetaDataOnly(BSONObjBuilder* builder) const;
+
     template <typename BSONTraits = BSONObj::DefaultSizeTrait>
     BSONObj toBsonWithMetaData() const {
         if (isTriviallyConvertibleWithMetadata()) {
@@ -369,6 +374,23 @@ public:
         validateDocumentBSONSize(docBSONObj, BSONTraits::MaxSize);
         return docBSONObj;
     }
+
+    template <typename BSONTraits = BSONObj::DefaultSizeTrait>
+    BSONObj toBsonWithMetaDataOnly() const {
+        BSONObjBuilder bb;
+        toBsonWithMetaDataOnly(&bb);
+        BSONObj docBSONObj = bb.obj<BSONTraits>();
+        validateDocumentBSONSize(docBSONObj, BSONTraits::MaxSize);
+        return docBSONObj;
+    }
+
+    /**
+     * Creates a Document from a BSONObj and its associated metadata BSONObj.
+     * Used by extension aggregation stage to construct Documents that include metadata to
+     * send to the host.
+     */
+    static Document createDocumentWithMetadata(const BSONObj& documentBSON,
+                                               const BSONObj& metadataBSON);
 
     /**
      * Like Document(BSONObj) but treats top-level fields with special names as metadata.

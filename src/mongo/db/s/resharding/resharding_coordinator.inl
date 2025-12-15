@@ -30,7 +30,6 @@
 #include "mongo/db/global_catalog/ddl/drop_collection_if_uuid_not_matching_gen.h"
 #include "mongo/db/global_catalog/ddl/notify_sharding_event_utils.h"
 #include "mongo/db/global_catalog/ddl/sharding_catalog_manager.h"
-#include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/router_role/router_role.h"
 #include "mongo/db/router_role/routing_cache/routing_information_cache.h"
 #include "mongo/db/s/balancer/balance_stats.h"
@@ -45,13 +44,12 @@
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
 #include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/db/sharding_environment/grid.h"
-#include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/sharding_environment/sharding_logging.h"
 #include "mongo/db/topology/vector_clock/vector_clock.h"
+#include "mongo/db/topology/vector_clock/vector_clock_mutable.h"
 #include "mongo/otel/traces/telemetry_context_serialization.h"
 #include "mongo/s/request_types/abort_reshard_collection_gen.h"
 #include "mongo/s/request_types/commit_reshard_collection_gen.h"
-#include "mongo/s/request_types/flush_resharding_state_change_gen.h"
 #include "mongo/s/request_types/reshard_collection_gen.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/testing_proctor.h"
@@ -84,6 +82,7 @@ inline const Backoff kExponentialBackoff(Seconds(1), Milliseconds::max());
 extern FailPoint reshardingPauseCoordinatorAfterPreparingToDonate;
 extern FailPoint reshardingPauseCoordinatorBeforeInitializing;
 extern FailPoint reshardingPauseCoordinatorBeforeCloning;
+extern FailPoint reshardingPauseCoordinatorBeforeApplying;
 extern FailPoint reshardingPauseCoordinatorBeforeBlockingWrites;
 extern FailPoint reshardingPauseCoordinatorBeforeDecisionPersisted;
 extern FailPoint reshardingPauseBeforeTellingParticipantsToCommit;
@@ -103,6 +102,7 @@ extern FailPoint reshardingPauseBeforeTellingRecipientsToClone;
 MONGO_FAIL_POINT_DEFINE(reshardingPauseCoordinatorAfterPreparingToDonate);
 MONGO_FAIL_POINT_DEFINE(reshardingPauseCoordinatorBeforeInitializing);
 MONGO_FAIL_POINT_DEFINE(reshardingPauseCoordinatorBeforeCloning);
+MONGO_FAIL_POINT_DEFINE(reshardingPauseCoordinatorBeforeApplying);
 MONGO_FAIL_POINT_DEFINE(reshardingPauseCoordinatorBeforeBlockingWrites);
 MONGO_FAIL_POINT_DEFINE(reshardingPauseCoordinatorBeforeDecisionPersisted);
 MONGO_FAIL_POINT_DEFINE(reshardingPauseBeforeTellingParticipantsToCommit);
@@ -510,12 +510,18 @@ ExecutorFuture<void> ReshardingCoordinator::_commitAndFinishReshardOperation(
                                VersionContext::getDecoration(opCtx.get()),
                                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
                            // V2 change stream readers expect to see an op entry concerning the
-                           // commit before this materializes into the global catalog. (Multiple
-                           // copies of this event notification are acceptable)
+                           // commit before this materializes into the global catalog (multiple
+                           // copies of this event notification are acceptable).
                            _generateCommitNotificationForChangeStreams(
                                opCtx.get(),
                                executor,
                                ChangeStreamCommitNotificationMode::BeforeWriteOnCatalog);
+                           // Change stream readers also require that the metadata about the
+                           // resharded collection gets later persisted on the global catalog
+                           // with a timestamp that is strictly bigger than the cluster time
+                           // of this notification.
+                           // Bump the related vector clock element to enforce the constraint.
+                           VectorClockMutable::get(opCtx.get())->tickClusterTime(1);
                        }
                    })
                    .then(
@@ -1278,10 +1284,9 @@ ExecutorFuture<void> ReshardingCoordinator::_fetchAndPersistNumDocumentsToCloneF
                        // routing table and send shard-versioned commands to them.
                        const auto routingInformationCache =
                            RoutingInformationCache::get(opCtx.get());
-                       sharding::router::CollectionRouter cr(routingInformationCache,
-                                                             _coordinatorDoc.getSourceNss());
-                       return cr.route(
-                           opCtx.get(),
+                       sharding::router::CollectionRouter router(
+                           opCtx.get(), routingInformationCache, _coordinatorDoc.getSourceNss());
+                       return router.route(
                            "Resharding: Fetching the number of documents to copy from each shard",
                            [&](OperationContext* opCtx, const CollectionRoutingInfo& _) {
                                std::map<ShardId, ShardVersion> donorShardVersions;
@@ -1377,6 +1382,12 @@ ExecutorFuture<void> ReshardingCoordinator::_awaitAllRecipientsFinishedCloning(
             }
         })
         .then([this] {
+            {
+                auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
+                reshardingPauseCoordinatorBeforeApplying.pauseWhileSetAndNotCanceled(
+                    opCtx.get(), _ctHolder->getAbortToken());
+            }
+
             this->_updateCoordinatorDocStateAndCatalogEntries(
                 [=, this](OperationContext* opCtx, TxnNumber txnNumber) {
                     auto now = resharding::getCurrentTime();
@@ -2261,7 +2272,14 @@ void ReshardingCoordinator::_logStatsOnCompletion(bool success) {
     }
 
     builder.append("statistics", statsBuilder.obj());
-    LOGV2(7763800, "Resharding complete", "info"_attr = builder.obj());
+    if ((_coordinatorDoc.getState() == CoordinatorStateEnum::kDone ||
+         _coordinatorDoc.getState() == CoordinatorStateEnum::kQuiesced) &&
+        !_originalReshardingStatus.has_value()) {
+        LOGV2(7763800, "Resharding complete", "info"_attr = builder.obj());
+        return;
+    }
+
+    LOGV2(10764500, "Resharding coordinator terminated", "info"_attr = builder.obj());
 }
 
 const ShardId& ReshardingCoordinator::_getChangeStreamNotifierShardId() const {

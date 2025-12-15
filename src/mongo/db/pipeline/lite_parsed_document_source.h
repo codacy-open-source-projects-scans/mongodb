@@ -72,6 +72,10 @@ struct LiteParserOptions {
     bool allowGenericForeignDbLookup = false;
 };
 
+namespace exec::agg {
+class ListMqlEntitiesStage;
+}  // namespace exec::agg
+
 /**
  * A lightly parsed version of a DocumentSource. It is not executable and not guaranteed to return a
  * parse error when encountering an invalid specification. Instead, the purpose of this class is to
@@ -103,7 +107,7 @@ public:
      */
     class LiteParserRegistration {
     public:
-        const LiteParserInfo& getParser() const;
+        const LiteParserInfo& getParserInfo() const;
 
         void setPrimaryParser(LiteParserInfo&& lpi);
 
@@ -134,6 +138,8 @@ public:
         // Whether or not the fallback parser has been registered or not.
         bool _fallbackIsSet = false;
     };
+
+    using ParserMap = StringMap<LiteParsedDocumentSource::LiteParserRegistration>;
 
     /**
      * Constructs a LiteParsedDocumentSource from the user-supplied BSON.
@@ -181,10 +187,20 @@ public:
                              "enable the corresponding feature flag");
     }
 
-    /**
-     * Returns the 'LiteParserInfo' for the specified stage name.
-     */
-    static const LiteParserInfo& getInfo(const std::string& stageName);
+    void setApiStrict(AllowedWithApiStrict& apiStrict) {
+        _apiStrict = apiStrict;
+    }
+
+    void setClientType(AllowedWithClientType& clientType) {
+        _clientType = clientType;
+    }
+
+    const AllowedWithApiStrict& getApiStrict() {
+        return _apiStrict;
+    };
+    const AllowedWithClientType& getClientType() {
+        return _clientType;
+    };
 
     /**
      * Constructs a LiteParsedDocumentSource from the user-supplied BSON, or throws a
@@ -228,11 +244,7 @@ public:
         // care of most cases.
     }
 
-    virtual std::unique_ptr<StageParams> getStageParams() const {
-        // The base class of StageParams should never be called.
-        // TODO SERVER-114306 Make this a pure virtual function.
-        MONGO_UNIMPLEMENTED_TASSERT(11429300);
-    }
+    virtual std::unique_ptr<StageParams> getStageParams() const = 0;
 
     /**
      * Returns true if this is a $collStats stage.
@@ -395,30 +407,50 @@ protected:
 
 private:
     /**
-     * Give access to 'parserMap' so we can remove a registered parser. unregisterParser_forTest is
-     * only meant to be used in the context of unit tests. This is because the parserMap is not
-     * thread safe, so modifying it at runtime is unsafe.
+     * Give access to 'parserMap' so we can remove a registered parser with
+     * 'unregisterParser_forTest'.
      */
     friend class LiteParserRegistrationTest;
     friend class LiteParsedDocumentSourceParseTest;
+
+    /**
+     * Give access to 'getParserMap()' for the implementation of $listMqlEntities but hiding
+     * it from all other stages.
+     */
+    friend class exec::agg::ListMqlEntitiesStage;
+
+    /**
+     * 'unregisterParser_forTest' is only meant to be used in the context of unit tests. This is
+     * because the 'parserMap' is not thread safe, so modifying it at runtime is unsafe.
+     */
     static void unregisterParser_forTest(const std::string& name);
+    /**
+     * 'getParserInfo_forTest' is only meant to be used in the context of unit tests as well,
+     * since the 'FirstFallbackParserTakesPrecedence*' tests do assertions with the 'apiStrict'
+     * and 'clientType' members directly from the 'LiteParserRegistration' in the 'parserMap'.
+     * The normal getters rely on a constructed instance of a 'LiteParsedDocumentSource' which
+     * doesn't exist in the tests.
+     */
+    static const LiteParserInfo& getParserInfo_forTest(const std::string& name);
+
+    /**
+     * Returns the map of registered lite parsers.
+     */
+    static const ParserMap& getParserMap();
 
     std::string _parseTimeName;
+    AllowedWithApiStrict _apiStrict;
+    AllowedWithClientType _clientType;
 };
 
-class LiteParsedDocumentSourceDefault final : public LiteParsedDocumentSource {
+/**
+ * Implementers must define getStageParams() and a parse() function. This should be used with
+ * caution. Make sure your stage doesn't need to communicate any special behavior before registering
+ * a DocumentSource using this parser. Additionally, explicitly ensure your stage does not require
+ * authorization checks.
+ */
+class MONGO_MOD_OPEN LiteParsedDocumentSourceDefault : public LiteParsedDocumentSource {
 public:
-    /**
-     * Creates the default LiteParsedDocumentSource. This should be used with caution. Make sure
-     * your stage doesn't need to communicate any special behavior before registering a
-     * DocumentSource using this parser. Additionally, explicitly ensure your stage does not require
-     * authorization checks.
-     */
-    static std::unique_ptr<LiteParsedDocumentSourceDefault> parse(
-        const NamespaceString& nss, const BSONElement& spec, const LiteParserOptions& options) {
-        return std::make_unique<LiteParsedDocumentSourceDefault>(spec);
-    }
-
     LiteParsedDocumentSourceDefault(const BSONElement& originalBson)
         : LiteParsedDocumentSource(originalBson) {}
 
@@ -434,24 +466,19 @@ public:
      * requiresAuthzChecks() is overriden to false because requiredPrivileges() returns an empty
      * vector and has no authz checks by default.
      */
-    bool requiresAuthzChecks() const override {
+    bool requiresAuthzChecks() const final {
         return false;
     }
 };
 
-class LiteParsedDocumentSourceInternal final : public LiteParsedDocumentSource {
+/**
+ * Implementers must define getStageParams() and a parse() function. Note that this requires the
+ * privilege on 'internal' actions. This should still be used with caution. Make sure your stage
+ * doesn't need to communicate any special behavior before registering a DocumentSource using this
+ * parser.
+ */
+class MONGO_MOD_OPEN LiteParsedDocumentSourceInternal : public LiteParsedDocumentSource {
 public:
-    /**
-     * Creates the default LiteParsedDocumentSource for internal document sources. This requires
-     * the privilege on 'internal' action. This should still be used with caution. Make sure your
-     * stage doesn't need to communicate any special behavior before registering a DocumentSource
-     * using this parser.
-     */
-    static std::unique_ptr<LiteParsedDocumentSourceInternal> parse(
-        const NamespaceString& nss, const BSONElement& spec, const LiteParserOptions& options) {
-        return std::make_unique<LiteParsedDocumentSourceInternal>(spec);
-    }
-
     LiteParsedDocumentSourceInternal(const BSONElement& originalBson)
         : LiteParsedDocumentSource(originalBson) {}
 
@@ -527,4 +554,53 @@ protected:
     boost::optional<NamespaceString> _foreignNss;
     std::vector<LiteParsedPipeline> _pipelines;
 };
+
+/**
+ * Declares and defines a lite-parsed document source class that uses the default implementation and
+ * provides stage-specific parameters.
+ *
+ * This macro creates:
+ *   1. A stage-specific parameter class `{stageName}StageParams` using
+ * DECLARE_STAGE_PARAMS_DERIVED_DEFAULT.
+ *   2. A lite-parsed document source class `{stageName}LiteParsed` that inherits from
+ *      LiteParsedDocumentSourceDefault and returns the stage-specific params via getStageParams().
+ *
+ * Use this macro when a stage needs its own parameter type for identification purposes but
+ * doesn't require custom lite parsing behavior beyond the default (which provides no involved
+ * namespaces, no required privileges, and no authorization checks).
+ *
+ * @param stageName The name of the stage (without the "$" prefix). This will be used to generate:
+ *                  - The parameter class name: `{stageName}StageParams`.
+ *                  - The lite-parsed class name: `{stageName}LiteParsed`.
+ *                  - A unique ID for type identification.
+ *
+ * Example usage:
+ *   DEFINE_LITE_PARSED_STAGE_DEFAULT_DERIVED(Test);
+ *   // Creates TestLiteParsed class that can be instantiated with:
+ *   // auto liteParsed = std::make_unique<TestLiteParsed>(bsonElement);
+ *   // auto params = liteParsed->getStageParams(); // Returns TestStageParams.
+ */
+#define DEFINE_LITE_PARSED_STAGE_DEFAULT_DERIVED(stageName) \
+    DEFINE_LITE_PARSED_STAGE_DERIVED_IMPL(stageName, LiteParsedDocumentSourceDefault)
+
+#define DEFINE_LITE_PARSED_STAGE_INTERNAL_DERIVED(stageName) \
+    DEFINE_LITE_PARSED_STAGE_DERIVED_IMPL(stageName, LiteParsedDocumentSourceInternal)
+
+#define DEFINE_LITE_PARSED_STAGE_DERIVED_IMPL(stageName, baseType)          \
+    DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(stageName);                        \
+    class stageName##LiteParsed : public mongo::baseType {                  \
+    public:                                                                 \
+        stageName##LiteParsed(const mongo::BSONElement& originalBson)       \
+            : mongo::baseType(originalBson) {}                              \
+        static std::unique_ptr<stageName##LiteParsed> parse(                \
+            const mongo::NamespaceString& nss,                              \
+            const mongo::BSONElement& spec,                                 \
+            const mongo::LiteParserOptions& options) {                      \
+            return std::make_unique<stageName##LiteParsed>(spec);           \
+        }                                                                   \
+        std::unique_ptr<mongo::StageParams> getStageParams() const final {  \
+            return std::make_unique<stageName##StageParams>(_originalBson); \
+        }                                                                   \
+    };
+
 }  // namespace MONGO_MOD_UNFORTUNATELY_OPEN mongo

@@ -41,6 +41,7 @@
 #include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/util/intrusive_counter.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/modules_incompletely_marked_header.h"
 
 #include <cstdint>
@@ -54,6 +55,8 @@
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <boost/type_traits/decay.hpp>
+
+MONGO_MOD_PUBLIC;
 
 namespace mongo {
 
@@ -195,17 +198,6 @@ public:
     // Returns the type of the index associated with this descriptor.
     IndexType getIndexType() const {
         return _shared->_indexType;
-    }
-
-    /**
-     * Return a pointer to the IndexCatalogEntry that owns this descriptor, or null if orphaned.
-     */
-    const IndexCatalogEntry* getEntry() const {
-        return _entry;
-    }
-
-    void setEntry(IndexCatalogEntry* entry) {
-        _entry = entry;
     }
 
     //
@@ -382,15 +374,6 @@ private:
     };
 
     boost::intrusive_ptr<SharedState> _shared;
-
-    // Many query stages require going from an IndexDescriptor to its IndexCatalogEntry, so for
-    // now we need this.
-    // TODO: once direct usage has been replaced, check if any of the friends below can be removed.
-    MONGO_MOD_USE_REPLACEMENT(setEntry()) const IndexCatalogEntry* _entry = nullptr;
-
-    friend class IndexCatalog;
-    friend class IndexCatalogEntryImpl;
-    friend class IndexCatalogEntryContainer;
 };
 
 }  // namespace mongo

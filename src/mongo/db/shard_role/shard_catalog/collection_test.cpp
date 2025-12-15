@@ -342,10 +342,10 @@ TEST_F(CollectionTest, VerifyIndexIsUpdated) {
     auto idIndex = idxCatalog->findIdIndex(opCtx);
     auto userIdx = idxCatalog->findIndexByName(opCtx, indexName);
     auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
-    auto oldRecordId = idIndex->getEntry()->accessMethod()->asSortedData()->findSingle(
-        opCtx, ru, coll, idIndex->getEntry(), BSON("_id" << 1));
-    auto oldIndexRecordID = userIdx->getEntry()->accessMethod()->asSortedData()->findSingle(
-        opCtx, ru, coll, userIdx->getEntry(), BSON("a" << 1));
+    auto oldRecordId = idIndex->accessMethod()->asSortedData()->findSingle(
+        opCtx, ru, coll, idIndex, BSON("_id" << 1));
+    auto oldIndexRecordID = userIdx->accessMethod()->asSortedData()->findSingle(
+        opCtx, ru, coll, userIdx, BSON("a" << 1));
     ASSERT_TRUE(!oldRecordId.isNull());
     ASSERT_EQ(oldRecordId, oldIndexRecordID);
     {
@@ -370,11 +370,11 @@ TEST_F(CollectionTest, VerifyIndexIsUpdated) {
                                             &args);
         wuow.commit();
     }
-    auto indexRecordId = userIdx->getEntry()->accessMethod()->asSortedData()->findSingle(
-        opCtx, ru, coll, userIdx->getEntry(), BSON("a" << 1));
+    auto indexRecordId = userIdx->accessMethod()->asSortedData()->findSingle(
+        opCtx, ru, coll, userIdx, BSON("a" << 1));
     ASSERT_TRUE(indexRecordId.isNull());
-    indexRecordId = userIdx->getEntry()->accessMethod()->asSortedData()->findSingle(
-        opCtx, ru, coll, userIdx->getEntry(), BSON("a" << 5));
+    indexRecordId = userIdx->accessMethod()->asSortedData()->findSingle(
+        opCtx, ru, coll, userIdx, BSON("a" << 5));
     ASSERT_EQ(indexRecordId, oldRecordId);
 }
 
@@ -399,8 +399,8 @@ TEST_F(CollectionTest, VerifyIndexIsUpdatedWithDamages) {
     auto idIndex = idxCatalog->findIdIndex(opCtx);
     auto userIdx = idxCatalog->findIndexByName(opCtx, indexName);
     auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
-    auto oldRecordId = idIndex->getEntry()->accessMethod()->asSortedData()->findSingle(
-        opCtx, ru, coll, idIndex->getEntry(), BSON("_id" << 1));
+    auto oldRecordId = idIndex->accessMethod()->asSortedData()->findSingle(
+        opCtx, ru, coll, idIndex, BSON("_id" << 1));
     ASSERT_TRUE(!oldRecordId.isNull());
 
     auto newDoc = BSON("_id" << 1 << "a" << 5 << "b" << 32);
@@ -422,16 +422,17 @@ TEST_F(CollectionTest, VerifyIndexIsUpdatedWithDamages) {
                                                            collection_internal::kUpdateAllIndexes,
                                                            nullptr /* indexesAffected */,
                                                            nullptr /* opDebug */,
-                                                           &args);
+                                                           &args,
+                                                           nullptr /*cursor*/);
         ASSERT_OK(newDocStatus);
         ASSERT_BSONOBJ_EQ(newDoc, newDocStatus.getValue());
         wuow.commit();
     }
-    auto indexRecordId = userIdx->getEntry()->accessMethod()->asSortedData()->findSingle(
-        opCtx, ru, coll, userIdx->getEntry(), BSON("a" << 1));
+    auto indexRecordId = userIdx->accessMethod()->asSortedData()->findSingle(
+        opCtx, ru, coll, userIdx, BSON("a" << 1));
     ASSERT_TRUE(indexRecordId.isNull());
-    indexRecordId = userIdx->getEntry()->accessMethod()->asSortedData()->findSingle(
-        opCtx, ru, coll, userIdx->getEntry(), BSON("a" << 5));
+    indexRecordId = userIdx->accessMethod()->asSortedData()->findSingle(
+        opCtx, ru, coll, userIdx, BSON("a" << 5));
     ASSERT_EQ(indexRecordId, oldRecordId);
 }
 
@@ -494,8 +495,8 @@ TEST_F(CollectionTest, ForceSetIndexIsMultikey) {
     MultikeyPaths paths = {{0}};
     {
         WriteUnitOfWork wuow(opCtx);
-        auto desc = coll->getIndexCatalog()->findIndexByName(opCtx, indexName);
-        coll->forceSetIndexIsMultikey(opCtx, desc, true, paths);
+        auto entry = coll->getIndexCatalog()->findIndexByName(opCtx, indexName);
+        coll->forceSetIndexIsMultikey(opCtx, entry->descriptor(), true, paths);
         wuow.commit();
     }
     {
@@ -574,8 +575,8 @@ TEST_F(CollectionTest, ForceSetIndexIsMultikeyRemovesUncommittedChangesOnRollbac
     {
         FailPointEnableBlock failPoint("WTWriteConflictException");
         WriteUnitOfWork wuow(opCtx);
-        auto desc = coll->getIndexCatalog()->findIndexByName(opCtx, indexName);
-        ASSERT_THROWS(coll->forceSetIndexIsMultikey(opCtx, desc, true, paths),
+        auto entry = coll->getIndexCatalog()->findIndexByName(opCtx, indexName);
+        ASSERT_THROWS(coll->forceSetIndexIsMultikey(opCtx, entry->descriptor(), true, paths),
                       WriteConflictException);
     }
 
@@ -822,8 +823,8 @@ TEST_F(CatalogTestFixture, CappedDeleteRecord) {
     auto globalDeletesAfterInsert = serviceOpCounters(ClusterRole::ShardServer).getDelete()->load();
     ASSERT_EQUALS(globalDeletesAfterInsert, globalDeletesInitial + 1);
 
-    ASSERT_EQUALS(1, opDebug.additiveMetrics.keysDeleted.get_value_or(-1));
-    ASSERT_EQUALS(1, opDebug.additiveMetrics.ndeleted.get_value_or(-1));
+    ASSERT_EQUALS(1, opDebug.getAdditiveMetrics().keysDeleted.get_value_or(-1));
+    ASSERT_EQUALS(1, opDebug.getAdditiveMetrics().ndeleted.get_value_or(-1));
 
     ASSERT_EQUALS(1, coll->numRecords(operationContext()));
 

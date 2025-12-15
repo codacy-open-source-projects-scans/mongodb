@@ -35,9 +35,11 @@
 #include "mongo/db/extension/sdk/distributed_plan_logic.h"
 #include "mongo/db/extension/sdk/dpl_array_container.h"
 #include "mongo/db/extension/sdk/host_services.h"
+#include "mongo/db/extension/sdk/tests/transform_test_stages.h"
 #include "mongo/db/extension/shared/get_next_result.h"
 #include "mongo/db/extension/shared/handle/aggregation_stage/executable_agg_stage.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 
 namespace mongo::extension::sdk {
 inline StringData stringViewToStringData(std::string_view sv) {
@@ -53,112 +55,6 @@ namespace mongo::extension::sdk::shared_test_stages {
  * Provides aggregation stages and their companion types used by unit tests
  * to exercise the SDK/host plumbing end to end.
  */
-static constexpr std::string_view kSourceName = "$sourceStage";
-static constexpr std::string_view kTransformName = "$transformStage";
-
-/**
- * =========================================================
- * Transform stage testing
- * =========================================================
- */
-class TransformExecAggStage : public sdk::ExecAggStageTransform {
-public:
-    TransformExecAggStage() : sdk::ExecAggStageTransform(kTransformName) {}
-
-    ExtensionGetNextResult getNext(const sdk::QueryExecutionContextHandle& execCtx,
-                                   ::MongoExtensionExecAggStage* execStage) override {
-        return _getSource().getNext(execCtx.get());
-    }
-
-    void open() override {}
-
-    void reopen() override {}
-
-    void close() override {}
-
-    static inline std::unique_ptr<sdk::ExecAggStageTransform> make() {
-        return std::make_unique<TransformExecAggStage>();
-    }
-};
-
-class TransformLogicalAggStage : public sdk::LogicalAggStage {
-public:
-    TransformLogicalAggStage() {}
-
-    BSONObj serialize() const override {
-        return BSON(std::string(kTransformName) << "serializedForExecution");
-    }
-
-    BSONObj explain(::MongoExtensionExplainVerbosity verbosity) const override {
-        return BSONObj();
-    }
-
-    std::unique_ptr<sdk::ExecAggStageBase> compile() const override {
-        return TransformExecAggStage::make();
-    }
-
-    static inline std::unique_ptr<sdk::LogicalAggStage> make() {
-        return std::make_unique<TransformLogicalAggStage>();
-    }
-};
-
-class TransformAggStageAstNode : public sdk::AggStageAstNode {
-public:
-    TransformAggStageAstNode() : sdk::AggStageAstNode(kTransformName) {}
-
-    BSONObj getProperties() const override {
-        return BSON("requiresInputDocSource" << true);
-    }
-
-    std::unique_ptr<sdk::LogicalAggStage> bind() const override {
-        return TransformLogicalAggStage::make();
-    }
-
-    static inline std::unique_ptr<sdk::AggStageAstNode> make() {
-        return std::make_unique<TransformAggStageAstNode>();
-    }
-};
-
-class TransformAggStageParseNode : public sdk::AggStageParseNode {
-public:
-    TransformAggStageParseNode() : sdk::AggStageParseNode(kTransformName) {}
-
-    static constexpr size_t kExpansionSize = 1;
-
-    size_t getExpandedSize() const override {
-        return kExpansionSize;
-    }
-
-    std::vector<VariantNodeHandle> expand() const override {
-        std::vector<VariantNodeHandle> expanded;
-        expanded.reserve(kExpansionSize);
-        expanded.emplace_back(new sdk::ExtensionAggStageAstNode(TransformAggStageAstNode::make()));
-        return expanded;
-    }
-
-    BSONObj getQueryShape(const ::MongoExtensionHostQueryShapeOpts* ctx) const override {
-        return BSONObj();
-    }
-
-    static inline std::unique_ptr<sdk::AggStageParseNode> make() {
-        return std::make_unique<TransformAggStageParseNode>();
-    }
-};
-
-class TransformAggStageDescriptor : public sdk::AggStageDescriptor {
-public:
-    static inline const std::string kStageName = std::string(kTransformName);
-
-    TransformAggStageDescriptor() : sdk::AggStageDescriptor(kStageName) {}
-
-    std::unique_ptr<sdk::AggStageParseNode> parse(BSONObj stageBson) const override {
-        return std::make_unique<TransformAggStageParseNode>();
-    }
-
-    static inline std::unique_ptr<sdk::AggStageDescriptor> make() {
-        return std::make_unique<TransformAggStageDescriptor>();
-    }
-};
 
 /**
  * =========================================================
@@ -166,19 +62,24 @@ public:
  * data from a static dataset.
  * =========================================================
  */
+static constexpr std::string_view kFruitsAsDocumentsName = "$fruitAsDocuments";
 class FruitsAsDocumentsExecAggStage : public sdk::ExecAggStageSource {
 public:
-    FruitsAsDocumentsExecAggStage() : sdk::ExecAggStageSource(kSourceName) {}
+    FruitsAsDocumentsExecAggStage(std::string_view name, BSONObj arguments)
+        : sdk::ExecAggStageSource(name) {}
 
     ExtensionGetNextResult getNext(const sdk::QueryExecutionContextHandle& execCtx,
                                    ::MongoExtensionExecAggStage* execStage) override {
-        if (_currentIndex >= _documents.size()) {
+        if (_currentIndex >= _documentsWithMetadata.size()) {
             return ExtensionGetNextResult::eof();
         }
         // Note, here we can create the result as a byte view, since this stage guarantees to keep
         // the results valid.
-        return ExtensionGetNextResult::advanced(
-            ExtensionBSONObj::makeAsByteView(_documents[_currentIndex++]));
+        auto& currentDocumentWithMetadata = _documentsWithMetadata[_currentIndex++];
+        auto documentResult = ExtensionBSONObj::makeAsByteView(currentDocumentWithMetadata.first);
+        auto metaDataResult = ExtensionBSONObj::makeAsByteView(currentDocumentWithMetadata.second);
+        return ExtensionGetNextResult::advanced(std::move(documentResult),
+                                                std::move(metaDataResult));
     }
 
     // Allow this to be public for visibility in unit tests.
@@ -192,39 +93,44 @@ public:
 
     void close() override {}
 
-    static inline std::unique_ptr<FruitsAsDocumentsExecAggStage> make() {
-        return std::make_unique<FruitsAsDocumentsExecAggStage>();
-    }
-
-private:
-    // Every FruitsAsDocumentsExecAggStage object will have access to the same test document suite.
-    static inline const std::vector<BSONObj> _documents = {
-        BSON("_id" << 1 << "apples" << "red"),
-        BSON("_id" << 2 << "oranges" << 5),
-        BSON("_id" << 3 << "bananas" << false),
-        BSON("_id" << 4 << "tropical fruits" << BSON_ARRAY("rambutan" << "durian" << "lychee")),
-        BSON("_id" << 5 << "pie" << 3.14159)};
-    size_t _currentIndex = 0;
-};
-
-class FruitsAsDocumentsLogicalAggStage : public sdk::LogicalAggStage {
-public:
-    BSONObj serialize() const override {
-        return BSON(std::string(kSourceName) << "serializedForExecution");
-    }
-
     BSONObj explain(::MongoExtensionExplainVerbosity verbosity) const override {
         return BSONObj();
     }
 
-    std::unique_ptr<sdk::ExecAggStageBase> compile() const override {
-        return FruitsAsDocumentsExecAggStage::make();
+    // Helper func that return input result for easy expected-vs-actual comparisons without
+    // requiring a static test dataset.
+    static inline auto getInputResults() {
+        return _documentsWithMetadata;
     }
+
+    static inline std::unique_ptr<FruitsAsDocumentsExecAggStage> make() {
+        return std::make_unique<FruitsAsDocumentsExecAggStage>(kFruitsAsDocumentsName, BSONObj());
+    }
+
+private:
+    // Every FruitsAsDocumentsExecAggStage object will have access to the same test document suite.
+    static inline const std::vector<std::pair<BSONObj, BSONObj>> _documentsWithMetadata = {
+        {BSON("_id" << 1 << "apples" << "red"), BSON("$textScore" << 5.0)},
+        {BSON("_id" << 2 << "oranges" << 5), BSON("$searchScore" << 1.5)},
+        {BSON("_id" << 3 << "bananas" << false), BSON("$searchScore" << 2.0)},
+        {BSON("_id" << 4 << "tropical fruits"
+                    << BSON_ARRAY("rambutan" << "durian"
+                                             << "lychee")),
+         BSON("$textScore" << 4.0)},
+        {BSON("_id" << 5 << "pie" << 3.14159), BSON("$searchScore" << 5.0)}};
+    size_t _currentIndex = 0;
+};
+
+class FruitsAsDocumentsLogicalAggStage
+    : public sdk::TestLogicalStage<FruitsAsDocumentsExecAggStage> {
+public:
+    FruitsAsDocumentsLogicalAggStage()
+        : sdk::TestLogicalStage<FruitsAsDocumentsExecAggStage>(kFruitsAsDocumentsName, BSONObj()) {}
 };
 
 class FruitsAsDocumentsAstNode : public sdk::AggStageAstNode {
 public:
-    FruitsAsDocumentsAstNode() : sdk::AggStageAstNode(kSourceName) {}
+    FruitsAsDocumentsAstNode() : sdk::AggStageAstNode(kFruitsAsDocumentsName) {}
 
     std::unique_ptr<sdk::LogicalAggStage> bind() const override {
         return std::make_unique<FruitsAsDocumentsLogicalAggStage>();
@@ -237,7 +143,7 @@ public:
 
 class FruitsAsDocumentsParseNode : public sdk::AggStageParseNode {
 public:
-    FruitsAsDocumentsParseNode() : sdk::AggStageParseNode(kSourceName) {}
+    FruitsAsDocumentsParseNode() : sdk::AggStageParseNode(kFruitsAsDocumentsName) {}
     static constexpr size_t kExpansionSize = 1;
 
     size_t getExpandedSize() const override {
@@ -270,7 +176,7 @@ public:
 
 class FruitsAsDocumentsDescriptor : public sdk::AggStageDescriptor {
 public:
-    static inline const std::string kStageName = std::string(kSourceName);
+    static inline const std::string kStageName = std::string(kFruitsAsDocumentsName);
 
     FruitsAsDocumentsDescriptor() : sdk::AggStageDescriptor(kStageName) {}
 
@@ -285,7 +191,8 @@ public:
 
 class AddFruitsToDocumentsExecAggStage : public sdk::ExecAggStageTransform {
 public:
-    AddFruitsToDocumentsExecAggStage() : sdk::ExecAggStageTransform(kTransformName) {}
+    AddFruitsToDocumentsExecAggStage(std::string_view name, BSONObj arguments)
+        : sdk::ExecAggStageTransform(name) {}
 
     // Loosely modeled on the behavior of the existing tranform stage:
     // exec::agg::SingleDocumentTransformationStage::doGetNext(), more specifically, the $addFields
@@ -308,8 +215,13 @@ public:
         bob.append("existingDoc", input.resultDocument->getUnownedBSONObj());
         // Transform the returned input document by adding a new field.
         bob.append("addedFields", _documents[_currentIndex++]);
-        // We need to return the result as a ByteBuf, since we are returning a temporary.
-        return ExtensionGetNextResult::advanced(ExtensionBSONObj::makeAsByteBuf(bob.done()));
+        // We need to preserve metadata from source stage if present and return the result as a
+        // ByteBuf, since we are returning a temporary.
+        return input.resultMetadata.has_value()
+            ? ExtensionGetNextResult::advanced(
+                  ExtensionBSONObj::makeAsByteBuf(bob.done()),
+                  ExtensionBSONObj::makeAsByteBuf(input.resultMetadata->getUnownedBSONObj()))
+            : ExtensionGetNextResult::advanced(ExtensionBSONObj::makeAsByteBuf(bob.done()));
     }
 
     void open() override {}
@@ -318,8 +230,12 @@ public:
 
     void close() override {}
 
+    BSONObj explain(::MongoExtensionExplainVerbosity verbosity) const override {
+        return BSONObj();
+    }
+
     static inline std::unique_ptr<sdk::ExecAggStageTransform> make() {
-        return std::make_unique<AddFruitsToDocumentsExecAggStage>();
+        return std::make_unique<AddFruitsToDocumentsExecAggStage>(kTransformName, BSONObj());
     }
 
 private:
@@ -334,27 +250,14 @@ private:
     size_t _currentIndex = 0;
 };
 
-class AddFruitsToDocumentsLogicalAggStage : public sdk::LogicalAggStage {
-public:
-    BSONObj serialize() const override {
-        return BSON(std::string(kTransformName) << "serializedForExecution");
-    }
-
-    BSONObj explain(::MongoExtensionExplainVerbosity verbosity) const override {
-        return BSONObj();
-    }
-
-    std::unique_ptr<sdk::ExecAggStageBase> compile() const override {
-        return AddFruitsToDocumentsExecAggStage::make();
-    }
-};
+using AddFruitsToDocumentsLogicalAggStage = sdk::TestLogicalStage<AddFruitsToDocumentsExecAggStage>;
 
 class AddFruitsToDocumentsAggStageAstNode : public sdk::AggStageAstNode {
 public:
     AddFruitsToDocumentsAggStageAstNode() : sdk::AggStageAstNode(kTransformName) {}
 
     std::unique_ptr<sdk::LogicalAggStage> bind() const override {
-        return std::make_unique<AddFruitsToDocumentsLogicalAggStage>();
+        return std::make_unique<AddFruitsToDocumentsLogicalAggStage>(_name, BSONObj());
     }
 
     static inline std::unique_ptr<sdk::AggStageAstNode> make() {
@@ -408,30 +311,31 @@ public:
  * General execution-related stages testing
  * =========================================================
  */
+
 class ValidExtensionExecAggStage : public extension::sdk::ExecAggStageSource {
 public:
-    ValidExtensionExecAggStage() : sdk::ExecAggStageSource("$validExtension") {}
+    ValidExtensionExecAggStage(std::string_view name, BSONObj arguments)
+        : sdk::ExecAggStageSource(name) {}
 
     extension::ExtensionGetNextResult getNext(const sdk::QueryExecutionContextHandle& execCtx,
                                               ::MongoExtensionExecAggStage* execStage) override {
-        // TODO SERVER-113905: once we support metadata, we should only support returning both
-        // document and metadata.
-        if (_results.empty()) {
+        if (_documentsWithMetadata.empty()) {
             return extension::ExtensionGetNextResult::eof();
         }
-        if (_results.size() == 2) {
+        if (_documentsWithMetadata.size() == 2) {
             // The result at the front of the queue is removed so that the size doesn't stay at 2.
             // This needs to be done so that the EOF case can be tested. Note that the behavior of
             // removing from the results queue for a "pause execution" state does not accurately
             // represent a "paused execution" state in a getNext() function.
-            _results.pop_front();
+            _documentsWithMetadata.pop_front();
             return extension::ExtensionGetNextResult::pauseExecution();
         } else {
             // We need to return the result as a ByteBuf, since we are popping results off our
             // results deque.
             auto result = extension::ExtensionGetNextResult::advanced(
-                ExtensionBSONObj::makeAsByteBuf(_results.front()));
-            _results.pop_front();
+                ExtensionBSONObj::makeAsByteBuf(_documentsWithMetadata.front().first),
+                ExtensionBSONObj::makeAsByteBuf(_documentsWithMetadata.front().second));
+            _documentsWithMetadata.pop_front();
             return result;
         }
     }
@@ -442,31 +346,28 @@ public:
 
     void close() override {}
 
+    BSONObj explain(::MongoExtensionExplainVerbosity verbosity) const override {
+        return BSON("execField" << "execMetric" << "verbosity" << verbosity);
+    }
+
     static inline std::unique_ptr<sdk::ExecAggStageSource> make() {
-        return std::make_unique<ValidExtensionExecAggStage>();
+        return std::make_unique<ValidExtensionExecAggStage>(kTransformName, BSONObj());
     }
 
 private:
-    std::deque<BSONObj> _results = {
-        BSON("meow" << "adithi"), BSON("meow" << "josh"), BSON("meow" << "cedric")};
+    std::deque<std::pair<BSONObj, BSONObj>> _documentsWithMetadata = {
+        {BSON("meow" << "adithi"), BSON("$searchScore" << 1.0)},
+        {BSON("meow" << "josh"), BSON("$vectorSearchScore" << 1.5)},
+        {BSON("meow" << "cedric"), BSON("$textScore" << 2.0)}};
 };
 
-class TestLogicalStageCompile : public LogicalAggStage {
+class TestLogicalStageCompile : public sdk::TestLogicalStage<ValidExtensionExecAggStage> {
 public:
     static constexpr StringData kStageName = "$testCompile";
     static constexpr StringData kStageSpec = "mongodb";
 
-    BSONObj serialize() const override {
-        return BSON(kStageName << kStageSpec);
-    }
-
-    BSONObj explain(::MongoExtensionExplainVerbosity verbosity) const override {
-        return BSON(kStageName << verbosity);
-    }
-
-    std::unique_ptr<sdk::ExecAggStageBase> compile() const override {
-        return std::make_unique<ValidExtensionExecAggStage>();
-    }
+    TestLogicalStageCompile()
+        : TestLogicalStage(toStdStringViewForInterop(kStageName), BSON(kStageSpec << "")) {}
 
     static inline std::unique_ptr<extension::sdk::LogicalAggStage> make() {
         return std::make_unique<TestLogicalStageCompile>();
@@ -1093,28 +994,16 @@ public:
     }
 };
 
-class CountingLogicalStage final : public sdk::LogicalAggStage {
+class CountingLogicalStage final : public TransformLogicalAggStage {
 public:
     static int alive;
 
-    CountingLogicalStage() {
+    CountingLogicalStage() : TransformLogicalAggStage() {
         ++alive;
     }
 
     ~CountingLogicalStage() override {
         --alive;
-    }
-
-    BSONObj serialize() const override {
-        return BSON(std::string(kCountingName) << "serializedForExecution");
-    }
-
-    BSONObj explain(::MongoExtensionExplainVerbosity verbosity) const override {
-        return BSONObj();
-    }
-
-    std::unique_ptr<sdk::ExecAggStageBase> compile() const override {
-        return std::make_unique<TransformExecAggStage>();
     }
 
     static inline std::unique_ptr<sdk::LogicalAggStage> make() {
@@ -1282,25 +1171,6 @@ public:
  * Sharding-related testing
  * =========================================================
  */
-class EmptyDistributedPlanLogic : public sdk::DistributedPlanLogicBase {
-public:
-    std::unique_ptr<sdk::DPLArrayContainer> getShardsPipeline() const override {
-        return {};
-    }
-
-    std::unique_ptr<sdk::DPLArrayContainer> getMergingPipeline() const override {
-        return {};
-    }
-
-    BSONObj getSortPattern() const override {
-        return BSONObj();
-    }
-
-    static inline std::unique_ptr<sdk::DistributedPlanLogicBase> make() {
-        return std::make_unique<EmptyDistributedPlanLogic>();
-    }
-};
-
 class MockQueryExecutionContext : public host_connector::QueryExecutionContextBase {
 public:
     Status checkForInterrupt() const override {
@@ -1310,6 +1180,42 @@ public:
     host_connector::HostOperationMetricsHandle* getMetrics(
         const std::string& stageName, const UnownedExecAggStageHandle& execStage) const override {
         return nullptr;
+    }
+};
+
+static constexpr std::string_view kMergeOnlyDPLStageName = "$mergeOnlyDPL";
+
+/**
+ * MergeOnlyDPLLogicalStage is a logical stage that returns DPL with merge-only stages
+ * containing all three types of VariantDPLHandle.
+ */
+class MergeOnlyDPLLogicalStage : public TransformLogicalAggStage {
+public:
+    MergeOnlyDPLLogicalStage() : TransformLogicalAggStage(kMergeOnlyDPLStageName, BSONObj()) {}
+
+    boost::optional<sdk::DistributedPlanLogic> getDistributedPlanLogic() const override {
+        sdk::DistributedPlanLogic dpl;
+
+        {
+            // Create a merging pipeline with all three types of VariantDPLHandle.
+            std::vector<VariantDPLHandle> elements;
+            // Host-defined parse node.
+            elements.emplace_back(new host::HostAggStageParseNode(
+                TransformHostParseNode::make(BSON("$match" << BSON("a" << 1)))));
+            // Extension-defined parse node.
+            elements.emplace_back(new sdk::ExtensionAggStageParseNode(
+                std::make_unique<TransformAggStageParseNode>()));
+            // Logical stage handle.
+            elements.emplace_back(extension::LogicalAggStageHandle{
+                new sdk::ExtensionLogicalAggStage(std::make_unique<MergeOnlyDPLLogicalStage>())});
+            dpl.mergingPipeline = sdk::DPLArrayContainer(std::move(elements));
+        }
+
+        return dpl;
+    }
+
+    static inline std::unique_ptr<LogicalAggStage> make() {
+        return std::make_unique<MergeOnlyDPLLogicalStage>();
     }
 };
 

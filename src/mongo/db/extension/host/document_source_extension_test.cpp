@@ -107,7 +107,7 @@ TEST_F(DocumentSourceExtensionTest, ParseTransformSuccess) {
     // Try to parse pipeline with custom extension stage before registering the extension,
     // should fail.
     std::vector<BSONObj> testPipeline{kValidSpec};
-    ASSERT_THROWS_CODE(buildTestPipeline(testPipeline), AssertionException, 16436);
+    ASSERT_THROWS_CODE(buildTestPipeline(testPipeline), AssertionException, 40324);
     // Register the extension stage and try to reparse.
 
     std::unique_ptr<host::HostPortal> hostPortal = std::make_unique<host::HostPortal>();
@@ -127,8 +127,9 @@ TEST_F(DocumentSourceExtensionTest, ParseTransformSuccess) {
         parsedPipeline->serializeToBson(SerializationOptions::kDebugQueryShapeSerializeOptions);
     ASSERT_EQUALS(serializedPipeline.size(), 1u);
     // The extension is in the form of DocumentSourceExtensionExpandable at this point, which
-    // serializes to its query shape. There is no query shape for the no-op extension.
-    ASSERT_BSONOBJ_EQ(serializedPipeline[0], BSONObj());
+    // serializes to its query shape. The transform extension's query shape is just its stage
+    // definition.
+    ASSERT_BSONOBJ_EQ(serializedPipeline[0], kValidSpec);
 }
 
 TEST_F(DocumentSourceExtensionTest, ExpandToExtAst) {
@@ -838,6 +839,77 @@ public:
         return std::make_unique<EmptyRequiredPrivilegesAggStageAstNode>();
     }
 };
+
+static constexpr std::string_view kSourceName = "$sortKeySource";
+class ValidateSortKeyMetadataExecStage : public sdk::ExecAggStageSource {
+public:
+    ValidateSortKeyMetadataExecStage() : sdk::ExecAggStageSource(kSourceName) {}
+
+    ValidateSortKeyMetadataExecStage(std::string_view name, const mongo::BSONObj& arguments)
+        : sdk::ExecAggStageSource(name) {}
+
+    ExtensionGetNextResult getNext(const sdk::QueryExecutionContextHandle& execCtx,
+                                   ::MongoExtensionExecAggStage* execStage) override {
+        if (_currentIndex >= _documentsWithMetadata.size()) {
+            return ExtensionGetNextResult::eof();
+        }
+        // Note, here we can create the result as a byte view, since this stage guarantees to keep
+        // the results valid.
+        auto documentResult =
+            ExtensionBSONObj::makeAsByteView(_documentsWithMetadata[_currentIndex].first);
+        auto metadataResult =
+            ExtensionBSONObj::makeAsByteView(_documentsWithMetadata[_currentIndex++].second);
+        return ExtensionGetNextResult::advanced(std::move(documentResult),
+                                                std::move(metadataResult));
+    }
+    // Allow this to be public for visibility in unit tests.
+    UnownedExecAggStageHandle& _getSource() override {
+        return sdk::ExecAggStageSource::_getSource();
+    }
+    BSONObj explain(::MongoExtensionExplainVerbosity verbosity) const override {
+        return BSONObj();
+    }
+    void open() override {}
+    void reopen() override {}
+    void close() override {}
+
+    static inline auto getInputResults() {
+        return _documentsWithMetadata;
+    }
+
+    static inline std::unique_ptr<sdk::ExecAggStageSource> make() {
+        return std::make_unique<ValidateSortKeyMetadataExecStage>();
+    }
+
+private:
+    static inline const std::vector<std::pair<BSONObj, BSONObj>> _documentsWithMetadata = {
+        {BSON("_id" << 1 << "field1" << "val1"),
+         BSON("$sortKey" << BSON("val1" << 5.0))},  // SingleElement $sortKey.
+        {BSON("_id" << 2 << "field2" << "val2"),
+         BSON("$sortKey" << BSON("val1" << 1.0 << "val2"
+                                        << 2.0))},  // MultiElement $sortKey passed in a obj type.
+        {BSON("_id" << 3 << "field3" << "val3"),
+         BSON("$sortKey" << BSON_ARRAY(3.0
+                                       << 4.0))},  // MultiElement $sortKey passed in a array type.
+        {BSON("_id" << 4 << "field4" << "val4"), BSON("$sortKey" << BSONObj())},  // Empty $sortKey.
+        {BSON("_id" << 4 << "field4" << "val4"),
+         BSON("$sortKey" << 1.0)}};  // $sortKey is not an obj.
+    size_t _currentIndex = 0;
+};
+
+DEFAULT_LOGICAL_STAGE(ValidateSortKeyMetadata);
+
+class ValidateSortKeyMetadataAstStage
+    : public sdk::TestAstNode<ValidateSortKeyMetadataLogicalStage> {
+public:
+    ValidateSortKeyMetadataAstStage()
+        : sdk::TestAstNode<ValidateSortKeyMetadataLogicalStage>(kSourceName, BSONObj()) {}
+
+    static inline std::unique_ptr<sdk::AggStageAstNode> make() {
+        return std::make_unique<ValidateSortKeyMetadataAstStage>();
+    }
+};
+
 }  // namespace
 
 TEST_F(DocumentSourceExtensionTest, TransformAstNodeWithDefaultGetPropertiesSucceeds) {
@@ -1082,53 +1154,6 @@ DEATH_TEST_F(DocumentSourceExtensionTestDeathTest,
 
     [[maybe_unused]] auto privileges =
         lp.requiredPrivileges(/*isMongos*/ false, /*bypassDocumentValidation*/ false);
-}
-
-TEST_F(DocumentSourceExtensionTest, ShouldPropagateValidGetNextResultsForSourceExtensionStage) {
-    auto astNode = new sdk::ExtensionAggStageAstNode(
-        sdk::shared_test_stages::FruitsAsDocumentsAstNode::make());
-    auto astHandle = AggStageAstNodeHandle(astNode);
-
-    auto optimizable =
-        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(astHandle));
-
-    auto extensionStage = exec::agg::buildStage(optimizable);
-
-    // See sdk::shared_test_stages::SourceExecAggStage for the full test document suite.
-    {
-        auto next = extensionStage->getNext();
-        ASSERT_TRUE(next.isAdvanced());
-        ASSERT_DOCUMENT_EQ(next.releaseDocument(),
-                           (Document{BSON("_id" << 1 << "apples" << "red")}));
-    }
-    {
-        auto next = extensionStage->getNext();
-        ASSERT_TRUE(next.isAdvanced());
-        ASSERT_DOCUMENT_EQ(next.releaseDocument(), (Document{BSON("_id" << 2 << "oranges" << 5)}));
-    }
-    {
-        auto next = extensionStage->getNext();
-        ASSERT_TRUE(next.isAdvanced());
-        ASSERT_DOCUMENT_EQ(next.releaseDocument(),
-                           (Document{BSON("_id" << 3 << "bananas" << false)}));
-    }
-    {
-        auto next = extensionStage->getNext();
-        ASSERT_TRUE(next.isAdvanced());
-        ASSERT_DOCUMENT_EQ(
-            next.releaseDocument(),
-            (Document{BSON("_id" << 4 << "tropical fruits"
-                                 << BSON_ARRAY("rambutan" << "durian" << "lychee"))}));
-    }
-    {
-        auto next = extensionStage->getNext();
-        ASSERT_TRUE(next.isAdvanced());
-        ASSERT_DOCUMENT_EQ(next.releaseDocument(),
-                           (Document{BSON("_id" << 5 << "pie" << 3.14159)}));
-    }
-    // Verify that the next result after all the documents have been exhausted has a status of EOF.
-    auto eof = extensionStage->getNext();
-    ASSERT_TRUE(eof.isEOF());
 }
 
 TEST_F(DocumentSourceExtensionTest, ShouldPropagateValidGetNextResultsForTransformExtensionStage) {
@@ -1445,5 +1470,116 @@ TEST_F(DocumentSourceExtensionTest,
     }
     // Verify that the next result after all the documents have been exhausted has a status of EOF.
     ASSERT_TRUE(secondTransformStage->getNext().isEOF());
+}
+
+TEST_F(DocumentSourceExtensionTest, ShouldPropagateSourceMetadata) {
+    auto sourceAstNode = new sdk::ExtensionAggStageAstNode(
+        sdk::shared_test_stages::FruitsAsDocumentsAstNode::make());
+    auto sourceAstHandle = AggStageAstNodeHandle(sourceAstNode);
+
+    auto sourceOptimizable =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(sourceAstHandle));
+    auto sourceStage = exec::agg::buildStage(sourceOptimizable);
+
+    const auto& inputResults =
+        sdk::shared_test_stages::FruitsAsDocumentsExecAggStage::getInputResults();
+    std::vector<Document> expectedDocuments;
+    for (const auto& inputResult : inputResults) {
+        expectedDocuments.emplace_back(
+            Document::createDocumentWithMetadata(inputResult.first, inputResult.second));
+    }
+
+    // Verify metadata is present on output documents.
+    for (const auto& expectedDocument : expectedDocuments) {
+        auto nextResult = sourceStage->getNext();
+        ASSERT_TRUE(nextResult.isAdvanced());
+
+        auto actualDoc = nextResult.releaseDocument();
+        const auto& actualMetadata = actualDoc.metadata();
+        const auto& expectedMetadata = expectedDocument.metadata();
+
+        // Verify documents match.
+        ASSERT_DOCUMENT_EQ(actualDoc, expectedDocument);
+        // Verify metadata match.
+        ASSERT_EQ(actualMetadata, expectedMetadata);
+    }
+    ASSERT_TRUE(sourceStage->getNext().isEOF());
+}
+
+TEST_F(DocumentSourceExtensionTest, TransformReceivesSourceMetadata) {
+    auto sourceAstNode = new sdk::ExtensionAggStageAstNode(
+        sdk::shared_test_stages::FruitsAsDocumentsAstNode::make());
+    auto sourceAstHandle = AggStageAstNodeHandle(sourceAstNode);
+
+    auto sourceOptimizable =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(sourceAstHandle));
+    auto sourceStage = exec::agg::buildStage(sourceOptimizable);
+
+    auto transformAstNode = new sdk::ExtensionAggStageAstNode(
+        sdk::shared_test_stages::AddFruitsToDocumentsAggStageAstNode::make());
+    auto transformAstHandle = AggStageAstNodeHandle(transformAstNode);
+
+    auto transformOptimizable = host::DocumentSourceExtensionOptimizable::create(
+        getExpCtx(), std::move(transformAstHandle));
+
+    auto transformStage = exec::agg::buildStageAndStitch(transformOptimizable, sourceStage);
+
+    const auto& inputResults =
+        sdk::shared_test_stages::FruitsAsDocumentsExecAggStage::getInputResults();
+    std::vector<Document> expectedDocuments;
+    for (const auto& inputResult : inputResults) {
+        const BSONObj& transformedDocBson =
+            BSON("existingDoc" << inputResult.first << "addedFields" << inputResult.first);
+        expectedDocuments.emplace_back(
+            Document::createDocumentWithMetadata(transformedDocBson, inputResult.second));
+    }
+
+    // Verify transform stage output has metadata.
+    for (const auto& expectedDocument : expectedDocuments) {
+        auto nextResult = transformStage->getNext();
+        ASSERT_TRUE(nextResult.isAdvanced());
+
+        auto actualDoc = nextResult.releaseDocument();
+        const auto& actualMetadata = actualDoc.metadata();
+        const auto& expectedMetadata = expectedDocument.metadata();
+
+        // Verify documents match.
+        ASSERT_DOCUMENT_EQ(actualDoc, expectedDocument);
+        // Verify metadata match.
+        ASSERT_EQ(actualMetadata, expectedMetadata);
+    }
+    ASSERT_TRUE(transformStage->getNext().isEOF());
+}
+
+TEST_F(DocumentSourceExtensionTest, ShouldPropagateSortKeyMetadata) {
+    auto sourceAstNode = new sdk::ExtensionAggStageAstNode(ValidateSortKeyMetadataAstStage::make());
+    auto sourceAstHandle = AggStageAstNodeHandle(sourceAstNode);
+
+    auto sourceOptimizable =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(sourceAstHandle));
+    auto sourceStage = exec::agg::buildStage(sourceOptimizable);
+    const auto& inputResults = ValidateSortKeyMetadataExecStage::getInputResults();
+
+    // Verify $sortKey is present on first three documents.
+    for (auto index = 0; index < 3; ++index) {
+        auto next = sourceStage->getNext();
+        ASSERT_TRUE(next.isAdvanced());
+        // Take the returned Document by value.
+        const auto& actualDocument = next.releaseDocument();
+        const auto& expectedDocument = Document::createDocumentWithMetadata(
+            inputResults[index].first, inputResults[index].second);
+        ASSERT_DOCUMENT_EQ(actualDocument, expectedDocument);
+        ASSERT_EQ(actualDocument.metadata(), expectedDocument.metadata());
+    }
+    // Verify that an error is thrown if the sort key value is empty.
+    {
+        ASSERT_THROWS_CODE(sourceStage->getNext(), DBException, 31282);
+    }
+    // Verify an error is thrown when the sort key has an invalid type (neither an object nor an
+    // array).
+    {
+        ASSERT_THROWS_CODE(sourceStage->getNext(), DBException, 11503701);
+    }
+    ASSERT_TRUE(sourceStage->getNext().isEOF());
 }
 }  // namespace mongo::extension

@@ -30,18 +30,19 @@
 
 #include "mongo/db/admission/execution_control/execution_control_stats.h"
 #include "mongo/util/concurrency/admission_context.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
 class OperationContext;
 namespace admission::execution_control {
-enum class OperationType { kRead = 0, kWrite };
+enum class MONGO_MOD_PUBLIC OperationType { kRead = 0, kWrite };
 };  // namespace admission::execution_control
 
 /**
  * Stores state and statistics related to execution control for a given transactional context.
  */
-class ExecutionAdmissionContext : public AdmissionContext {
+class MONGO_MOD_PUBLIC ExecutionAdmissionContext : public AdmissionContext {
 public:
     // Deprioritization heuristic. Returns true if an operation should be de-prioritized.
     static bool shouldDeprioritize(ExecutionAdmissionContext* admCtx);
@@ -181,7 +182,8 @@ private:
     admission::execution_control::OperationExecutionStats _writeLongStats;
 
     Atomic<bool> _priorityLowered{false};
-    admission::execution_control::OperationType _opType;
+    admission::execution_control::OperationType _opType{
+        admission::execution_control::OperationType::kRead};
 };
 
 }  // namespace mongo

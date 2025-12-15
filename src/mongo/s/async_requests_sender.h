@@ -31,7 +31,6 @@
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/db/baton.h"
@@ -42,21 +41,17 @@
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/executor/scoped_task_executor.h"
 #include "mongo/executor/task_executor.h"
+#include "mongo/stdx/unordered_map.h"
 #include "mongo/util/future.h"
-#include "mongo/util/interruptible.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/producer_consumer_queue.h"
-#include "mongo/util/time_support.h"
 
 #include <cstddef>
 #include <memory>
-#include <span>
-#include <string>
 #include <utility>
 #include <vector>
 
-#include <boost/move/utility_core.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
 
@@ -148,7 +143,7 @@ public:
         static Status getEffectiveStatus(const AsyncRequestsSender::Response& response);
     };
 
-    typedef stdx::unordered_map<ShardId, HostAndPort> ShardHostMap;
+    using ShardHostMap = stdx::unordered_map<ShardId, HostAndPort>;
 
     /**
      * Constructs a new AsyncRequestsSender. The OperationContext* and TaskExecutor* must remain
@@ -165,6 +160,8 @@ public:
                         Shard::RetryPolicy retryPolicy,
                         std::unique_ptr<ResourceYielder> resourceYielder,
                         const ShardHostMap& designatedHostsMap);
+
+    ~AsyncRequestsSender();
 
     /**
      * Returns true if responses for all requests have been returned via next().
@@ -252,7 +249,7 @@ private:
          *
          * 1. resolveShardIdToHostAndPort
          * 2. scheduleRemoteCommand
-         * 3. handlResponse
+         * 3. handleResponse
          *
          * for the given shard.
          */
@@ -300,18 +297,18 @@ private:
 
     OperationContext* _opCtx;
 
-    // The metadata obj to pass along with the command remote. Used to indicate that the command is
-    // ok to run on secondaries.
-    BSONObj _metadataObj;
-
     // The database against which the commands are run.
     const DatabaseName _db;
 
     // The readPreference to use for all requests.
-    ReadPreferenceSetting _readPreference;
+    const ReadPreferenceSetting _readPreference;
+
+    // The metadata obj to pass along with the command remote. Used to indicate that the command is
+    // ok to run on secondaries.
+    const BSONObj _metadataObj;
 
     // The policy to use when deciding whether to retry on an error.
-    Shard::RetryPolicy _retryPolicy;
+    const Shard::RetryPolicy _retryPolicy;
 
     // Data tracking the state of our communication with each of the remote nodes.
     std::vector<RemoteData> _remotes;

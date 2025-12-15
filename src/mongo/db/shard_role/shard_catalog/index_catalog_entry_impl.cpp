@@ -101,7 +101,6 @@ IndexCatalogEntryImpl::IndexCatalogEntryImpl(OperationContext* const opCtx,
       _shouldValidateDocument(false),
       _indexOffset(invariantStatusOK(
           collection->checkMetaDataForIndex(_descriptor.indexName(), _descriptor.infoObj()))) {
-    _descriptor._entry = this;
     _isReady = collection->isIndexReady(_descriptor.indexName());
 
     // For time-series collections, we need to check that the indexed metric fields do not have
@@ -274,7 +273,7 @@ void IndexCatalogEntryImpl::setMultikey(OperationContext* opCtx,
             accessMethod()->asSortedData()->insertKeys(opCtx,
                                                        *shard_role_details::getRecoveryUnit(opCtx),
                                                        collection,
-                                                       _descriptor.getEntry(),
+                                                       this,
                                                        multikeyMetadataKeys,
                                                        {},
                                                        {},
@@ -307,8 +306,12 @@ void IndexCatalogEntryImpl::forceSetMultikey(OperationContext* const opCtx,
     // currently support path-level multikey path tracking.
     coll->forceSetIndexIsMultikey(opCtx, &_descriptor, isMultikey, multikeyPaths);
 
-    // Since multikey metadata has changed, invalidate the query cache.
-    CollectionQueryInfo::get(coll).clearQueryCacheForSetMultikey(coll);
+    // Since multikey metadata has changed, invalidate the query cache and rebuild PathArrayness.
+    auto& collectionQueryInfo = CollectionQueryInfo::get(coll);
+    collectionQueryInfo.clearQueryCacheForSetMultikey(coll);
+    if (feature_flags::gFeatureFlagPathArrayness.isEnabled()) {
+        collectionQueryInfo.updatePathArraynessForSetMultikey(opCtx, coll.get());
+    }
 }
 
 Status IndexCatalogEntryImpl::_setMultikeyInMultiDocumentTransaction(
@@ -559,9 +562,7 @@ private:
 class WithDifferentIndexDescriptorEntry : public IndexCatalogEntry {
 public:
     WithDifferentIndexDescriptorEntry(IndexDescriptor descriptor, const IndexCatalogEntry* entry)
-        : IndexCatalogEntry(), _original(entry), _indexDescriptor(std::move(descriptor)) {
-        _indexDescriptor.setEntry(this);
-    }
+        : IndexCatalogEntry(), _original(entry), _indexDescriptor(std::move(descriptor)) {}
 
     const std::string& getIdent() const final {
         return _original->getIdent();
@@ -723,7 +724,11 @@ void IndexCatalogEntryImpl::_catalogSetMultikey(OperationContext* opCtx,
                     "Index set to multi key, clearing query plan cache",
                     logAttrs(collection->ns()),
                     "keyPattern"_attr = _descriptor.keyPattern());
-        CollectionQueryInfo::get(collection).clearQueryCacheForSetMultikey(collection);
+        auto& collectionQueryInfo = CollectionQueryInfo::get(collection);
+        collectionQueryInfo.clearQueryCacheForSetMultikey(collection);
+        if (feature_flags::gFeatureFlagPathArrayness.isEnabled()) {
+            collectionQueryInfo.updatePathArraynessForSetMultikey(opCtx, collection.get());
+        }
     }
 }
 

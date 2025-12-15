@@ -33,7 +33,6 @@
 #include "mongo/db/query/compiler/optimizer/join/unit_test_helpers.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/golden_test.h"
-#include "mongo/unittest/golden_test_base.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo::join_ordering {
@@ -86,8 +85,6 @@ DEATH_TEST(PlanEnumeratorHelpersDeathTest, TooManyInvocationsOfCombinationSequen
 
 class JoinPlanEnumeratorTest : public JoinOrderingTestFixture {
 public:
-    JoinPlanEnumeratorTest() : config{"src/mongo/db/test_output/query/join"} {}
-
     void initGraph(size_t numNodes) {
         for (size_t i = 0; i < numNodes; i++) {
             auto nss =
@@ -95,7 +92,7 @@ public:
             std::string fieldName = str::stream() << "a" << i;
             auto filterBSON = BSON(fieldName << BSON("$gt" << 0));
             auto cq = makeCanonicalQuery(nss, filterBSON);
-            solnsPerQuery.insert(
+            jCtx.cbrCqQsns.insert(
                 {cq.get(), makeCollScanPlan(nss, cq->getPrimaryMatchExpression()->clone())});
             ASSERT_TRUE(graph.addNode(nss, std::move(cq), boost::none).has_value());
         }
@@ -114,7 +111,7 @@ public:
             }
         }
 
-        PlanEnumeratorContext ctx{graph, solnsPerQuery};
+        PlanEnumeratorContext ctx{jCtx};
         ctx.enumerateJoinSubsets(shape);
         ASSERT_EQ(numNodes, ctx.getSubsets(0).size());
         for (size_t k = 1; k < numNodes; ++k) {
@@ -132,20 +129,16 @@ public:
             goldenCtx->outStream() << ctx.toString() << std::endl;
         }
     }
-
-    unittest::GoldenTestConfig config;
-    QuerySolutionMap solnsPerQuery;
-    JoinGraph graph;
 };
 
 TEST_F(JoinPlanEnumeratorTest, InitializeSubsetsTwo) {
-    unittest::GoldenTestContext goldenCtx(&config);
+    unittest::GoldenTestContext goldenCtx(&goldenTestConfig);
 
     initGraph(2);
     graph.addSimpleEqualityEdge((NodeId)0, (NodeId)1, 0, 1);
 
     {
-        PlanEnumeratorContext ctx{graph, solnsPerQuery};
+        PlanEnumeratorContext ctx{jCtx};
         ctx.enumerateJoinSubsets(PlanTreeShape::LEFT_DEEP);
 
         auto& level0 = ctx.getSubsets(0);
@@ -162,7 +155,7 @@ TEST_F(JoinPlanEnumeratorTest, InitializeSubsetsTwo) {
     }
 
     {
-        PlanEnumeratorContext ctx{graph, solnsPerQuery};
+        PlanEnumeratorContext ctx{jCtx};
         ctx.enumerateJoinSubsets(PlanTreeShape::RIGHT_DEEP);
 
         auto& level0 = ctx.getSubsets(0);
@@ -180,7 +173,7 @@ TEST_F(JoinPlanEnumeratorTest, InitializeSubsetsTwo) {
 }
 
 TEST_F(JoinPlanEnumeratorTest, InitializeSubsetsThree) {
-    unittest::GoldenTestContext goldenCtx(&config);
+    unittest::GoldenTestContext goldenCtx(&goldenTestConfig);
 
     initGraph(3);
     graph.addSimpleEqualityEdge(NodeId(0), NodeId(1), 0, 1);
@@ -188,7 +181,7 @@ TEST_F(JoinPlanEnumeratorTest, InitializeSubsetsThree) {
     graph.addSimpleEqualityEdge(NodeId(1), NodeId(2), 1, 2);
 
     {
-        PlanEnumeratorContext ctx{graph, solnsPerQuery};
+        PlanEnumeratorContext ctx{jCtx};
         ctx.enumerateJoinSubsets(PlanTreeShape::LEFT_DEEP);
 
         auto& level0 = ctx.getSubsets(0);
@@ -212,7 +205,7 @@ TEST_F(JoinPlanEnumeratorTest, InitializeSubsetsThree) {
     }
 
     {
-        PlanEnumeratorContext ctx{graph, solnsPerQuery};
+        PlanEnumeratorContext ctx{jCtx};
         ctx.enumerateJoinSubsets(PlanTreeShape::RIGHT_DEEP);
 
         auto& level0 = ctx.getSubsets(0);
@@ -237,14 +230,14 @@ TEST_F(JoinPlanEnumeratorTest, InitializeSubsetsThree) {
 }
 
 TEST_F(JoinPlanEnumeratorTest, InitializeSubsetsThreeNoCycle) {
-    unittest::GoldenTestContext goldenCtx(&config);
+    unittest::GoldenTestContext goldenCtx(&goldenTestConfig);
 
     initGraph(3);
     graph.addSimpleEqualityEdge(NodeId(0), NodeId(1), 0, 1);
     graph.addSimpleEqualityEdge(NodeId(0), NodeId(2), 0, 2);
 
     {
-        PlanEnumeratorContext ctx{graph, solnsPerQuery};
+        PlanEnumeratorContext ctx{jCtx};
         ctx.enumerateJoinSubsets(PlanTreeShape::LEFT_DEEP);
 
         auto& level0 = ctx.getSubsets(0);
@@ -268,7 +261,7 @@ TEST_F(JoinPlanEnumeratorTest, InitializeSubsetsThreeNoCycle) {
     }
 
     {
-        PlanEnumeratorContext ctx{graph, solnsPerQuery};
+        PlanEnumeratorContext ctx{jCtx};
         ctx.enumerateJoinSubsets(PlanTreeShape::RIGHT_DEEP);
 
         auto& level0 = ctx.getSubsets(0);
@@ -293,17 +286,17 @@ TEST_F(JoinPlanEnumeratorTest, InitializeSubsetsThreeNoCycle) {
 }
 
 TEST_F(JoinPlanEnumeratorTest, LeftDeep8Nodes) {
-    unittest::GoldenTestContext goldenCtx(&config);
+    unittest::GoldenTestContext goldenCtx(&goldenTestConfig);
     testLargeSubset(&goldenCtx, PlanTreeShape::LEFT_DEEP, 8);
 }
 
 TEST_F(JoinPlanEnumeratorTest, RightDeep8Nodes) {
-    unittest::GoldenTestContext goldenCtx(&config);
+    unittest::GoldenTestContext goldenCtx(&goldenTestConfig);
     testLargeSubset(&goldenCtx, PlanTreeShape::RIGHT_DEEP, 8);
 }
 
 TEST_F(JoinPlanEnumeratorTest, ZigZag8Nodes) {
-    unittest::GoldenTestContext goldenCtx(&config);
+    unittest::GoldenTestContext goldenCtx(&goldenTestConfig);
     testLargeSubset(&goldenCtx, PlanTreeShape::ZIG_ZAG, 8);
 }
 
@@ -333,17 +326,15 @@ TEST_F(JoinPredicateEstimatorFixture, NDVSmallerCollection) {
     graph.addSimpleEqualityEdge(aNodeId, bNodeId, 0, 1);
 
     SamplingEstimatorMap samplingEstimators;
-    auto aSamplingEstimator = std::make_unique<FakeNdvEstimator>();
+    auto aSamplingEstimator = std::make_unique<FakeNdvEstimator>(
+        CardinalityEstimate{CardinalityType{10}, EstimationSource::Sampling});
     aSamplingEstimator->addFakeNDVEstimate(
         {FieldPath("foo")}, CardinalityEstimate{CardinalityType{5}, EstimationSource::Sampling});
     samplingEstimators[aNss] = std::move(aSamplingEstimator);
-    samplingEstimators[bNss] = std::make_unique<FakeNdvEstimator>();
+    samplingEstimators[bNss] = std::make_unique<FakeNdvEstimator>(
+        CardinalityEstimate{CardinalityType{20}, EstimationSource::Sampling});
 
-    BaseTableCardinalityMap tableCards;
-    tableCards.emplace(aNss, CardinalityEstimate{CardinalityType{10}, EstimationSource::Sampling});
-    tableCards.emplace(bNss, CardinalityEstimate{CardinalityType{20}, EstimationSource::Sampling});
-
-    JoinPredicateEstimator predEstimator{graph, paths, samplingEstimators, tableCards};
+    JoinPredicateEstimator predEstimator{graph, paths, samplingEstimators};
 
     auto selEst = predEstimator.joinPredicateSel(graph.getEdge(0));
     // The selectivity estimate comes from 1 / NDV(A.foo) = 1 / 5 = 0.2
@@ -371,19 +362,16 @@ TEST_F(JoinPredicateEstimatorFixture, NDVSmallerCollectionEmbedPath) {
     graph.addSimpleEqualityEdge(aNodeId, bNodeId, 0, 1);
 
     SamplingEstimatorMap samplingEstimators;
-    samplingEstimators[aNss] = std::make_unique<FakeNdvEstimator>();
-    // Only add fake estimates for "b" estimator
-    auto bSamplingEstimator = std::make_unique<FakeNdvEstimator>();
+    samplingEstimators[aNss] = std::make_unique<FakeNdvEstimator>(
+        CardinalityEstimate{CardinalityType{20}, EstimationSource::Sampling});
+    // Ensure "b" collection has smaller CE. Only add fake estimates for "b" estimator.
+    auto bSamplingEstimator = std::make_unique<FakeNdvEstimator>(
+        CardinalityEstimate{CardinalityType{10}, EstimationSource::Sampling});
     bSamplingEstimator->addFakeNDVEstimate(
         {FieldPath("foo")}, CardinalityEstimate{CardinalityType{5}, EstimationSource::Sampling});
     samplingEstimators[bNss] = std::move(bSamplingEstimator);
 
-    BaseTableCardinalityMap tableCards;
-    tableCards.emplace(aNss, CardinalityEstimate{CardinalityType{20}, EstimationSource::Sampling});
-    // Ensure "b" collection has smaller CE
-    tableCards.emplace(bNss, CardinalityEstimate{CardinalityType{10}, EstimationSource::Sampling});
-
-    JoinPredicateEstimator predEstimator{graph, paths, samplingEstimators, tableCards};
+    JoinPredicateEstimator predEstimator{graph, paths, samplingEstimators};
 
     auto selEst = predEstimator.joinPredicateSel(graph.getEdge(0));
     // The selectivity estimate comes from 1 / NDV(B.foo) = 1 / 5 = 0.2
@@ -414,8 +402,9 @@ TEST_F(JoinPredicateEstimatorFixture, NDVCompoundJoinKey) {
     graph.addSimpleEqualityEdge(aNodeId, bNodeId, 2, 3);
 
     SamplingEstimatorMap samplingEstimators;
-    auto aSamplingEstimator = std::make_unique<FakeNdvEstimator>();
-    // We shoudl end up using the NDV from (foo, bar) and not from foo or bar.
+    auto aSamplingEstimator = std::make_unique<FakeNdvEstimator>(
+        CardinalityEstimate{CardinalityType{10}, EstimationSource::Sampling});
+    // We should end up using the NDV from (foo, bar) and not from foo or bar.
     aSamplingEstimator->addFakeNDVEstimate(
         {FieldPath("foo"), FieldPath("bar")},
         CardinalityEstimate{CardinalityType{5}, EstimationSource::Sampling});
@@ -424,13 +413,10 @@ TEST_F(JoinPredicateEstimatorFixture, NDVCompoundJoinKey) {
     aSamplingEstimator->addFakeNDVEstimate(
         {FieldPath("bar")}, CardinalityEstimate{CardinalityType{3}, EstimationSource::Sampling});
     samplingEstimators[aNss] = std::move(aSamplingEstimator);
-    samplingEstimators[bNss] = std::make_unique<FakeNdvEstimator>();
+    samplingEstimators[bNss] = std::make_unique<FakeNdvEstimator>(
+        CardinalityEstimate{CardinalityType{20}, EstimationSource::Sampling});
 
-    BaseTableCardinalityMap tableCards;
-    tableCards.emplace(aNss, CardinalityEstimate{CardinalityType{10}, EstimationSource::Sampling});
-    tableCards.emplace(bNss, CardinalityEstimate{CardinalityType{20}, EstimationSource::Sampling});
-
-    JoinPredicateEstimator predEstimator{graph, paths, samplingEstimators, tableCards};
+    JoinPredicateEstimator predEstimator{graph, paths, samplingEstimators};
 
     auto selEst = predEstimator.joinPredicateSel(graph.getEdge(0));
     // The selectivity estimate comes from 1 / NDV(A.foo, A.bar) = 1 / 5 = 0.2

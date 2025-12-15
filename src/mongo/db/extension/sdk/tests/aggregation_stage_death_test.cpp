@@ -391,8 +391,7 @@ DEATH_TEST_F(AggStageDeathTest, InvalidExtensionGetNextResultEOF, "10956805") {
 DEATH_TEST_F(AggStageDeathTest, InvalidMongoExtensionGetNextResultCode, "10956803") {
     ::MongoExtensionGetNextResult result = {.code =
                                                 static_cast<::MongoExtensionGetNextResultCode>(10),
-                                            .resultDocument = createEmptyByteContainer(),
-                                            .requestType = kDocumentOnly};
+                                            .resultDocument = createEmptyByteContainer()};
     [[maybe_unused]] auto converted = extension::ExtensionGetNextResult::makeFromApiResult(result);
 };
 
@@ -402,34 +401,6 @@ DEATH_TEST_F(AggStageDeathTest, InvalidGetNextCode, "10956804") {
 
     auto handle = extension::ExecAggStageHandle{invalidExtensionExecAggStageGetNextCode};
     [[maybe_unused]] auto getNext = handle.getNext(_execCtx.get());
-};
-
-DEATH_TEST_F(AggStageDeathTest, ExtensionGetNextResultAdvanceInvalidRequestTypeNone, "11357803") {
-    ::MongoExtensionGetNextResult result = {.code = ::MongoExtensionGetNextResultCode::kAdvanced,
-                                            .resultDocument = createEmptyByteContainer(),
-                                            .requestType = kNone};
-    [[maybe_unused]] auto converted =
-        extension::ExtensionGetNextResult::makeAdvancedFromApiResult(result);
-};
-
-DEATH_TEST_F(AggStageDeathTest,
-             ExtensionGetNextResultAdvanceInvalidRequestTypeMetadata,
-             "11357803") {
-    ::MongoExtensionGetNextResult result = {.code = ::MongoExtensionGetNextResultCode::kAdvanced,
-                                            .resultDocument = createEmptyByteContainer(),
-                                            .requestType = kMetadataOnly};
-    [[maybe_unused]] auto converted =
-        extension::ExtensionGetNextResult::makeAdvancedFromApiResult(result);
-};
-
-DEATH_TEST_F(AggStageDeathTest,
-             ExtensionGetNextResultAdvanceInvalidRequestTypeDocumentAndMetadata,
-             "11357803") {
-    ::MongoExtensionGetNextResult result = {.code = ::MongoExtensionGetNextResultCode::kAdvanced,
-                                            .resultDocument = createEmptyByteContainer(),
-                                            .requestType = kDocumentAndMetadata};
-    [[maybe_unused]] auto converted =
-        extension::ExtensionGetNextResult::makeAdvancedFromApiResult(result);
 };
 
 class TestLogicalStageCompileWithInvalidExtensionExecAggStageAdvancedState
@@ -529,7 +500,7 @@ public:
 
 DEATH_TEST_F(AggStageDeathTest, InvalidDPLArrayContainerVTableFailsSize, "11368301") {
     auto handle = TestDPLArrayContainerHandle{new sdk::ExtensionDPLArrayContainerAdapter(
-        std::make_unique<sdk::DPLArrayContainer>(std::vector<VariantDPLHandle>{}))};
+        sdk::DPLArrayContainer(std::vector<VariantDPLHandle>{}))};
 
     auto vtable = handle.vtable();
     vtable.size = nullptr;
@@ -538,7 +509,7 @@ DEATH_TEST_F(AggStageDeathTest, InvalidDPLArrayContainerVTableFailsSize, "113683
 
 DEATH_TEST_F(AggStageDeathTest, InvalidDPLArrayContainerVTableFailsTransfer, "11368302") {
     auto handle = TestDPLArrayContainerHandle{new sdk::ExtensionDPLArrayContainerAdapter(
-        std::make_unique<sdk::DPLArrayContainer>(std::vector<VariantDPLHandle>{}))};
+        sdk::DPLArrayContainer(std::vector<VariantDPLHandle>{}))};
 
     auto vtable = handle.vtable();
     vtable.transfer = nullptr;
@@ -557,7 +528,7 @@ DEATH_TEST_F(AggStageDeathTest, DPLArrayContainerExtensionToHostWrongSizeFails, 
     const auto size = sdkElements.size();
 
     auto sdkAdapter = std::make_unique<sdk::ExtensionDPLArrayContainerAdapter>(
-        std::make_unique<sdk::DPLArrayContainer>(std::move(sdkElements)));
+        sdk::DPLArrayContainer(std::move(sdkElements)));
 
     TestDPLArrayContainerHandle arrayContainerHandle(sdkAdapter.release());
 
@@ -568,12 +539,6 @@ DEATH_TEST_F(AggStageDeathTest, DPLArrayContainerExtensionToHostWrongSizeFails, 
     // Transfer should fail due to incorrectly sized array.
     arrayContainerHandle.transferInternal(targetArray);
 }
-
-DEATH_TEST_F(AggStageDeathTest, DPLArrayContainerAdapterNullContainerFails, "11368304") {
-    [[maybe_unused]] auto handle =
-        TestDPLArrayContainerHandle{new sdk::ExtensionDPLArrayContainerAdapter(
-            std::unique_ptr<sdk::DPLArrayContainer>(nullptr))};
-};
 
 class DistributedPlanLogicVTableDeathTest : public unittest::Test {
 public:
@@ -590,28 +555,28 @@ public:
 };
 
 DEATH_TEST_F(DistributedPlanLogicVTableDeathTest, InvalidDPLVTableFailsGetShards, "11027300") {
-    auto distributedPlanLogic = new sdk::ExtensionDistributedPlanLogicAdapter(
-        shared_test_stages::EmptyDistributedPlanLogic::make());
+    auto distributedPlanLogic =
+        new sdk::ExtensionDistributedPlanLogicAdapter(sdk::DistributedPlanLogic{});
     auto handle = TestDistributedPlanLogicVTableHandle{distributedPlanLogic};
 
     auto vtable = handle.vtable();
-    vtable.get_shards_pipeline = nullptr;
+    vtable.extract_shards_pipeline = nullptr;
     handle.assertVTableConstraints(vtable);
 };
 
 DEATH_TEST_F(DistributedPlanLogicVTableDeathTest, InvalidDPLVTableFailsGetMerging, "11027301") {
-    auto distributedPlanLogic = new sdk::ExtensionDistributedPlanLogicAdapter(
-        shared_test_stages::EmptyDistributedPlanLogic::make());
+    auto distributedPlanLogic =
+        new sdk::ExtensionDistributedPlanLogicAdapter(sdk::DistributedPlanLogic{});
     auto handle = TestDistributedPlanLogicVTableHandle{distributedPlanLogic};
 
     auto vtable = handle.vtable();
-    vtable.get_merging_pipeline = nullptr;
+    vtable.extract_merging_pipeline = nullptr;
     handle.assertVTableConstraints(vtable);
 };
 
 DEATH_TEST_F(DistributedPlanLogicVTableDeathTest, InvalidDPLVTableFailsGetSortPattern, "11027302") {
-    auto distributedPlanLogic = new sdk::ExtensionDistributedPlanLogicAdapter(
-        shared_test_stages::EmptyDistributedPlanLogic::make());
+    auto distributedPlanLogic =
+        new sdk::ExtensionDistributedPlanLogicAdapter(sdk::DistributedPlanLogic{});
     auto handle = TestDistributedPlanLogicVTableHandle{distributedPlanLogic};
 
     auto vtable = handle.vtable();
@@ -697,48 +662,20 @@ DEATH_TEST_F(AggStageDeathTest, SetSourceOnSourceStageFails, "10957210") {
 }
 
 DEATH_TEST_F(AggStageDeathTest, GetSourceOnSourceStageFails, "10957208") {
-    shared_test_stages::FruitsAsDocumentsExecAggStage sourceStage{};
+    shared_test_stages::FruitsAsDocumentsExecAggStage sourceStage{"", BSONObj()};
 
     // Calling getSource on a source stage should fail.
     [[maybe_unused]] auto source = sourceStage._getSource();
 }
 
-DEATH_TEST_F(AggStageDeathTest, CachedGetNextResultRequestMetadataFails, "11357800") {
-    auto bsonResult = BSON("meow" << "santiago");
-    exec::agg::GetNextResult hostResult((Document(bsonResult)));
-    host_connector::CachedGetNextResult cachedResult(std::move(hostResult));
+DEATH_TEST_F(AggStageDeathTest, GetNameOnMovedHandleFails, "10596403") {
+    auto sourceHandle = extension::ExecAggStageHandle{new extension::sdk::ExtensionExecAggStage(
+        shared_test_stages::AddFruitsToDocumentsExecAggStage::make())};
 
-    ::MongoExtensionGetNextResult extensionGetNext =
-        createDefaultExtensionGetNext(::MongoExtensionGetNextRequestType::kMetadataOnly);
-    cachedResult.getAsExtensionNextResult(extensionGetNext);
-}
+    auto sourceHandle2 = std::move(sourceHandle);
 
-DEATH_TEST_F(AggStageDeathTest, CachedGetNextResultRequestDocumentAndMetadataFails, "11357800") {
-    auto bsonResult = BSON("meow" << "santiago");
-    exec::agg::GetNextResult hostResult((Document(bsonResult)));
-    host_connector::CachedGetNextResult cachedResult(std::move(hostResult));
-    ::MongoExtensionGetNextResult extensionGetNext =
-        createDefaultExtensionGetNext(::MongoExtensionGetNextRequestType::kDocumentAndMetadata);
-    cachedResult.getAsExtensionNextResult(extensionGetNext);
-}
-
-DEATH_TEST_F(AggStageDeathTest, CachedGetNextResultRequestNoneFails, "11357800") {
-    auto bsonResult = BSON("meow" << "santiago");
-    exec::agg::GetNextResult hostResult((Document(bsonResult)));
-    host_connector::CachedGetNextResult cachedResult(std::move(hostResult));
-    ::MongoExtensionGetNextResult extensionGetNext =
-        createDefaultExtensionGetNext(::MongoExtensionGetNextRequestType::kNone);
-    cachedResult.getAsExtensionNextResult(extensionGetNext);
-}
-
-DEATH_TEST_F(AggStageDeathTest, FromApiRequestTypeInvalidValueFails, "11357807") {
-    extension::ExtensionGetNextResult::fromApiRequestType(
-        static_cast<::MongoExtensionGetNextRequestType>(999));
-}
-
-DEATH_TEST_F(AggStageDeathTest, SetApiRequestTypeInvalidValueFails, "11357808") {
-    extension::ExtensionGetNextResult::setApiRequestType(
-        static_cast<extension::GetNextRequestType>(999));
+    // Calling getName on a source handle should fail.
+    [[maybe_unused]] auto source = sourceHandle.getName();
 }
 
 }  // namespace

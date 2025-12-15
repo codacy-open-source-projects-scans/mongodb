@@ -132,6 +132,22 @@ public:
      * We can support table verify.
      */
     bool supportsTableVerify() const override;
+
+    /**
+     * We can enable it only for testing purposes.
+     */
+    bool shouldDisableTransactionUpdateCoalescing() const override;
+
+    /**
+     * The minimum FCV required for disaggregated storage clusters.
+     */
+    multiversion::FeatureCompatibilityVersion getMinimumRequiredFCV() const override;
+
+
+    /**
+     * The default memory_page_max value to set on WT for the oplog in string format.
+     */
+    const char* getWTMemoryPageMaxForOplogStrValue() const override;
 };
 
 }  // namespace mongo::rss

@@ -126,7 +126,11 @@ MONGO_FAIL_POINT_DEFINE(failIndexBuildWithError);
 MONGO_FAIL_POINT_DEFINE(hangIndexBuildOnSetupBeforeTakingLocks);
 MONGO_FAIL_POINT_DEFINE(hangAbortIndexBuildByBuildUUIDAfterLocks);
 MONGO_FAIL_POINT_DEFINE(hangOnStepUpAsyncTaskBeforeCheckingCommitQuorum);
+MONGO_FAIL_POINT_DEFINE(hangIndexBuildAfterReceivingCommitIndexBuildOplogEntry);
 
+/**
+ * Aggregate metrics for index builds reported via server status.
+ */
 class IndexBuildsSSS : public ServerStatusSection {
 public:
     using ServerStatusSection::ServerStatusSection;
@@ -142,16 +146,24 @@ public:
         indexBuilds.append("killedDueToInsufficientDiskSpace",
                            killedDueToInsufficientDiskSpace.loadRelaxed());
         indexBuilds.append("failedDueToDataCorruption", failedDueToDataCorruption.loadRelaxed());
+        indexBuilds.append("failedDueToDuplicateKeyError",
+                           failedDueToDuplicateKeyError.loadRelaxed());
+        indexBuilds.append("failedDueToManualCancellation",
+                           failedDueToManualCancellation.loadRelaxed());
 
         BSONObjBuilder phases{indexBuilds.subobjStart("phases")};
         phases.append("scanCollection", scanCollection.loadRelaxed());
         phases.append("drainSideWritesTable", drainSideWritesTable.loadRelaxed());
         phases.append("waitForCommitQuorum", waitForCommitQuorum.loadRelaxed());
         phases.append("drainSideWritesTableOnCommit", drainSideWritesTableOnCommit.loadRelaxed());
-        phases.append("processConstraintsViolatonTableOnCommit",
-                      processConstraintsViolatonTableOnCommit.loadRelaxed());
+        phases.append("processConstraintsViolationTableOnCommit",
+                      processConstraintsViolationTableOnCommit.loadRelaxed());
         phases.append("commit", commit.loadRelaxed());
         phases.append("lastCommittedMillis", lastCommittedMillis.loadRelaxed());
+        phases.append("lastTimeBetweenCommitOplogAndCommitMillis",
+                      lastTimeBetweenCommitOplogAndCommitMillis.loadRelaxed());
+        phases.append("lastTimeBetweenVoteAndCommitMillis",
+                      lastTimeBetweenVoteAndCommitMillis.loadRelaxed());
         phases.done();
 
         return indexBuilds.obj();
@@ -160,17 +172,37 @@ public:
     AtomicWord<int> registered{0};
     AtomicWord<int> killedDueToInsufficientDiskSpace{0};
     AtomicWord<int> failedDueToDataCorruption{0};
+
+    // The number of times a unique index build has failed because the existing collection contains
+    // duplicate keys.
+    AtomicWord<int> failedDueToDuplicateKeyError{0};
+
+    // The number of times an index build has failed due to the user dropping the index before
+    // it is committed.
+    AtomicWord<int> failedDueToManualCancellation{0};
+
+    //
+    // Phase metrics
+    //
+
     AtomicWord<int> scanCollection{0};
     AtomicWord<int> drainSideWritesTable{0};
     AtomicWord<int> waitForCommitQuorum{0};
     AtomicWord<int> drainSideWritesTableOnCommit{0};
-    AtomicWord<int> processConstraintsViolatonTableOnCommit{0};
+    AtomicWord<int> processConstraintsViolationTableOnCommit{0};
     AtomicWord<int> commit{0};
+
     // The duration of the last committed index build.
     AtomicWord<int64_t> lastCommittedMillis{0};
+    // The duration between receiving the commitIndexBuild oplog entry and committing the index
+    // build.
+    AtomicWord<int64_t> lastTimeBetweenCommitOplogAndCommitMillis;
+    // The duration between voting to commit and committing the index build.
+    AtomicWord<int64_t> lastTimeBetweenVoteAndCommitMillis;
 };
 
-auto& indexBuildsSSS = *ServerStatusSectionBuilder<IndexBuildsSSS>("indexBuilds").forShard();
+IndexBuildsSSS& indexBuildsSSS =
+    *ServerStatusSectionBuilder<IndexBuildsSSS>("indexBuilds").forShard();
 
 constexpr StringData kCreateIndexesFieldName = "createIndexes"_sd;
 constexpr StringData kCommitIndexBuildFieldName = "commitIndexBuild"_sd;
@@ -547,6 +579,37 @@ void storeLastCommittedDuration(const ReplIndexBuildState& replState) {
     const auto elapsedTime = (now - metrics.startTime).count();
     indexBuildsSSS.lastCommittedMillis.store(elapsedTime);
 }
+
+/**
+ * Stores the time at which which we voted to commit an index build.
+ */
+void storeLastTimeBetweenVoteAndCommitMillis(const ReplIndexBuildState& replState) {
+    const auto metrics = replState.getIndexBuildMetrics();
+    if (metrics.voteCommitTime == Date_t::min()) {
+        // It's possible that this node skipped voting for commit quorum (e.g, this was a single
+        // phase index build, or the commit quorum was disabled). In this case, return early to
+        // avoid storing a nonsensical duration.
+        return;
+    }
+    const auto now = Date_t::now();
+    const auto elapsedTime = (now - metrics.voteCommitTime).count();
+    indexBuildsSSS.lastTimeBetweenVoteAndCommitMillis.store(elapsedTime);
+}
+
+/**
+ * Stores the duration between receiving the `commitIndexBuild` oplog entry and committing the
+ */
+void storeLastTimeBetweenCommitOplogAndCommit(const ReplIndexBuildState& replState) {
+    const auto metrics = replState.getIndexBuildMetrics();
+    const auto now = Date_t::now();
+    tassert(11436300,
+            "commitIndexOplogEntryTime was not set before setting "
+            "lastTimeBetweenCommitOplogAndCommitMillis",
+            metrics.commitIndexOplogEntryTime != Date_t::min());
+    const auto elapsedTime = (now - metrics.commitIndexOplogEntryTime).count();
+    indexBuildsSSS.lastTimeBetweenCommitOplogAndCommitMillis.store(elapsedTime);
+}
+
 }  // namespace
 
 const auto getIndexBuildsCoord =
@@ -1016,7 +1079,8 @@ void IndexBuildsCoordinator::abortAllIndexBuildsDueToDiskSpace(OperationContext*
                            availableBytes,
                            requiredBytes));
     for (auto&& replState : builds) {
-        // Signals the index build to abort iself, which may involve signalling the current primary.
+        // Signals the index build to abort itself, which may involve signalling the current
+        // primary.
         if (forceSelfAbortIndexBuild(opCtx, replState, abortStatus)) {
             // Increase metrics only if the build was actually aborted by the above call.
             indexBuildsSSS.killedDueToInsufficientDiskSpace.addAndFetch(1);
@@ -1252,7 +1316,8 @@ void IndexBuildsCoordinator::applyCommitIndexBuild(OperationContext* opCtx,
     }
     auto replState = uassertStatusOK(swReplState);
     replState->setMultikey(std::move(oplogEntry.multikey));
-
+    replState->setReceivedCommitIndexBuildEntryTime(Date_t::now());
+    hangIndexBuildAfterReceivingCommitIndexBuildOplogEntry.pauseWhileSet(opCtx);
     // Retry until we are able to put the index build in the kApplyCommitOplogEntry state. None of
     // the conditions for retrying are common or expected to be long-lived, so we believe this to be
     // safe to poll at this frequency.
@@ -1268,6 +1333,7 @@ void IndexBuildsCoordinator::applyCommitIndexBuild(OperationContext* opCtx,
           "buildUUID"_attr = buildUUID,
           "waitResult"_attr = waitStatus,
           "status"_attr = buildStatus);
+    storeLastTimeBetweenCommitOplogAndCommit(*replState);
 
     // Throws if there was an error building the index.
     fut.get();
@@ -1374,6 +1440,7 @@ boost::optional<UUID> IndexBuildsCoordinator::abortIndexBuildByIndexNames(
                                        replState->buildUUID,
                                        IndexBuildAction::kPrimaryAbort,
                                        Status{ErrorCodes::IndexBuildAborted, reason})) {
+            indexBuildsSSS.failedDueToManualCancellation.addAndFetch(1);
             buildUUID = replState->buildUUID;
         }
     };
@@ -3593,14 +3660,18 @@ IndexBuildsCoordinator::CommitResult IndexBuildsCoordinator::_insertKeysFromSide
         // can be called for two-phase builds in all replication states except during initial sync
         // when this node is not guaranteed to be consistent.
         if (replState->getGenerateTableWrites()) {
-            indexBuildsSSS.processConstraintsViolatonTableOnCommit.addAndFetch(1);
+            indexBuildsSSS.processConstraintsViolationTableOnCommit.addAndFetch(1);
             bool twoPhaseAndNotInitialSyncing =
                 IndexBuildProtocol::kTwoPhase == replState->protocol &&
                 !replCoord->getMemberState().startup2();
             if (IndexBuildProtocol::kSinglePhase == replState->protocol ||
                 twoPhaseAndNotInitialSyncing) {
-                uassertStatusOK(_indexBuildsManager.checkIndexConstraintViolations(
-                    opCtx, collection.get(), replState->buildUUID));
+                if (auto status = _indexBuildsManager.checkIndexConstraintViolations(
+                        opCtx, collection.get(), replState->buildUUID);
+                    !status.isOK()) {
+                    indexBuildsSSS.failedDueToDuplicateKeyError.addAndFetch(1);
+                    uassertStatusOK(status);
+                }
             }
         }
 
@@ -3711,6 +3782,7 @@ IndexBuildsCoordinator::CommitResult IndexBuildsCoordinator::_insertKeysFromSide
           "indexesBuilt"_attr = toIndexNames(replState->getIndexes()),
           "numIndexesBefore"_attr = replState->stats.numIndexesBefore,
           "numIndexesAfter"_attr = replState->stats.numIndexesAfter);
+    storeLastTimeBetweenVoteAndCommitMillis(*replState);
     return CommitResult::kSuccess;
 }
 
@@ -3756,8 +3828,12 @@ StatusWith<std::pair<long long, long long>> IndexBuildsCoordinator::_runIndexReb
             RecoveryUnit::ReadSource::kNoTimestamp,
             IndexBuildInterceptor::DrainYieldPolicy::kNoYield));
 
-        uassertStatusOK(_indexBuildsManager.checkIndexConstraintViolations(
-            opCtx, collection.get(), replState->buildUUID));
+        if (auto status = _indexBuildsManager.checkIndexConstraintViolations(
+                opCtx, collection.get(), replState->buildUUID);
+            !status.isOK()) {
+            indexBuildsSSS.failedDueToDuplicateKeyError.addAndFetch(1);
+            uassertStatusOK(status);
+        }
 
         // Commit the index build.
         uassertStatusOK(_indexBuildsManager.commitIndexBuild(opCtx,

@@ -52,6 +52,7 @@
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
 #include <list>
@@ -67,7 +68,7 @@ namespace mongo {
 /**
  * Specialized version of the MongoDInterface when this node is a shard server.
  */
-class ShardServerProcessInterface final : public CommonMongodProcessInterface {
+class MONGO_MOD_PUBLIC ShardServerProcessInterface final : public CommonMongodProcessInterface {
 public:
     using CommonMongodProcessInterface::CommonMongodProcessInterface;
 
@@ -114,11 +115,11 @@ public:
         const Document& documentKey,
         boost::optional<BSONObj> readConcern) final;
 
-    Status insert(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                  const NamespaceString& ns,
-                  std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
-                  const WriteConcernOptions& wc,
-                  boost::optional<OID> targetEpoch) final;
+    InsertResult insert(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                        const NamespaceString& ns,
+                        std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
+                        const WriteConcernOptions& wc,
+                        boost::optional<OID> targetEpoch) final;
 
     StatusWith<UpdateResult> update(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                     const NamespaceString& ns,
@@ -203,11 +204,11 @@ public:
                               const BSONObj& cmdObj,
                               const TimeseriesOptions& userOpts) final;
 
-    Status insertTimeseries(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                            const NamespaceString& ns,
-                            std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
-                            const WriteConcernOptions& wc,
-                            boost::optional<OID> targetEpoch) final;
+    InsertResult insertTimeseries(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                  const NamespaceString& ns,
+                                  std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
+                                  const WriteConcernOptions& wc,
+                                  boost::optional<OID> targetEpoch) final;
 
     std::vector<DatabaseName> getAllDatabases(OperationContext* opCtx,
                                               boost::optional<TenantId> tenantId) final;

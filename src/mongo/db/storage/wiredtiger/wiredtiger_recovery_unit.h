@@ -117,9 +117,19 @@ public:
 
     Timestamp getPrepareTimestamp() const override;
 
+    void setPreparedId(uint64_t preparedId) override;
+
+    boost::optional<uint64_t> getPreparedId() const override;
+
+    void setRollbackTimestamp(Timestamp timestamp) override;
+
+    Timestamp getRollbackTimestamp() const override;
+
     void setPrepareConflictBehavior(PrepareConflictBehavior behavior) override;
 
     PrepareConflictBehavior getPrepareConflictBehavior() const override;
+
+    void reclaimPreparedTransactionForRecovery() override;
 
     /**
      * Set pre-fetching capabilities for this session. This allows pre-loading of a set of pages
@@ -297,6 +307,8 @@ private:
     Timestamp _commitTimestamp;
     Timestamp _durableTimestamp;
     Timestamp _prepareTimestamp;
+    boost::optional<uint64_t> _preparedId;
+    Timestamp _rollbackTimestamp;
     boost::optional<Timestamp> _lastTimestampSet;
     Timestamp _readAtTimestamp;
     UntimestampedWriteAssertionLevel _untimestampedWriteAssertionLevel =

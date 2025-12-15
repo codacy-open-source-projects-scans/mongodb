@@ -29,30 +29,23 @@
 
 #include "mongo/db/extension/shared/handle/aggregation_stage/logical.h"
 
+#include "mongo/db/extension/shared/explain_utils.h"
 #include "mongo/db/extension/shared/extension_status.h"
+#include "mongo/db/extension/shared/handle/aggregation_stage/distributed_plan_logic.h"
 #include "mongo/db/extension/shared/handle/aggregation_stage/executable_agg_stage.h"
 #include "mongo/db/extension/shared/handle/byte_buf_handle.h"
 
-namespace {
-::MongoExtensionExplainVerbosity convertHostVerbosityToExtVerbosity(
-    mongo::ExplainOptions::Verbosity hostVerbosity) {
-    switch (hostVerbosity) {
-        case mongo::ExplainOptions::Verbosity::kQueryPlanner:
-            return ::MongoExtensionExplainVerbosity::kQueryPlanner;
-        case mongo::ExplainOptions::Verbosity::kExecStats:
-            return ::MongoExtensionExplainVerbosity::kExecStats;
-        case mongo::ExplainOptions::Verbosity::kExecAllPlans:
-            return ::MongoExtensionExplainVerbosity::kExecAllPlans;
-        default:
-            MONGO_UNREACHABLE_TASSERT(11239404);
-    }
-}
-}  // namespace
-
 namespace mongo::extension {
 
+StringData LogicalAggStageHandle::getName() const {
+    assertValid();
+    auto stringView = byteViewAsStringView(vtable().get_name(get()));
+    return StringData{stringView.data(), stringView.size()};
+}
+
 BSONObj LogicalAggStageHandle::serialize() const {
-    ::MongoExtensionByteBuf* buf;
+    assertValid();
+    ::MongoExtensionByteBuf* buf{nullptr};
     invokeCAndConvertStatusToException([&]() { return vtable().serialize(get(), &buf); });
 
     tassert(11173700,
@@ -67,7 +60,8 @@ BSONObj LogicalAggStageHandle::serialize() const {
 }
 
 BSONObj LogicalAggStageHandle::explain(mongo::ExplainOptions::Verbosity verbosity) const {
-    ::MongoExtensionByteBuf* buf;
+    assertValid();
+    ::MongoExtensionByteBuf* buf{nullptr};
     auto extVerbosity = convertHostVerbosityToExtVerbosity(verbosity);
     invokeCAndConvertStatusToException(
         [&]() { return vtable().explain(get(), extVerbosity, &buf); });
@@ -82,10 +76,20 @@ BSONObj LogicalAggStageHandle::explain(mongo::ExplainOptions::Verbosity verbosit
 }
 
 ExecAggStageHandle LogicalAggStageHandle::compile() const {
+    assertValid();
     ::MongoExtensionExecAggStage* execAggStage{nullptr};
     invokeCAndConvertStatusToException([&]() { return vtable().compile(get(), &execAggStage); });
 
     return ExecAggStageHandle(execAggStage);
+}
+
+DistributedPlanLogicHandle LogicalAggStageHandle::getDistributedPlanLogic() const {
+    assertValid();
+    ::MongoExtensionDistributedPlanLogic* dpl{nullptr};
+    invokeCAndConvertStatusToException(
+        [&]() { return vtable().get_distributed_plan_logic(get(), &dpl); });
+
+    return DistributedPlanLogicHandle(dpl);
 }
 
 }  // namespace mongo::extension

@@ -87,16 +87,24 @@ last-continuous:
       ticket: SERVER-113468
     - test_file: jstests/sharding/disable_resumable_range_deleter.js
       ticket: SERVER-112357
+    - test_file: jstests/noPassthrough/query/agg/sort_group_to_distinct_scan.js
+      ticket: SERVER-113145
     - test_file: jstests/aggregation/accumulators/accumulator_js_size_limits.js
       ticket: SERVER-112267
     - test_file: jstests/sharding/resharding_error_during_critical_section.js
       ticket: SERVER-114005
     - test_file: jstests/sharding/move_collection_stale_mongos.js
       ticket: SERVER-109322
+    - test_file: jstests/core_sharding/ddl/cannot_track_temporary_collection.js
+      ticket: SERVER-114666
     - test_file: jstests/sharding/unshard_collection_stale_mongos.js
       ticket: SERVER-109322
     - test_file: jstests/sharding/reshard_collection_with_zones_stale_mongos.js
       ticket: SERVER-109322
+    - test_file: jstests/core/query/regex/regex_max_pattern_length.js
+      ticket: SERVER-86326
+    - test_file: jstests/core/query/boolean_simplifier_stress.js
+      ticket: SERVER-114126
   suites: null
 last-lts:
   all:
@@ -684,6 +692,8 @@ last-lts:
       ticket: SERVER-113468
     - test_file: jstests/sharding/disable_resumable_range_deleter.js
       ticket: SERVER-112357
+    - test_file: jstests/noPassthrough/query/agg/sort_group_to_distinct_scan.js
+      ticket: SERVER-113145
     - test_file: jstests/aggregation/accumulators/accumulator_js_size_limits.js
       ticket: SERVER-112267
     - test_file: jstests/concurrency/fsm_workloads/timeseries/timeseries_create_indexes.js
@@ -692,8 +702,14 @@ last-lts:
       ticket: SERVER-114005
     - test_file: jstests/sharding/move_collection_stale_mongos.js
       ticket: SERVER-109322
+    - test_file: jstests/core_sharding/ddl/cannot_track_temporary_collection.js
+      ticket: SERVER-114666
     - test_file: jstests/sharding/unshard_collection_stale_mongos.js
       ticket: SERVER-109322
     - test_file: jstests/sharding/reshard_collection_with_zones_stale_mongos.js
       ticket: SERVER-109322
+    - test_file: jstests/core/query/regex/regex_max_pattern_length.js
+      ticket: SERVER-86326
+    - test_file: jstests/core/query/boolean_simplifier_stress.js
+      ticket: SERVER-114126
   suites: null

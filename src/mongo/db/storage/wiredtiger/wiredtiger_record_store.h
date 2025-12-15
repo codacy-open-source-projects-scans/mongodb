@@ -104,6 +104,10 @@ public:
         bool logEnabled{true};
         // This specifies the value for the block_compressor configuration parameter.
         std::string blockCompressor{"snappy"};
+        // Max memory page size.
+        // Setting this larger than 10m can hurt latencies and throughput degradation if this
+        // is the oplog. See SERVER-16247.
+        std::string memoryPageMax{"10M"};
         // Any additional configuration parameters for WT_SESSION::create() in the configuration
         // string format.
         std::string extraCreateOptions;
@@ -317,7 +321,8 @@ protected:
                                               const RecordId&,
                                               const RecordData&,
                                               const char* damageSource,
-                                              const DamageVector&) override;
+                                              const DamageVector&,
+                                              const SeekableRecordCursor*) override;
 
     Status _truncate(OperationContext*, RecoveryUnit&) override;
 
@@ -574,6 +579,14 @@ public:
                                 RecoveryUnit& ru,
                                 const WiredTigerRecordStore& rs,
                                 bool forward);
+    WT_CURSOR* get() const {
+        tassert(10522600, "unexpected null cursor", _cursor);
+        return _cursor->get();
+    }
+
+    WT_CURSOR* operator->() const {
+        return get();
+    }
 };
 
 /**

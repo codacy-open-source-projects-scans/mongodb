@@ -148,12 +148,12 @@ class SetSteadyStateConstraints : public T {
 protected:
     void setUp() override {
         T::setUp();
-        _constraintsEnabled = oplogApplicationEnforcesSteadyStateConstraints;
-        oplogApplicationEnforcesSteadyStateConstraints = enable;
+        _constraintsEnabled = oplogApplicationEnforcesSteadyStateConstraints.load();
+        oplogApplicationEnforcesSteadyStateConstraints.store(enable);
     }
 
     void tearDown() override {
-        oplogApplicationEnforcesSteadyStateConstraints = _constraintsEnabled;
+        oplogApplicationEnforcesSteadyStateConstraints.store(_constraintsEnabled);
         T::tearDown();
     }
 
@@ -1229,6 +1229,80 @@ DEATH_TEST_F(OplogApplierImplTestDeathTest,
     oplogApplier.applyOplogBatch(_opCtx.get(), {}).getStatus().ignore();
 }
 
+DEATH_TEST_F(OplogApplierImplTestDeathTest, ApplyOpsRidOnNonRridCollectionGrouped, "11454702") {
+    auto nss = NamespaceString::createNamespaceString_forTest(
+        "test.ApplyOpsRidOnNonRridCollectionGrouped");
+    createCollection(_opCtx.get(), nss, {});
+
+    auto op1 = makeInsertDocumentOplogEntry({Timestamp(Seconds(1), 1), 1LL}, nss, BSON("_id" << 1));
+
+    MutableOplogEntry op2Mutable;
+    op2Mutable.setOpType(OpTypeEnum::kInsert);
+    op2Mutable.setNss(nss);
+    op2Mutable.setObject(BSON("_id" << 2));
+    op2Mutable.setObject2(BSON("_id" << 2));
+    op2Mutable.setOpTime({Timestamp(Seconds(1), 2), 1LL});
+    op2Mutable.setRecordId(RecordId(2));
+    op2Mutable.setWallClockTime(Date_t::now());
+    auto op2 = OplogEntry(op2Mutable.toBSON());
+
+    std::vector<ApplierOperation> ops = {ApplierOperation{&op1}, ApplierOperation{&op2}};
+    OplogEntryOrGroupedInserts groupedInserts(ops.begin(), ops.end());
+
+    UNIT_TEST_INTERNALS_IGNORE_UNUSED_RESULT_WARNINGS(_applyOplogEntryOrGroupedInsertsWrapper(
+        _opCtx.get(), groupedInserts, OplogApplication::Mode::kApplyOpsCmd));
+}
+
+DEATH_TEST_F(OplogApplierImplTestDeathTest, SteadyStateRidOnNonRridCollectionGrouped, "11454703") {
+    auto nss = NamespaceString::createNamespaceString_forTest(
+        "test.SteadyStateRidOnNonRridCollectionGrouped");
+    createCollection(_opCtx.get(), nss, {});
+
+    auto op1 = makeInsertDocumentOplogEntry({Timestamp(Seconds(1), 1), 1LL}, nss, BSON("_id" << 1));
+
+    MutableOplogEntry op2Mutable;
+    op2Mutable.setOpType(OpTypeEnum::kInsert);
+    op2Mutable.setNss(nss);
+    op2Mutable.setObject(BSON("_id" << 2));
+    op2Mutable.setObject2(BSON("_id" << 2));
+    op2Mutable.setOpTime({Timestamp(Seconds(1), 2), 1LL});
+    op2Mutable.setRecordId(RecordId(2));
+    op2Mutable.setWallClockTime(Date_t::now());
+    auto op2 = OplogEntry(op2Mutable.toBSON());
+
+    std::vector<ApplierOperation> ops = {ApplierOperation{&op1}, ApplierOperation{&op2}};
+    OplogEntryOrGroupedInserts groupedInserts(ops.begin(), ops.end());
+
+    UNIT_TEST_INTERNALS_IGNORE_UNUSED_RESULT_WARNINGS(_applyOplogEntryOrGroupedInsertsWrapper(
+        _opCtx.get(), groupedInserts, OplogApplication::Mode::kSecondary));
+}
+
+DEATH_TEST_F(OplogApplierImplTestDeathTest, SteadyStateNoRidOnRridCollectionGrouped, "11454703") {
+    auto nss = NamespaceString::createNamespaceString_forTest(
+        "test.SteadyStateNoRidOnRridCollectionGrouped");
+    CollectionOptions options;
+    options.recordIdsReplicated = true;
+    createCollection(_opCtx.get(), nss, options);
+
+    MutableOplogEntry op1Mutable;
+    op1Mutable.setOpType(OpTypeEnum::kInsert);
+    op1Mutable.setNss(nss);
+    op1Mutable.setObject(BSON("_id" << 1));
+    op1Mutable.setObject2(BSON("_id" << 1));
+    op1Mutable.setOpTime({Timestamp(Seconds(1), 1), 1LL});
+    op1Mutable.setRecordId(RecordId(1));
+    op1Mutable.setWallClockTime(Date_t::now());
+    auto op1 = OplogEntry(op1Mutable.toBSON());
+
+    auto op2 = makeInsertDocumentOplogEntry({Timestamp(Seconds(1), 2), 1LL}, nss, BSON("_id" << 2));
+
+    std::vector<ApplierOperation> ops = {ApplierOperation{&op1}, ApplierOperation{&op2}};
+    OplogEntryOrGroupedInserts groupedInserts(ops.begin(), ops.end());
+
+    UNIT_TEST_INTERNALS_IGNORE_UNUSED_RESULT_WARNINGS(_applyOplogEntryOrGroupedInsertsWrapper(
+        _opCtx.get(), groupedInserts, OplogApplication::Mode::kSecondary));
+}
+
 bool _testOplogEntryIsForCappedCollection(OperationContext* opCtx,
                                           ReplicationCoordinator* const replCoord,
                                           ReplicationConsistencyMarkers* const consistencyMarkers,
@@ -1355,6 +1429,110 @@ TEST_F(OplogApplierImplTest,
                   secondDerivedOp.getObject()["txnNum"].numberInt());
     ASSERT_EQUALS(NamespaceString::kSessionTransactionsTableNamespace, secondDerivedOp.getNss());
     ASSERT_EQUALS(secondInsertOpTime.getTimestamp(),
+                  secondDerivedOp.getObject()["lastWriteOpTime"]["ts"].timestamp());
+}
+
+TEST_F(OplogApplierImplTest, TxnTableUpdatesGetCoalescedForRetryableWritesWithSameTxnNumber) {
+    const NamespaceString& nss = NamespaceString::createNamespaceString_forTest("test", "foo");
+    const auto sessionId = makeLogicalSessionIdForTest();
+    std::vector<OplogEntry> insertOps;
+    insertOps.push_back(
+        makeInsertDocumentOplogEntryWithSessionInfoAndStmtIds({Timestamp(Seconds(1), 2), 1LL},
+                                                              nss,
+                                                              kUuid,
+                                                              BSON("_id" << 0),
+                                                              sessionId,
+                                                              1,
+                                                              {StmtId(0)},
+                                                              OpTime()));
+    insertOps.push_back(
+        makeInsertDocumentOplogEntryWithSessionInfoAndStmtIds({Timestamp(Seconds(5), 2), 1LL},
+                                                              nss,
+                                                              kUuid,
+                                                              BSON("_id" << 1),
+                                                              sessionId,
+                                                              1,
+                                                              {StmtId(1)},
+                                                              insertOps[0].getOpTime()));
+    auto workerPool = makeReplWorkerPool();
+    NoopOplogApplierObserver observer;
+    OplogApplierImpl oplogApplier(
+        nullptr,  // executor
+        nullptr,  // oplogBuffer
+        &observer,
+        ReplicationCoordinator::get(_opCtx.get()),
+        getConsistencyMarkers(),
+        getStorageInterface(),
+        repl::OplogApplier::Options(repl::OplogApplication::Mode::kSecondary, false),
+        workerPool.get());
+    std::vector<std::vector<ApplierOperation>> writerVectors(
+        workerPool->getStats().options.maxThreads);
+    std::vector<std::vector<OplogEntry>> derivedOps;
+    oplogApplier.fillWriterVectors_forTest(_opCtx.get(), &insertOps, &writerVectors, &derivedOps);
+
+    // We expect exactly one derived op: a coalesced entry representing the last write.
+    ASSERT_EQUALS(1, derivedOps.size());
+    ASSERT_EQUALS(1, derivedOps[0].size());
+    const auto firstDerivedOp = derivedOps[0][0];
+    ASSERT_EQUALS(*insertOps[1].getTxnNumber(), firstDerivedOp.getObject()["txnNum"].numberInt());
+    ASSERT_EQUALS(NamespaceString::kSessionTransactionsTableNamespace, firstDerivedOp.getNss());
+    ASSERT_EQUALS(insertOps[1].getTimestamp(),
+                  firstDerivedOp.getObject()["lastWriteOpTime"]["ts"].timestamp());
+}
+
+TEST_F(OplogApplierImplTest,
+       TxnTableUpdatesDoNotGetCoalescedForRetryableWritesWithDisableTransactionUpdateCoalescing) {
+    RAIIServerParameterControllerForTest ff("featureFlagDisableTransactionUpdateCoalescing", true);
+    const NamespaceString& nss = NamespaceString::createNamespaceString_forTest("test", "foo");
+    const auto sessionId = makeLogicalSessionIdForTest();
+    std::vector<OplogEntry> insertOps;
+    insertOps.push_back(
+        makeInsertDocumentOplogEntryWithSessionInfoAndStmtIds({Timestamp(Seconds(1), 2), 1LL},
+                                                              nss,
+                                                              kUuid,
+                                                              BSON("_id" << 0),
+                                                              sessionId,
+                                                              1,
+                                                              {StmtId(0)},
+                                                              OpTime()));
+    insertOps.push_back(
+        makeInsertDocumentOplogEntryWithSessionInfoAndStmtIds({Timestamp(Seconds(5), 2), 1LL},
+                                                              nss,
+                                                              kUuid,
+                                                              BSON("_id" << 1),
+                                                              sessionId,
+                                                              1,
+                                                              {StmtId(1)},
+                                                              insertOps[0].getOpTime()));
+    auto workerPool = makeReplWorkerPool();
+    NoopOplogApplierObserver observer;
+    OplogApplierImpl oplogApplier(
+        nullptr,  // executor
+        nullptr,  // oplogBuffer
+        &observer,
+        ReplicationCoordinator::get(_opCtx.get()),
+        getConsistencyMarkers(),
+        getStorageInterface(),
+        repl::OplogApplier::Options(repl::OplogApplication::Mode::kSecondary, false),
+        workerPool.get());
+    std::vector<std::vector<ApplierOperation>> writerVectors(
+        workerPool->getStats().options.maxThreads);
+    std::vector<std::vector<OplogEntry>> derivedOps;
+    oplogApplier.fillWriterVectors_forTest(_opCtx.get(), &insertOps, &writerVectors, &derivedOps);
+
+    // We expect a total of two derived operations, one corresponding to each applied op.
+    ASSERT_EQUALS(2, derivedOps.size());
+    ASSERT_EQUALS(1, derivedOps[0].size());
+    ASSERT_EQUALS(1, derivedOps[1].size());
+    const auto firstDerivedOp = derivedOps[0][0];
+    ASSERT_EQUALS(insertOps[0].getTimestamp(),
+                  firstDerivedOp.getObject()["lastWriteOpTime"]["ts"].timestamp());
+    ASSERT_EQUALS(NamespaceString::kSessionTransactionsTableNamespace, firstDerivedOp.getNss());
+    ASSERT_EQUALS(*insertOps[0].getTxnNumber(), firstDerivedOp.getObject()["txnNum"].numberInt());
+    const auto secondDerivedOp = derivedOps[1][0];
+    ASSERT_EQUALS(*insertOps[1].getTxnNumber(), secondDerivedOp.getObject()["txnNum"].numberInt());
+    ASSERT_EQUALS(NamespaceString::kSessionTransactionsTableNamespace, secondDerivedOp.getNss());
+    ASSERT_EQUALS(insertOps[1].getTimestamp(),
                   secondDerivedOp.getObject()["lastWriteOpTime"]["ts"].timestamp());
 }
 

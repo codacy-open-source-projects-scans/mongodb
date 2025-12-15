@@ -1237,7 +1237,11 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
           -> Status {
           const auto& entry = *op;
           const auto& cmd = entry.getObject();
-          const auto& ns = OplogApplication::extractNsFromCmd(entry.getNss().dbName(), cmd);
+          // for truncateRange, the full namespace including database name is in the
+          // first command element, rather than just the usual ns value without database name.
+          const auto& ns = NamespaceStringUtil::deserialize(boost::none,
+                                                            cmd.firstElement().valueStringData(),
+                                                            SerializationContext::stateDefault());
 
           const auto truncateRangeEntry = TruncateRangeOplogEntry::parse(cmd);
           writeConflictRetryWithLimit(opCtx, "applyOps_truncateRange", ns, [&] {
@@ -1507,6 +1511,37 @@ Status applyOperation_inlock(OperationContext* opCtx,
 
     const CollectionPtr& collection = collectionAcquisition.getCollectionPtr();
 
+    constexpr auto rridErrMsg =
+        "Unexpected recordId value for collection with ns: '{}', uuid: '{}', recordIdsReplicated: "
+        "'{}' when applying oplog entry: '{}'";
+    if (collection &&
+        (opType == OpTypeEnum::kInsert || opType == OpTypeEnum::kUpdate ||
+         opType == OpTypeEnum::kDelete)) {
+        if (mode == repl::OplogApplication::Mode::kApplyOpsCmd) {
+            // Only disallow applying an operation with 'rid' field on a collection not using
+            // replicated record ids.
+            tassert(11454700,
+                    fmt::format(rridErrMsg,
+                                collection->ns().toStringForErrorMsg(),
+                                collection->uuid().toString(),
+                                collection->areRecordIdsReplicated(),
+                                redact(opOrGroupedInserts.toBSON()).toString()),
+                    !op.getDurableReplOperation().getRecordId().has_value() ||
+                        collection->areRecordIdsReplicated());
+        } else {
+            // Check that the operation's 'rid' field is consistent with whether the collection is
+            // using replicated record ids.
+            tassert(11454701,
+                    fmt::format(rridErrMsg,
+                                collection->ns().toStringForErrorMsg(),
+                                collection->uuid().toString(),
+                                collection->areRecordIdsReplicated(),
+                                redact(opOrGroupedInserts.toBSON()).toString()),
+                    op.getDurableReplOperation().getRecordId().has_value() ==
+                        collection->areRecordIdsReplicated());
+        }
+    }
+
     BSONObj o = op.getObject();
 
     // The feature compatibility version in the server configuration collection must not change
@@ -1594,9 +1629,32 @@ Status applyOperation_inlock(OperationContext* opCtx,
                 // applyOps, this has the effect of preserving recordIds when applyOps is run,
                 // which is intentional.
                 for (size_t i = 0; i < insertObjs.size(); i++) {
-                    if (insertOps[i]->getDurableReplOperation().getRecordId()) {
-                        insertObjs[i].replicatedRecordId =
-                            *insertOps[i]->getDurableReplOperation().getRecordId();
+                    auto optRid = insertOps[i]->getDurableReplOperation().getRecordId();
+                    if (mode == repl::OplogApplication::Mode::kApplyOpsCmd) {
+                        // Only disallow applying an operation with 'rid' field on a collection not
+                        // using replicated record ids.
+                        tassert(11454702,
+                                fmt::format(rridErrMsg,
+                                            collection->ns().toStringForErrorMsg(),
+                                            collection->uuid().toString(),
+                                            collection->areRecordIdsReplicated(),
+                                            redact(insertOps[i]->getDurableReplOperation().toBSON())
+                                                .toString()),
+                                !optRid.has_value() || collection->areRecordIdsReplicated());
+                    } else {
+                        // Check that the operation's 'rid' field is consistent with whether the
+                        // collection is using replicated record ids.
+                        tassert(11454703,
+                                fmt::format(rridErrMsg,
+                                            collection->ns().toStringForErrorMsg(),
+                                            collection->uuid().toString(),
+                                            collection->areRecordIdsReplicated(),
+                                            redact(insertOps[i]->getDurableReplOperation().toBSON())
+                                                .toString()),
+                                optRid.has_value() == collection->areRecordIdsReplicated());
+                    }
+                    if (optRid) {
+                        insertObjs[i].replicatedRecordId = *optRid;
                     }
                 }
 
@@ -1720,7 +1778,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
                                 opObj,
                                 boost::none /* status */);
 
-                            if (oplogApplicationEnforcesSteadyStateConstraints) {
+                            if (oplogApplicationEnforcesSteadyStateConstraints.load()) {
                                 return status;
                             }
                         } else if (inStableRecovery) {
@@ -1945,7 +2003,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
 
                             // We shouldn't be doing upserts in secondary mode when enforcing steady
                             // state constraints.
-                            invariant(!oplogApplicationEnforcesSteadyStateConstraints);
+                            invariant(!oplogApplicationEnforcesSteadyStateConstraints.load());
                         } else if (inStableRecovery) {
                             repl::OplogApplication::checkOnOplogFailureForRecovery(
                                 opCtx,
@@ -2166,7 +2224,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
                                         << "Applied a delete which did not delete anything in "
                                            "steady state replication : "
                                         << redact(op.toBSONForLogging()),
-                                    !oplogApplicationEnforcesSteadyStateConstraints);
+                                    !oplogApplicationEnforcesSteadyStateConstraints.load());
                         }
                     }
                     wuow.commit();
@@ -2482,7 +2540,7 @@ Status applyCommand_inlock(OperationContext* opCtx,
                 // ephemeral entity that can be created or destroyed (if no collections exist)
                 // without an oplog entry.
                 if ((mode == OplogApplication::Mode::kSecondary &&
-                     oplogApplicationEnforcesSteadyStateConstraints &&
+                     oplogApplicationEnforcesSteadyStateConstraints.load() &&
                      status.code() != ErrorCodes::IndexNotFound &&
                      opsMapIt->first != "dropDatabase") ||
                     !curOpToApply.acceptableErrors.count(status.code())) {

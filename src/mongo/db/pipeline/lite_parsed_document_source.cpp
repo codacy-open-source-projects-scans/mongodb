@@ -40,18 +40,19 @@
 namespace mongo {
 
 using Parser = LiteParsedDocumentSource::Parser;
+using ParserMap = LiteParsedDocumentSource::ParserMap;
 
 namespace {
 
 // Empty vector used by LiteParsedDocumentSources which do not have a sub pipeline.
 inline static std::vector<LiteParsedPipeline> kNoSubPipeline = {};
 
-StringMap<LiteParsedDocumentSource::LiteParserRegistration> parserMap;
+ParserMap parserMap;
 
 }  // namespace
 
 const LiteParsedDocumentSource::LiteParserInfo&
-LiteParsedDocumentSource::LiteParserRegistration::getParser() const {
+LiteParsedDocumentSource::LiteParserRegistration::getParserInfo() const {
     // If there's no feature flag toggle, or the feature flag toggle exists and the feature is
     // enabled in this context, use the primary parser. Otherwise, use the fallback parser.
     if (_primaryParserFeatureFlag == nullptr || _primaryParserFeatureFlag->checkEnabled()) {
@@ -139,6 +140,11 @@ void LiteParsedDocumentSource::unregisterParser_forTest(const std::string& name)
     parserMap.erase(name);
 }
 
+const LiteParsedDocumentSource::LiteParserInfo& LiteParsedDocumentSource::getParserInfo_forTest(
+    const std::string& name) {
+    return parserMap.find(name)->second.getParserInfo();
+}
+
 std::unique_ptr<LiteParsedDocumentSource> LiteParsedDocumentSource::parse(
     const NamespaceString& nss, const BSONObj& spec, const LiteParserOptions& options) {
     uassert(40323,
@@ -153,17 +159,11 @@ std::unique_ptr<LiteParsedDocumentSource> LiteParsedDocumentSource::parse(
             str::stream() << "Unrecognized pipeline stage name: '" << stageName << "'",
             it != parserMap.end());
 
-    return it->second.getParser().parser(nss, specElem, options);
-}
-
-const LiteParsedDocumentSource::LiteParserInfo& LiteParsedDocumentSource::getInfo(
-    const std::string& stageName) {
-    const auto it = parserMap.find(stageName);
-    uassert(5407200,
-            str::stream() << "Unrecognized pipeline stage name: '" << stageName << "'",
-            it != parserMap.end());
-
-    return it->second.getParser();
+    auto lpInfo = it->second.getParserInfo();
+    auto lpds = lpInfo.parser(nss, specElem, options);
+    lpds->setApiStrict(lpInfo.allowedWithApiStrict);
+    lpds->setClientType(lpInfo.allowedWithClientType);
+    return lpds;
 }
 
 const std::vector<LiteParsedPipeline>& LiteParsedDocumentSource::getSubPipelines() const {
@@ -254,6 +254,10 @@ PrivilegeVector LiteParsedDocumentSourceNestedPipelines::requiredPrivilegesBasic
             &requiredPrivileges, pipeline.requiredPrivileges(isMongos, bypassDocumentValidation));
     }
     return requiredPrivileges;
+}
+
+const ParserMap& LiteParsedDocumentSource::getParserMap() {
+    return parserMap;
 }
 
 }  // namespace mongo

@@ -29,9 +29,13 @@
 
 #include "mongo/db/query/compiler/metadata/path_arrayness.h"
 
+#include "mongo/logv2/log.h"
+
 #include <stack>
 
 using namespace mongo::multikey_paths;
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo {
 
@@ -40,7 +44,10 @@ void PathArrayness::addPath(const FieldPath& path, const MultikeyComponents& mul
 }
 
 bool PathArrayness::isPathArray(const FieldPath& path) const {
-    return _root.isPathArray(path);
+    bool arrayness = _root.isPathArray(path);
+    LOGV2_DEBUG(
+        11467800, 5, "Checking path arrayness", "path"_attr = path, "isPathArray"_attr = arrayness);
+    return arrayness;
 }
 
 bool PathArrayness::TrieNode::isPathArray(const FieldPath& path) const {
@@ -121,10 +128,4 @@ void PathArrayness::TrieNode::insertPath(const FieldPath& path,
     // Recursively invoke the remaining path.
     _children.at(fieldNameToInsert).insertPath(path, multikeyPath, ++depth);
 }
-
-PathArrayness build(std::vector<IndexEntry> entries) {
-    PathArrayness root;
-    return root;
-}
-
 }  // namespace mongo

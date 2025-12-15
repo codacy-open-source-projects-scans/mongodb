@@ -123,12 +123,11 @@ public:
                              BSONObj keyPattern,
                              const MultikeyPaths& expectedMultikeyPaths) {
         const IndexCatalog* indexCatalog = collection->getIndexCatalog();
-        std::vector<const IndexDescriptor*> indexes;
+        std::vector<const IndexCatalogEntry*> indexes;
         indexCatalog->findIndexesByKeyPattern(
             _opCtx.get(), keyPattern, IndexCatalog::InclusionPolicy::kReady, &indexes);
         ASSERT_EQ(indexes.size(), 1U);
-        auto desc = indexes[0];
-        const IndexCatalogEntry* ice = indexCatalog->getEntry(desc);
+        auto ice = indexes[0];
 
         auto actualMultikeyPaths = ice->getMultikeyPaths(_opCtx.get(), collection);
         ASSERT_FALSE(actualMultikeyPaths.empty());
@@ -339,7 +338,8 @@ TEST_F(MultikeyPathsTest, PathsUpdatedOnDocumentUpdateWithDamages) {
                 collection_internal::kUpdateAllIndexes,
                 nullptr /* indexesAffected */,
                 opDebug,
-                &args);
+                &args,
+                nullptr /*cursor*/);
             ASSERT_TRUE(newDocResult.getValue().woCompare(newDoc) == 0);
             ASSERT_TRUE(newDocResult.isOK());
             wuow.commit();

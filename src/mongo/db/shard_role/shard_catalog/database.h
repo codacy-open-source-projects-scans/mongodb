@@ -40,6 +40,7 @@
 #include "mongo/db/shard_role/shard_catalog/collection_options.h"
 #include "mongo/db/shard_role/shard_catalog/virtual_collection_options.h"
 #include "mongo/util/decorable.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -49,7 +50,7 @@ namespace mongo {
  * The semantics for a const Database are that you can mutate individual collections but not add or
  * remove them.
  */
-class Database : public Decorable<Database> {
+class MONGO_MOD_PUBLIC Database : public Decorable<Database> {
 public:
     /**
      * Creates the namespace 'ns' in the database 'db' according to 'options'. If
@@ -137,25 +138,8 @@ public:
                                          const BSONObj& idIndex = BSONObj(),
                                          bool fromMigrate = false) const = 0;
 
-    /**
-     * A MODE_IX collection lock must be held for this call. Throws a WriteConflictException error
-     * if the collection already exists (say if another thread raced to create it).
-     *
-     * Surrounding writeConflictRetry loops must encompass checking that the collection exists as
-     * well as creating it. Otherwise the loop will endlessly throw WCEs: the caller must check that
-     * the collection exists to break free.
-     */
-    virtual Collection* createVirtualCollection(OperationContext* opCtx,
-                                                const NamespaceString& nss,
-                                                const CollectionOptions& opts,
-                                                const VirtualCollectionOptions& vopts) const = 0;
-
     virtual StatusWith<std::unique_ptr<CollatorInterface>> validateCollator(
         OperationContext* opCtx, CollectionOptions& opts) const = 0;
-
-    virtual Status createView(OperationContext* opCtx,
-                              const NamespaceString& viewName,
-                              const CollectionOptions& options) const = 0;
 
     /**
      * Arguments are passed by value as they otherwise would be changing as result of renaming.
@@ -166,6 +150,13 @@ public:
                                     bool stayTemp) const = 0;
 
     virtual const NamespaceString& getSystemViewsName() const = 0;
+
+    /**
+     * Create 'system.views' in a separate WriteUnitOfWork, if it does not exist.
+     * A MODE_X lock on 'system.views' must be held for this call.
+     * The caller must not be in a WriteUnitOfWork when calling this method.
+     */
+    virtual void createSystemDotViewsIfNecessary(OperationContext* opCtx) const = 0;
 };
 
 }  // namespace mongo

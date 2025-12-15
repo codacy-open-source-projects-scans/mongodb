@@ -12,13 +12,8 @@ selector:
     # This test exercises the internal behavior of $changeStream v1 and is not compatible with v2.
     - jstests/change_streams/create_event_from_chunk_migration.js
 
-    # TODO: SERVER-113247 Ensure placementHistory entries are recorded with the right timestamp.
-    - jstests/change_streams/reshard_collection_event.js
+    # TODO: SERVER-114511 re-enable this test.
     - jstests/change_streams/migrate_last_chunk_from_shard_event.js
-
-    # TODO:SERVER-113140 Report resumeToken for change streams when batchSize is 0.
-    - jstests/change_streams/report_post_batch_resume_token.js
-    - jstests/change_streams/resume_from_high_water_mark_token.js
   exclude_with_any_tags:
     # These tests would fail with "Cowardly refusing to override write concern of command: ..."
     - assumes_write_concern_unchanged

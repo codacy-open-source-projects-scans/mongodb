@@ -64,8 +64,8 @@ protected:
             operationContext(), writer.getWritableCollection(operationContext()), spec));
         wuow.commit();
 
-        return indexCatalog->getEntry(indexCatalog->findIndexByName(
-            operationContext(), spec.getStringField(IndexDescriptor::kIndexNameFieldName)));
+        return indexCatalog->findIndexByName(
+            operationContext(), spec.getStringField(IndexDescriptor::kIndexNameFieldName));
     }
 
     std::unique_ptr<IndexBuildInterceptor> createIndexBuildInterceptor(BSONObj spec) {
@@ -171,7 +171,7 @@ protected:
         return contents;
     }
 
-    const IndexDescriptor* getIndexDescriptor(const std::string& indexName) {
+    const IndexCatalogEntry* getIndexEntry(const std::string& indexName) {
         return _coll.get()->getIndexCatalog()->findIndexByName(operationContext(), indexName);
     }
 
@@ -186,15 +186,19 @@ protected:
         CatalogTestFixture::tearDown();
     }
 
+    // Reusable function which executes the test and can be run under different configurations (eg.
+    // feature flags).
+    void testSingleInsertIsSavedToSideWritesTable();
+
     boost::optional<AutoGetCollection> _coll;
 
 private:
     NamespaceString _nss = NamespaceString::createNamespaceString_forTest("testDB.interceptor");
 };
 
-TEST_F(IndexBuilderInterceptorTest, SingleInsertIsSavedToSideWritesTable) {
+void IndexBuilderInterceptorTest::testSingleInsertIsSavedToSideWritesTable() {
     auto interceptor = createIndexBuildInterceptor(fromjson("{v: 2, name: 'a_1', key: {a: 1}}"));
-    const IndexDescriptor* desc = getIndexDescriptor("a_1");
+    const auto entry = getIndexEntry("a_1");
 
     key_string::HeapBuilder ksBuilder(key_string::Version::kLatestVersion);
     ksBuilder.appendNumberLong(10);
@@ -203,7 +207,8 @@ TEST_F(IndexBuilderInterceptorTest, SingleInsertIsSavedToSideWritesTable) {
     WriteUnitOfWork wuow(operationContext());
     int64_t numKeys = 0;
     ASSERT_OK(interceptor->sideWrite(operationContext(),
-                                     desc->getEntry(),
+                                     *_coll.get(),
+                                     entry,
                                      {keyString},
                                      {},
                                      {},
@@ -221,6 +226,16 @@ TEST_F(IndexBuilderInterceptorTest, SingleInsertIsSavedToSideWritesTable) {
     ASSERT_BSONOBJ_EQ(BSON("op" << "i"
                                 << "key" << serializedKeyString),
                       sideWrites[0]);
+}
+
+TEST_F(IndexBuilderInterceptorTest, SingleInsertIsSavedToSideWritesTable) {
+    testSingleInsertIsSavedToSideWritesTable();
+}
+
+TEST_F(IndexBuilderInterceptorTest, SingleInsertIsSavedToSideWritesTablePrimaryDriven) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPrimaryDrivenIndexBuilds", true);
+    testSingleInsertIsSavedToSideWritesTable();
 }
 
 TEST_F(IndexBuilderInterceptorTest, SingleInsertIsSavedToSkippedRecordsIntRidTrackerTable) {
@@ -298,15 +313,14 @@ TEST_F(IndexBuilderInterceptorTest,
 TEST_F(IndexBuilderInterceptorTest, SingleInsertIsSavedToDuplicateKeyTable) {
     auto interceptor =
         createIndexBuildInterceptor(fromjson("{v: 2, name: 'a_1', key: {a: 1}, unique: true}"));
-    const IndexDescriptor* desc = getIndexDescriptor("a_1");
+    const auto entry = getIndexEntry("a_1");
 
     key_string::HeapBuilder ksBuilder(key_string::Version::kLatestVersion);
     ksBuilder.appendNumberLong(10);
     key_string::Value keyString(ksBuilder.release());
 
     WriteUnitOfWork wuow(operationContext());
-    ASSERT_OK(interceptor->recordDuplicateKey(
-        operationContext(), *_coll.get(), desc->getEntry(), keyString));
+    ASSERT_OK(interceptor->recordDuplicateKey(operationContext(), *_coll.get(), entry, keyString));
     wuow.commit();
 
     key_string::View keyStringView(keyString);
@@ -322,15 +336,14 @@ TEST_F(IndexBuilderInterceptorTest, SingleInsertIsSavedToDuplicateKeyTablePrimar
         "featureFlagPrimaryDrivenIndexBuilds", true);
     auto interceptor =
         createIndexBuildInterceptor(fromjson("{v: 2, name: 'a_1', key: {a: 1}, unique: true}"));
-    const IndexDescriptor* desc = getIndexDescriptor("a_1");
+    const auto entry = getIndexEntry("a_1");
 
     key_string::HeapBuilder ksBuilder(key_string::Version::kLatestVersion);
     ksBuilder.appendNumberLong(10);
     key_string::Value keyString(ksBuilder.release());
 
     WriteUnitOfWork wuow(operationContext());
-    ASSERT_OK(interceptor->recordDuplicateKey(
-        operationContext(), *_coll.get(), desc->getEntry(), keyString));
+    ASSERT_OK(interceptor->recordDuplicateKey(operationContext(), *_coll.get(), entry, keyString));
     wuow.commit();
 
     key_string::View keyStringView(keyString);
@@ -339,6 +352,117 @@ TEST_F(IndexBuilderInterceptorTest, SingleInsertIsSavedToDuplicateKeyTablePrimar
     std::string ksWithoutRid(builder.buf(), builder.len());
     auto duplicates = getDuplicateKeyTableContents(std::move(interceptor));
     ASSERT_EQ(duplicates[0], ksWithoutRid);
+}
+
+TEST_F(IndexBuilderInterceptorTest, SingleInsertIsDrainedIntoIndexPrimaryDriven) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPrimaryDrivenIndexBuilds", true);
+
+    auto interceptor = createIndexBuildInterceptor(fromjson("{v: 2, name: 'a_1', key: {a: 1}}"));
+    const auto entry = getIndexEntry("a_1");
+
+    key_string::HeapBuilder ksBuilder(key_string::Version::kLatestVersion);
+    ksBuilder.appendNumberLong(10);
+    ksBuilder.appendRecordId(RecordId{1});
+    key_string::Value keyString(ksBuilder.release());
+
+    // Set up by inserting into side write table.
+    {
+        WriteUnitOfWork wuow(operationContext());
+        int64_t numKeys = 0;
+        ASSERT_OK(interceptor->sideWrite(operationContext(),
+                                         *_coll.get(),
+                                         entry,
+                                         {keyString},
+                                         {},
+                                         {},
+                                         IndexBuildInterceptor::Op::kInsert,
+                                         &numKeys));
+        ASSERT_EQ(1, numKeys);
+        wuow.commit();
+    }
+
+    ASSERT_OK(interceptor->drainWritesIntoIndex(operationContext(),
+                                                *_coll.get(),
+                                                entry,
+                                                InsertDeleteOptions{.dupsAllowed = true},
+                                                IndexBuildInterceptor::TrackDuplicates::kNoTrack,
+                                                IndexBuildInterceptor::DrainYieldPolicy::kNoYield));
+
+    auto& ru = *shard_role_details::getRecoveryUnit(operationContext());
+    auto indexCursor = entry->accessMethod()->asSortedData()->newCursor(operationContext(), ru);
+
+    // Check that the key was inserted into the index.
+    ASSERT(indexCursor->seekForKeyString(ru, keyString.getView()));
+    ASSERT_FALSE(indexCursor->nextKeyString(ru));
+
+    // Check that the side write table is empty since the side write was removed.
+    auto sideWrites = getSideWritesTableContents(std::move(interceptor));
+    ASSERT_EQ(0, sideWrites.size());
+}
+
+TEST_F(IndexBuilderInterceptorTest, SingleDeleteIsDrainedIntoIndexPrimaryDriven) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPrimaryDrivenIndexBuilds", true);
+
+    auto interceptor = createIndexBuildInterceptor(fromjson("{v: 2, name: 'a_1', key: {a: 1}}"));
+    const auto entry = getIndexEntry("a_1");
+    auto indexAccessMethod = entry->accessMethod()->asSortedData();
+    auto& ru = *shard_role_details::getRecoveryUnit(operationContext());
+
+    key_string::HeapBuilder ksBuilder(key_string::Version::kLatestVersion);
+    ksBuilder.appendNumberLong(10);
+    ksBuilder.appendRecordId(RecordId{1});
+    key_string::Value keyString(ksBuilder.release());
+    KeyStringSet keySet;
+    keySet.insert(keyString);
+
+    // Set up by inserting into index.
+    {
+        WriteUnitOfWork wuow(operationContext());
+        int64_t numInserted = 0;
+        ASSERT_OK(indexAccessMethod->insertKeys(operationContext(),
+                                                ru,
+                                                *_coll.get(),
+                                                entry,
+                                                keySet,
+                                                InsertDeleteOptions{.dupsAllowed = true},
+                                                {},
+                                                &numInserted));
+        ASSERT_EQ(numInserted, 1);
+        wuow.commit();
+    }
+
+    // Write key removal to side write table.
+    {
+        WriteUnitOfWork wuow(operationContext());
+        int64_t numKeys = 0;
+        ASSERT_OK(interceptor->sideWrite(operationContext(),
+                                         *_coll.get(),
+                                         entry,
+                                         {keyString},
+                                         {},
+                                         {},
+                                         IndexBuildInterceptor::Op::kDelete,
+                                         &numKeys));
+        ASSERT_EQ(1, numKeys);
+        wuow.commit();
+    }
+
+    ASSERT_OK(interceptor->drainWritesIntoIndex(operationContext(),
+                                                *_coll.get(),
+                                                entry,
+                                                InsertDeleteOptions{.dupsAllowed = true},
+                                                IndexBuildInterceptor::TrackDuplicates::kNoTrack,
+                                                IndexBuildInterceptor::DrainYieldPolicy::kNoYield));
+
+    // Check that the index is now empty since the key was removed.
+    auto indexCursor = indexAccessMethod->newCursor(operationContext(), ru);
+    ASSERT_FALSE(indexCursor->nextKeyString(ru));
+
+    // Check that the side write table is empty since the side write was removed.
+    auto sideWrites = getSideWritesTableContents(std::move(interceptor));
+    ASSERT_EQ(0, sideWrites.size());
 }
 
 }  // namespace

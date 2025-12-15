@@ -31,6 +31,9 @@
 
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/compiler/optimizer/join/logical_defs.h"
+#include "mongo/util/modules.h"
+
+#include <algorithm>
 
 /** This file introduces the join optimizer's logical model. It defines classes representing a join
  * graph and its components.
@@ -49,6 +52,16 @@ constexpr size_t kMaxEdgesInJoin = std::numeric_limits<EdgeId>::max();
  * effective for the join reordering algorithm.
  */
 using NodeSet = std::bitset<kMaxNodesInJoin>;
+
+/**
+ * Creates NodeSet from the list of node ids.
+ */
+template <typename... NodeIds>
+NodeSet makeNodeSet(NodeIds... nodeIds) {
+    NodeSet nodeSet;
+    ((void)nodeSet.set(nodeIds), ...);
+    return nodeSet;
+}
 
 /** JoinNode represents a single occurrence of a collection in a query. A new join node is created
 for each time a collection appears. This ensures every instance is uniquely identified within the
@@ -87,24 +100,27 @@ struct JoinPredicate {
     /** Serializes the Join Predicate to BSON.
      */
     BSONObj toBSON() const;
+
+    friend auto operator<=>(const JoinPredicate& lhs, const JoinPredicate& rhs) = default;
 };
 
 /**
  * Represents an undirected join edge between two sets of collections.
  *
- * Only one-to-one connections are currently supported. To prepare for future many-to-many join edge
- * support, the left and right sides are defined as NodeSets.
+ * These edges support only one to one connections and considered to be the first-class citizens of
+ * the join graph, since complex not one-to-one edges cannot be used in join plan enumeration
+ * and to be stored separately with indexes >= kMaxNodesInJoin.
  */
 struct JoinEdge {
     using PredicateList = absl::InlinedVector<JoinPredicate, 2>;
 
     PredicateList predicates;
 
-    NodeSet left;
-    NodeSet right;
+    NodeId left;
+    NodeId right;
 
     NodeSet getBitset() const {
-        return left | right;
+        return makeNodeSet(left, right);
     }
 
     /** Serializes the Join Edge to BSON.
@@ -116,6 +132,23 @@ struct JoinEdge {
      * which relies on the order of the predicates of the edge, despite the edge being undirected.
      */
     JoinEdge reverseEdge() const;
+
+    /**
+     * Insert in a new predicate to the edge, it is no-op if the predicate already is presented.
+     * The function assumes that the predicate has the same orientation (left/right side) as the
+     * edge.
+     */
+    void insertPredicate(JoinPredicate pred);
+
+    /**
+     * Insert the predicates from the range ['first', 'last'), which are not yet presented in the
+     * edge. The function assumes that the predicates have the same orientation (left/right side) as
+     * the edge.
+     */
+    template <typename It>
+    void insertPredicates(It first, It last) {
+        std::for_each(first, last, [this](JoinPredicate pred) { insertPredicate(pred); });
+    }
 };
 
 /** A join graph is a logical model that represents the joins in a query. It consists of join nodes
@@ -145,9 +178,7 @@ public:
      * Returns the id of the edge or boost::none if the maximum number of join edges has been
      * reached.
      */
-    boost::optional<EdgeId> addEdge(NodeSet left,
-                                    NodeSet right,
-                                    JoinEdge::PredicateList predicates);
+    boost::optional<EdgeId> addEdge(NodeId left, NodeId right, JoinEdge::PredicateList predicates);
 
     /**
      * Adds a new edge or add predicates if the edge with the specified 'left' and 'right' exists.
@@ -157,21 +188,15 @@ public:
     boost::optional<EdgeId> addSimpleEqualityEdge(NodeId leftNode,
                                                   NodeId rightNode,
                                                   PathId leftPathId,
-                                                  PathId rightPathId);
+                                                  PathId rightPathId) {
+        return addEdge(leftNode, rightNode, {{JoinPredicate::Eq, leftPathId, rightPathId}});
+    }
 
     /**
      * Returns EdgeId of the edge that connects u and v. This check is order-independent, meaning
      * the returned edge might be (u, v) or (v, u).
      */
-    boost::optional<EdgeId> findEdge(NodeSet u, NodeSet v) const;
-
-    boost::optional<EdgeId> findSimpleEdge(NodeId u, NodeId v) const {
-        NodeSet uns{};
-        uns.set(u);
-        NodeSet vns{};
-        vns.set(v);
-        return findEdge(uns, vns);
-    }
+    boost::optional<EdgeId> findEdge(NodeId u, NodeId v) const;
 
     const JoinNode& getNode(NodeId nodeId) const {
         if constexpr (kDebugBuild) {
@@ -212,6 +237,10 @@ public:
         return toBSON().jsonString(/*format*/ ExtendedCanonicalV2_0_0, pretty);
     }
 
+    const std::vector<JoinEdge>& edges() const {
+        return _edges;
+    }
+
 private:
     /**
      * Creates a new edge with the specified 'left' and 'right' nodesets and 'predicates'. It's the
@@ -219,15 +248,12 @@ private:
      * maintains the invariant that only a single edge exists between any two node sets containing
      * the conjunction of all predicates.
      */
-    boost::optional<EdgeId> makeEdge(NodeSet left,
-                                     NodeSet right,
-                                     JoinEdge::PredicateList predicates);
+    boost::optional<EdgeId> makeEdge(NodeId left, NodeId right, JoinEdge::PredicateList predicates);
 
     std::vector<JoinNode> _nodes;
     std::vector<JoinEdge> _edges;
-    // Maps a pair of nodesets to the edge that connects them, The node sets are stored
-    // in a key in the way that the first node is smaller than the second one.
-    absl::flat_hash_map<std::pair<NodeSet, NodeSet>, EdgeId> _edgeMap;
+    // Maps a pair of nodeIds to the edge that connects them.
+    absl::flat_hash_map<NodeSet, EdgeId> _edgeMap;
 };
 
 }  // namespace mongo::join_ordering

@@ -76,6 +76,7 @@
 #include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/query/shard_key_diagnostic_printer.h"
 #include "mongo/db/query/tailable_mode_gen.h"
+#include "mongo/db/query/util/retry.h"
 #include "mongo/db/router_role/cluster_commands_helpers.h"
 #include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/server_feature_flags_gen.h"
@@ -237,7 +238,7 @@ void appendEmptyResultSetWithStatus(OperationContext* opCtx,
     if (status == ErrorCodes::ShardNotFound) {
         status = {ErrorCodes::NamespaceNotFound, status.reason()};
     }
-    collectQueryStatsMongos(opCtx, std::move(CurOp::get(opCtx)->debug().queryStatsInfo.key));
+    collectQueryStatsMongos(opCtx, std::move(CurOp::get(opCtx)->debug().getQueryStatsInfo().key));
     appendEmptyResultSet(opCtx, *result, status, nss);
 }
 
@@ -405,9 +406,9 @@ std::vector<BSONObj> patchPipelineForTimeSeriesQuery(
  */
 std::unique_ptr<Pipeline> parsePipelineAndRegisterQueryStats(
     OperationContext* opCtx,
-    const stdx::unordered_set<NamespaceString>& involvedNamespaces,
     const ClusterAggregate::Namespaces& nsStruct,
     AggregateCommandRequest& request,
+    const LiteParsedPipeline& liteParsedPipeline,
     boost::optional<CollectionRoutingInfo> cri,
     bool hasChangeStream,
     bool shouldDoFLERewrite,
@@ -440,7 +441,7 @@ std::unique_ptr<Pipeline> parsePipelineAndRegisterQueryStats(
                               nsStruct.requestedNss,
                               collationObj,
                               boost::none /* uuid */,
-                              resolveInvolvedNamespaces(involvedNamespaces),
+                              resolveInvolvedNamespaces(liteParsedPipeline.getInvolvedNamespaces()),
                               hasChangeStream,
                               verbosity,
                               collationMatchesDefault);
@@ -457,11 +458,11 @@ std::unique_ptr<Pipeline> parsePipelineAndRegisterQueryStats(
     if (resolvedView && originalRequest) {
         const auto& viewName = nsStruct.requestedNss;
         // If applicable, ensure that the resolved namespace is added to the resolvedNamespaces map
-        // on the expCtx before calling Pipeline::parse(). This is necessary for search on views as
-        // Pipeline::parse() will first check if a view exists directly on the stage specification
-        // and if none is found, will then check for the view using the expCtx. As such, it's
-        // necessary to add the resolved namespace to the expCtx prior to any call to
-        // Pipeline::parse().
+        // on the expCtx before calling parseFromLiteParsed(). This is necessary for search on views
+        // as parseFromLiteParsed() will first check if a view exists directly on the stage
+        // specification and if none is found, will then check for the view using the expCtx. As
+        // such, it's necessary to add the resolved namespace to the expCtx prior to any call to
+        // parseFromLiteParsed().
         search_helpers::checkAndSetViewOnExpCtx(
             expCtx, originalRequest->getPipeline(), *resolvedView, viewName);
 
@@ -520,7 +521,7 @@ std::unique_ptr<Pipeline> parsePipelineAndRegisterQueryStats(
         }
     }
 
-    auto pipeline = Pipeline::parse(request.getPipeline(), expCtx);
+    auto pipeline = Pipeline::parseFromLiteParsed(liteParsedPipeline, expCtx);
     if (cri && cri->hasRoutingTable()) {
         pipeline->validateWithCollectionMetadata(cri.get());
     }
@@ -532,7 +533,11 @@ std::unique_ptr<Pipeline> parsePipelineAndRegisterQueryStats(
     // Compute QueryShapeHash and record it in CurOp.
     query_shape::DeferredQueryShape deferredShape{[&]() {
         return shape_helpers::tryMakeShape<query_shape::AggCmdShape>(
-            request, nsStruct.executionNss, involvedNamespaces, *pipeline, expCtx);
+            request,
+            nsStruct.executionNss,
+            liteParsedPipeline.getInvolvedNamespaces(),
+            *pipeline,
+            expCtx);
     }};
     auto queryShapeHash = CurOp::get(opCtx)->debug().ensureQueryShapeHash(opCtx, [&]() {
         return shape_helpers::computeQueryShapeHash(expCtx, deferredShape, nsStruct.executionNss);
@@ -555,10 +560,11 @@ std::unique_ptr<Pipeline> parsePipelineAndRegisterQueryStats(
             [&]() {
                 uassertStatusOKWithContext(deferredShape->getStatus(),
                                            "Failed to compute query shape");
-                return std::make_unique<query_stats::AggKey>(expCtx,
-                                                             request,
-                                                             std::move(deferredShape->getValue()),
-                                                             std::move(involvedNamespaces));
+                return std::make_unique<query_stats::AggKey>(
+                    expCtx,
+                    request,
+                    std::move(deferredShape->getValue()),
+                    std::move(liteParsedPipeline.getInvolvedNamespaces()));
             },
             hasChangeStream);
     }
@@ -607,9 +613,9 @@ Status _parseQueryStatsAndReturnEmptyResult(
     try {
         auto pipeline =
             parsePipelineAndRegisterQueryStats(opCtx,
-                                               liteParsedPipeline.getInvolvedNamespaces(),
                                                namespaces,
                                                request,
+                                               liteParsedPipeline,
                                                boost::none /* CollectionRoutingInfo */,
                                                hasChangeStream,
                                                shouldDoFLERewrite,
@@ -670,7 +676,7 @@ Status runAggregateImpl(OperationContext* opCtx,
     auto& routingCtx = std::invoke([&]() -> RoutingContext& {
         if (originalRoutingCtx.hasNss(namespaces.executionNss)) {
             collectionTargeter = CollectionRoutingInfoTargeter(opCtx, namespaces.executionNss);
-            return translateNssForRawDataAccordingToRoutingInfo(
+            return performTimeseriesTranslationAccordingToRoutingInfo(
                 opCtx,
                 namespaces.executionNss,
                 *collectionTargeter,
@@ -746,9 +752,9 @@ Status runAggregateImpl(OperationContext* opCtx,
         [&]() -> std::tuple<std::unique_ptr<Pipeline>, boost::intrusive_ptr<ExpressionContext>> {
         auto pipeline =
             parsePipelineAndRegisterQueryStats(opCtx,
-                                               involvedNamespaces,
                                                namespaces,
                                                request,
+                                               liteParsedPipeline,
                                                cri,
                                                hasChangeStream,
                                                shouldDoFLERewrite,
@@ -978,7 +984,7 @@ Status runAggregateImpl(OperationContext* opCtx,
                     &result);
             }
             collectQueryStatsMongos(opCtx,
-                                    std::move(CurOp::get(opCtx)->debug().queryStatsInfo.key));
+                                    std::move(CurOp::get(opCtx)->debug().getQueryStatsInfo().key));
         }
 
         // Populate `result` and `req` once we know this function is not going to be implicitly
@@ -1035,7 +1041,7 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
                                 result);
     }
 
-    sharding::router::CollectionRouter router(opCtx->getServiceContext(), namespaces.executionNss);
+    sharding::router::CollectionRouter router(opCtx, namespaces.executionNss);
 
     bool isExplain = verbosity.has_value();
     if (isExplain) {
@@ -1071,7 +1077,7 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
     // Route the command and capture the returned status.
     Status status = std::invoke([&]() -> Status {
         try {
-            return router.routeWithRoutingContext(opCtx, comment, bodyFn);
+            return router.routeWithRoutingContext(comment, bodyFn);
         } catch (const DBException& ex) {
             return ex.toStatus();
         }
@@ -1136,38 +1142,31 @@ Status ClusterAggregate::retryOnViewError(OperationContext* opCtx,
                                           const NamespaceString& requestedNss,
                                           const PrivilegeVector& privileges,
                                           boost::optional<ExplainOptions::Verbosity> verbosity,
-                                          BSONObjBuilder* result,
-                                          unsigned numberRetries) {
-    if (numberRetries >= kMaxViewRetries) {
-        return Status(ErrorCodes::InternalError,
-                      "Failed to resolve view after max number of retries.");
-    }
+                                          BSONObjBuilder* result) {
+    auto body = [&](ResolvedView& currentResolvedView) {
+        auto resolvedAggRequest =
+            PipelineResolver::buildRequestWithResolvedPipeline(currentResolvedView, request);
 
-    auto resolvedAggRequest =
-        PipelineResolver::buildRequestWithResolvedPipeline(resolvedView, request);
+        result->resetToEmpty();
 
-    result->resetToEmpty();
+        if (auto txnRouter = TransactionRouter::get(opCtx)) {
+            txnRouter.onViewResolutionError(opCtx, requestedNss);
+        }
 
-    if (auto txnRouter = TransactionRouter::get(opCtx)) {
-        txnRouter.onViewResolutionError(opCtx, requestedNss);
-    }
+        // We pass both the underlying collection namespace and the view namespace here. The
+        // underlying collection namespace is used to execute the aggregation on mongoD. Any cursor
+        // returned will be registered under the view namespace so that subsequent getMore and
+        // killCursors calls against the view have access.
+        Namespaces nsStruct;
+        nsStruct.requestedNss = requestedNss;
+        nsStruct.executionNss = currentResolvedView.getNamespace();
 
-    // We pass both the underlying collection namespace and the view namespace here. The
-    // underlying collection namespace is used to execute the aggregation on mongoD. Any cursor
-    // returned will be registered under the view namespace so that subsequent getMore and
-    // killCursors calls against the view have access.
-    Namespaces nsStruct;
-    nsStruct.requestedNss = requestedNss;
-    nsStruct.executionNss = resolvedView.getNamespace();
+        uassert(ErrorCodes::OptionNotSupportedOnView,
+                "$rankFusion and $scoreFusion are unsupported on timeseries collections",
+                !(currentResolvedView.timeseries() && request.getIsHybridSearch()));
 
-    uassert(ErrorCodes::OptionNotSupportedOnView,
-            "$rankFusion and $scoreFusion are unsupported on timeseries collections",
-            !(resolvedView.timeseries() && request.getIsHybridSearch()));
-
-    sharding::router::CollectionRouter router(opCtx->getServiceContext(), nsStruct.executionNss);
-    try {
+        sharding::router::CollectionRouter router(opCtx, nsStruct.executionNss);
         router.routeWithRoutingContext(
-            opCtx,
             "ClusterAggregate::retryOnViewError",
             [&](OperationContext* opCtx, RoutingContext& routingCtx) {
                 // For a sharded time-series collection, the routing is based on both routing table
@@ -1214,27 +1213,24 @@ Status ClusterAggregate::retryOnViewError(OperationContext* opCtx,
                                                resolvedAggRequest,
                                                LiteParsedPipeline(resolvedAggRequest, true),
                                                privileges,
-                                               boost::make_optional(resolvedView),
+                                               boost::make_optional(currentResolvedView),
                                                boost::make_optional(request),
                                                verbosity,
                                                result));
             });
-    } catch (const ExceptionFor<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>& ex) {
-        // If the underlying namespace was changed to a view during retry, then re-run the
-        // aggregation on the new resolved namespace.
-        return ClusterAggregate::retryOnViewError(opCtx,
-                                                  resolvedAggRequest,
-                                                  *ex.extraInfo<ResolvedView>(),
-                                                  requestedNss,
-                                                  privileges,
-                                                  verbosity,
-                                                  result,
-                                                  numberRetries + 1);
-    } catch (const DBException& ex) {
-        return ex.toStatus();
-    }
 
-    return Status::OK();
+        return Status::OK();
+    };
+
+    // If the underlying namespace was changed to a view during retry, then re-run the aggregation
+    // on the new resolved namespace.
+    auto onError = [&](ExceptionFor<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>& ex,
+                       ResolvedView& currentResolvedView) {
+        currentResolvedView = *ex.extraInfo<ResolvedView>();
+    };
+
+    return retryOnWithState<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>(
+        "ClusterAggregate::retryOnViewError", resolvedView, kMaxViewRetries, body, onError);
 }
 
 }  // namespace mongo

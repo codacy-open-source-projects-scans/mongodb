@@ -51,6 +51,7 @@
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
 
@@ -190,6 +191,28 @@ namespace mongo {
                                            ::mongo::getTestCommandsEnabled())
 
 /**
+ * Registers ONLY the LiteParsedDocumentSource parser, without registering a DocumentSource parser
+ * in the old parserMap.
+ *
+ * Use this macro for stages that have been migrated to use the new StageParams->DocumentSource
+ * registry (via REGISTER_STAGE_PARAMS_TO_DOCUMENT_SOURCE_MAPPING). These stages should NOT be
+ * registered in the old parserMap.
+ *
+ * Usage pattern for migrated stages:
+ *   REGISTER_LITE_PARSED_DOCUMENT_SOURCE(stageName, liteParser, allowedWithApiStrict);
+ *   REGISTER_STAGE_PARAMS_TO_DOCUMENT_SOURCE_MAPPING(stageName, kStageName, StageParams::id,
+ * mappingFn);
+ */
+#define REGISTER_LITE_PARSED_DOCUMENT_SOURCE(key, liteParser, allowedWithApiStrict)   \
+    MONGO_INITIALIZER_GENERAL(addToLiteParsedParserMap_##key,                         \
+                              ("BeginDocumentSourceRegistration"),                    \
+                              ("EndDocumentSourceRegistration"))                      \
+    (InitializerContext*) {                                                           \
+        LiteParsedDocumentSource::registerParser(                                     \
+            "$" #key, liteParser, allowedWithApiStrict, AllowedWithClientType::kAny); \
+    }
+
+/**
  * Allocates a new, unique DocumentSource::Id value.
  * Assigns it to a private variable (in an anonymous namespace) based on the given `name`, and
  * declares a const reference named `constName` to the private variable.
@@ -207,7 +230,8 @@ namespace mongo {
     const DocumentSource::Id& constName = _dsid_##name;
 
 class DocumentSource;
-using DocumentSourceContainer = std::list<boost::intrusive_ptr<DocumentSource>>;
+using DocumentSourceContainer MONGO_MOD_UNFORTUNATELY_OPEN =
+    std::list<boost::intrusive_ptr<DocumentSource>>;
 
 class Pipeline;
 
@@ -215,7 +239,7 @@ namespace exec::agg {
 class ListMqlEntitiesStage;
 }  // namespace exec::agg
 
-class DocumentSource : public RefCountable {
+class MONGO_MOD_UNFORTUNATELY_OPEN DocumentSource : public RefCountable {
 public:
     // In general a parser returns a list of DocumentSources, to accommodate "multi-stage aliases"
     // like $bucket.
@@ -270,7 +294,6 @@ public:
             }
         }
 
-        typedef std::function<bool(const DocumentSource&)> movePastFunctionType;
         // A stage which executes on each shard in parallel, or nullptr if nothing can be done in
         // parallel. For example, a partial $group before a subsequent global $group.
         boost::intrusive_ptr<DocumentSource> shardsStage = nullptr;
@@ -293,11 +316,9 @@ public:
         // If needsSplit is false and this plan has anything that must run on the merging half of
         // the pipeline, it will be deferred until the next stage that sets any non-default value on
         // 'DistributedPlanLogic' or until a following stage causes the given validation
-        // function to return false. By default this will not allow swapping with any
-        // following stages.
-        movePastFunctionType canMovePast = [](const DocumentSource&) {
-            return false;
-        };
+        // function to return false. This function defaults to unset.
+        typedef std::function<bool(const DocumentSource&)> movePastFunctionType;
+        movePastFunctionType canMovePast = {};
     };
 
     /**
@@ -416,6 +437,13 @@ public:
                           << " is not allowed with the current configuration. You may need to "
                              "enable the corresponding feature flag");
     }
+
+    /**
+     * Returns true if a stage with the given name is registered in the parserMap.
+     * Used for validation that stages are not registered in both the old and new registries.
+     * TODO SERVER-114343: Remove once parserMap no longer exists.
+     */
+    static bool isInParserMap(StringData stageName);
 
     /**
      * Registers a DocumentSource with a parsing function, so that when a stage with the given name
@@ -720,14 +748,9 @@ protected:
      * because the parserMap is not thread safe, so modifying it at runtime is unsafe.
      */
 
-    static void unregisterParser_forTest(const std::string& name);
+    MONGO_MOD_NEEDS_REPLACEMENT static void unregisterParser_forTest(const std::string& name);
 
 private:
-    static DocumentSourceContainer parseCommon(
-        const boost::intrusive_ptr<ExpressionContext>& expCtx,
-        BSONElement stageSpec,
-        StringData stageName);
-
     // Give access to 'getParserMap()' for the implementation of $listMqlEntities but hiding
     // it from all other stages.
     friend class exec::agg::ListMqlEntitiesStage;

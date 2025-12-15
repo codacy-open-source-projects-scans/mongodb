@@ -267,9 +267,8 @@ public:
         const BSONObj& originalCmdObj = opMsgRequest.body;
         const NamespaceString originalNss(parseNs(opMsgRequest.parseDbName(), originalCmdObj));
 
-        sharding::router::CollectionRouter router{opCtx->getServiceContext(), originalNss};
+        sharding::router::CollectionRouter router(opCtx, originalNss);
         return router.routeWithRoutingContext(
-            opCtx,
             "explain distinct"_sd,
             [&](OperationContext* opCtx, RoutingContext& originalRoutingCtx) {
                 // Clear the bodyBuilder since this lambda function may be retried if the router
@@ -281,7 +280,7 @@ public:
                 BSONObj cmdObj = originalCmdObj;
                 auto nss = originalNss;
                 const auto targeter = CollectionRoutingInfoTargeter(opCtx, nss);
-                auto& routingCtx = translateNssForRawDataAccordingToRoutingInfo(
+                auto& routingCtx = performTimeseriesTranslationAccordingToRoutingInfo(
                     opCtx,
                     originalNss,
                     targeter,
@@ -386,9 +385,9 @@ public:
         CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
         NamespaceString originalNss(parseNs(dbName, originalCmdObj));
         try {
-            sharding::router::CollectionRouter router{opCtx->getServiceContext(), originalNss};
+            sharding::router::CollectionRouter router(opCtx, originalNss);
             return router.routeWithRoutingContext(
-                opCtx, getName(), [&](OperationContext* opCtx, RoutingContext& originalRoutingCtx) {
+                getName(), [&](OperationContext* opCtx, RoutingContext& originalRoutingCtx) {
                     // Clear the bodyBuilder since this lambda function may be retried if the router
                     // cache is stale.
                     result.resetToEmpty();
@@ -398,7 +397,7 @@ public:
                     BSONObj cmdObj = originalCmdObj;
                     auto nss = originalNss;
                     const auto targeter = CollectionRoutingInfoTargeter(opCtx, nss);
-                    auto& routingCtx = translateNssForRawDataAccordingToRoutingInfo(
+                    auto& routingCtx = performTimeseriesTranslationAccordingToRoutingInfo(
                         opCtx,
                         originalNss,
                         targeter,
@@ -526,8 +525,10 @@ public:
                             if (shardMetrics.isABSONObj()) {
                                 auto metrics = CursorMetrics::parse(
                                     shardMetrics.Obj(), IDLParserContext("CursorMetrics"));
-                                CurOp::get(opCtx)->debug().additiveMetrics.aggregateCursorMetrics(
-                                    metrics);
+                                CurOp::get(opCtx)
+                                    ->debug()
+                                    .getAdditiveMetrics()
+                                    .aggregateCursorMetrics(metrics);
                             }
                         }
                     }
@@ -552,7 +553,7 @@ public:
 
                     CurOp::get(opCtx)->setEndOfOpMetrics(n);
                     collectQueryStatsMongos(
-                        opCtx, std::move(CurOp::get(opCtx)->debug().queryStatsInfo.key));
+                        opCtx, std::move(CurOp::get(opCtx)->debug().getQueryStatsInfo().key));
 
                     return true;
                 });
@@ -571,7 +572,7 @@ public:
             result.appendArray("values", BSONObj());
             CurOp::get(opCtx)->setEndOfOpMetrics(0);
             collectQueryStatsMongos(opCtx,
-                                    std::move(CurOp::get(opCtx)->debug().queryStatsInfo.key));
+                                    std::move(CurOp::get(opCtx)->debug().getQueryStatsInfo().key));
             return true;
         }
     }
@@ -599,8 +600,8 @@ public:
 
         // We must store the key in distinct to prevent collecting query stats when the aggregation
         // runs.
-        auto ownedQueryStatsKey = std::move(curOp->debug().queryStatsInfo.key);
-        curOp->debug().queryStatsInfo.disableForSubqueryExecution = true;
+        auto ownedQueryStatsKey = std::move(curOp->debug().getQueryStatsInfo().key);
+        curOp->debug().getQueryStatsInfo().disableForSubqueryExecution = true;
 
         // Skip privilege checking if we are in an explain.
         if (verbosity) {

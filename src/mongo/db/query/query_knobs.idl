@@ -36,6 +36,7 @@ global:
         - "mongo/db/query/query_knob_expressions.h"
         - "mongo/db/query/query_stats/query_stats_on_parameter_change.h"
         - "mongo/platform/atomic_word.h"
+    mod_visibility: public
 
 enums:
     QueryFrameworkControl:
@@ -93,6 +94,14 @@ enums:
         values:
             kBottomUp: "bottomUp"
             kRandom: "random"
+
+    JoinPlanTreeShape:
+        description: "Enum for possible join plan shapes."
+        type: string
+        values:
+            kLeftDeep: "leftDeep"
+            kRightDeep: "rightDeep"
+            kZigZag: "zigZag"
 
 structs:
     InternalQueryCutoffForSampleFromRandomCursorStorage:
@@ -370,9 +379,9 @@ server_parameters:
 
     internalPipelineLengthLimit:
         description: "The maximum length allowed for an an aggregation pipeline."
-        set_at: [startup]
+        set_at: [startup, runtime]
         cpp_varname: "internalPipelineLengthLimit"
-        cpp_vartype: int
+        cpp_vartype: AtomicWord<int>
         default:
             expr: "defaultInternalPipelineLengthLimit()"
         validator:
@@ -495,9 +504,9 @@ server_parameters:
         description: >-
             Forces planner to use multiplanning even if there is only one solution present.
             Used for testing to increase multiplanning and replanning test coverage.
-        set_at: startup
+        set_at: [startup, runtime]
         cpp_varname: "internalQueryPlannerUseMultiplannerForSingleSolutions"
-        cpp_vartype: bool
+        cpp_vartype: AtomicWord<bool>
         default: false
         redact: false
 
@@ -544,6 +553,28 @@ server_parameters:
             data: synchronized_value<JoinReorderModeEnum>
         default:
             expr: JoinReorderModeEnum::kBottomUp
+        redact: false
+
+    internalJoinPlanTreeShape:
+        description: "Picks which tree shape to use for bottom-up join enumeration (when enabled)."
+        set_at: [startup, runtime]
+        cpp_class:
+            name: JoinPlanTreeShape
+            data: synchronized_value<JoinPlanTreeShapeEnum>
+        default:
+            expr: JoinPlanTreeShapeEnum::kZigZag
+        redact: false
+
+    internalMaxNumberNodesConsideredForImplicitEdges:
+        description: >-
+            the maximum number of nodes allowed in a connected component to be used for
+            implicit edge finding."
+        set_at: [startup, runtime]
+        cpp_varname: internalMaxNumberNodesConsideredForImplicitEdges
+        cpp_vartype: AtomicWord<int>
+        default: 4
+        validator:
+            gte: 0
         redact: false
 
     internalQueryMaxPipelineRewrites:
@@ -1132,7 +1163,7 @@ server_parameters:
             If true, the explain results include 'executionTimeMicros' and
             'executionTimeNanos' fields to represent the execution time of each execution stage in
             microseconds and in nanoseconds
-        set_at: [startup]
+        set_at: [startup, runtime]
         cpp_varname: "internalMeasureQueryExecutionTimeInNanoseconds"
         cpp_vartype: AtomicWord<bool>
         default: false
@@ -1145,17 +1176,6 @@ server_parameters:
         cpp_vartype: AtomicWord<bool>
         default:
             expr: false
-        redact: false
-
-    # TODO SERVER-68341 Remove this query knob after tenancy is supported in the sharded cluster.
-    internalChangeStreamUseTenantIdForTesting:
-        description: >-
-            If true, then change streams will operate upon an internal tenant id for testing
-            purposes if the actual tenant is not provided.
-        set_at: [startup]
-        cpp_varname: "internalChangeStreamUseTenantIdForTesting"
-        cpp_vartype: AtomicWord<bool>
-        default: false
         redact: false
 
     minAllocationToShardsPollPeriodSecs:
@@ -1196,6 +1216,7 @@ server_parameters:
             If true, then ExclusionProjectionExecutor won't use fast path implementation. This
             is needed for the generational fuzzers that are sensitive to field order and other corner cases
             when switching from Document to BSONObj.
+        # This is a test-only knob and doesn't need to be set at runtime.
         set_at: [startup]
         cpp_varname: "internalQueryDisableExclusionProjectionFastPath"
         cpp_vartype: bool
@@ -1291,7 +1312,7 @@ server_parameters:
 
     internalQueryGlobalProfilingFilter:
         description: "Enables the setProfilingFilterGlobally command."
-        set_at: [startup]
+        set_at: [startup, runtime]
         cpp_varname: internalQueryGlobalProfilingFilter
         cpp_vartype: AtomicWord<bool>
         default: false
@@ -1325,8 +1346,8 @@ server_parameters:
 
     internalQueryAggMulticastTimeoutMS:
         description: "Timeout in MS for requests to shard servers when aggregations are sent to all shard servers"
-        set_at: [startup]
-        cpp_vartype: int
+        set_at: [startup, runtime]
+        cpp_vartype: AtomicWord<int>
         cpp_varname: internalQueryAggMulticastTimeoutMS
         default: 60000
         validator:
@@ -1335,8 +1356,8 @@ server_parameters:
 
     internalQueryAggMulticastMaxConcurrency:
         description: "Max number of concurrent requests when aggregations are sent to all shard servers"
-        set_at: startup
-        cpp_vartype: int
+        set_at: [startup, runtime]
+        cpp_vartype: AtomicWord<int>
         cpp_varname: internalQueryAggMulticastMaxConcurrency
         default: 100
         validator:
@@ -1445,6 +1466,14 @@ server_parameters:
         cpp_varname: internalQueryMaximumNumberOfMintermsInSimplifier
         cpp_vartype: AtomicWord<int>
         default: 1000
+        redact: false
+
+    internalQueryMaxNumPrimeImplicants:
+        description: "Threshold capping number of prime implicants generated by Petrick's method."
+        set_at: [startup, runtime]
+        cpp_varname: internalQueryMaxNumPrimeImplicants
+        cpp_vartype: AtomicWord<int>
+        default: 10000
         redact: false
 
     internalQueryMaxSizeFactorToSimplify:
@@ -1651,14 +1680,6 @@ server_parameters:
         default: false
         redact: false
 
-    internalQueryUnifiedWriteExecutor:
-        description: "Boolean flag to use the unified write executor."
-        set_at: [startup, runtime]
-        cpp_varname: "internalQueryUnifiedWriteExecutor"
-        cpp_vartype: AtomicWord<bool>
-        default: false
-        redact: false
-
     internalQueryGetMoreMaxCursorPinRetryAttempts:
         description: >-
             Max number of attempts to pin cursor by getMore command before failing in cases where
@@ -1740,14 +1761,17 @@ server_parameters:
         redact: false
 
     internalQueryPermitMatchSwappingForComplexRenames:
-        description:
-            "When enabled, the system assumes that a projection like a:'$b.c' is a renaming
+        description: >-
+            Caution! This knob is used in production and must not be removed before consulting with
+            the QO team.
+
+            When enabled, the system assumes that a projection like a:'$b.c' is a renaming
             operation. In the absence of this flag, it is possible for 'b' to be an array -- in
             which case this projection does not just rename the field but reshapes the structure
             of the document. This should be used with caution, as it will cause an incorrect rewrite
             for queries that actually wish to perform this reshaping operation. The rewrite is
             limited to field paths of length 2; a projection like a:'$b.c.d' is always treated as a
-            reshaping operation."
+            reshaping operation.
         set_at: [startup, runtime]
         cpp_varname: "internalQueryPermitMatchSwappingForComplexRenames"
         cpp_vartype: AtomicWord<bool>

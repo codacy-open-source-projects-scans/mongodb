@@ -644,6 +644,13 @@ std::vector<std::string> WiredTigerKVEngineBase::_wtGetAllIdents(WiredTigerSessi
     return all;
 }
 
+std::unique_ptr<PreparedTransactionsIterator>
+WiredTigerKVEngineBase::getUnclaimedPreparedTransactionsForStartupRecovery(
+    OperationContext* opCtx) const {
+    return std::make_unique<WiredTigerPreparedTransactionsIterator>(
+        _connection->getSession(*opCtx));
+}
+
 WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
                                        const std::string& path,
                                        ClockSource* clockSource,
@@ -1651,6 +1658,10 @@ Status WiredTigerKVEngine::_createRecordStore(const rss::PersistenceProvider& pr
     // will be used by WiredTiger.
     wtTableConfig.extraCreateOptions = str::stream()
         << _rsOptions << "," << customConfigString.getValue();
+
+    if (nss.isOplog()) {
+        wtTableConfig.memoryPageMax = provider.getWTMemoryPageMaxForOplogStrValue();
+    }
 
     std::string config = WiredTigerRecordStore::generateCreateString(
         NamespaceStringUtil::serializeForCatalog(nss), wtTableConfig, nss.isOplog());

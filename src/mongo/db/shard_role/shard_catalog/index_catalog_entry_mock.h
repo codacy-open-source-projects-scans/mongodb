@@ -29,8 +29,10 @@
 
 #pragma once
 
+#include "mongo/db/index/index_access_method.h"
 #include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
 #include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -39,16 +41,16 @@ class IndexDescriptor;
 /**
  * This class comprises a mock IndexCatalogEntry for use in unit tests.
  */
-class IndexCatalogEntryMock : public IndexCatalogEntry {
+class MONGO_MOD_NEEDS_REPLACEMENT IndexCatalogEntryMock : public IndexCatalogEntry {
 public:
     IndexCatalogEntryMock(OperationContext*,
                           const CollectionPtr&,
                           const std::string& ident,
                           IndexDescriptor&& descriptor,
-                          bool)
-        : _descriptor(descriptor), _ident(ident) {
-        _descriptor.setEntry(this);
-    }
+                          bool isFrozen,
+                          const MatchExpression* filter = nullptr,
+                          const CollatorInterface* collator = nullptr)
+        : _descriptor(descriptor), _ident(ident), _filter(filter), _collator(collator) {}
 
     const std::string& getIdent() const final {
         return _ident;
@@ -94,11 +96,11 @@ public:
     }
 
     const MatchExpression* getFilterExpression() const final {
-        return nullptr;
+        return _filter;
     }
 
     const CollatorInterface* getCollator() const final {
-        return nullptr;
+        return _collator;
     }
 
     NamespaceString getNSSFromCatalog(OperationContext* opCtx) const final {
@@ -165,6 +167,8 @@ public:
 private:
     IndexDescriptor _descriptor;
     const std::string _ident;
+    const MatchExpression* _filter;
+    const CollatorInterface* _collator;
 };
 
 }  // namespace mongo

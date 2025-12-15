@@ -212,16 +212,28 @@ const SpecificStats* UnwindStage::getSpecificStats() const {
     return nullptr;
 }
 
-std::vector<DebugPrinter::Block> UnwindStage::debugPrint() const {
-    auto ret = PlanStage::debugPrint();
+std::vector<DebugPrinter::Block> UnwindStage::debugPrint(
+    const DebugPrintInfo& debugPrintInfo) const {
+    auto ret = PlanStage::debugPrint(debugPrintInfo);
 
     DebugPrinter::addIdentifier(ret, _outField);
+    ret.emplace_back("=");
+    DebugPrinter::addKeyword(ret, "outField");
+    ret.emplace_back(DebugPrinter::Block("`,"));
+
     DebugPrinter::addIdentifier(ret, _outIndex);
+    ret.emplace_back("=");
+    DebugPrinter::addKeyword(ret, "outIndex");
+    ret.emplace_back(DebugPrinter::Block("`,"));
+
     DebugPrinter::addIdentifier(ret, _inField);
-    ret.emplace_back(_preserveNullAndEmptyArrays ? "true" : "false");
+    ret.emplace_back("=");
+    DebugPrinter::addKeyword(ret, "inField");
+    ret.emplace_back(_preserveNullAndEmptyArrays ? "_preserveNullAndEmptyArrays"
+                                                 : "!_preserveNullAndEmptyArrays");
 
     DebugPrinter::addNewLine(ret);
-    DebugPrinter::addBlocks(ret, _children[0]->debugPrint());
+    DebugPrinter::addBlocks(ret, _children[0]->debugPrint(debugPrintInfo));
 
     return ret;
 }

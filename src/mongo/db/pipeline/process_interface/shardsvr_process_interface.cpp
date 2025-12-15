@@ -204,7 +204,7 @@ boost::optional<Document> ShardServerProcessInterface::lookupSingleDocument(
         expCtx, nss, std::move(collectionUUID), documentKey, std::move(opts));
 }
 
-Status ShardServerProcessInterface::insert(
+MongoProcessInterface::InsertResult ShardServerProcessInterface::insert(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const NamespaceString& ns,
     std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
@@ -226,7 +226,20 @@ Status ShardServerProcessInterface::insert(
                    &response,
                    targetEpoch);
 
-    return response.toStatus();
+    InsertResult result;
+    if (!response.getOk()) {
+        result.push_back(response.getTopLevelStatus());
+    } else if (response.isErrDetailsSet()) {
+        result.reserve(response.getErrDetails().size());
+        for (const auto& error : response.getErrDetails()) {
+            result.push_back(error.getStatus());
+        }
+    } else if (response.isWriteConcernErrorSet()) {
+        result.push_back(response.getWriteConcernError()->toStatus());
+    } else {
+        result.push_back(Status::OK());
+    }
+    return result;
 }
 
 StatusWith<MongoProcessInterface::UpdateResult> ShardServerProcessInterface::update(
@@ -283,9 +296,8 @@ void ShardServerProcessInterface::renameIfOptionsAndIndexesHaveNotChanged(
     bool stayTemp,
     const BSONObj& originalCollectionOptions,
     const std::vector<BSONObj>& originalIndexes) {
-    sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), sourceNs.dbName());
-    router.route(opCtx,
-                 "ShardServerProcessInterface::renameIfOptionsAndIndexesHaveNotChanged",
+    sharding::router::DBPrimaryRouter router(opCtx, sourceNs.dbName());
+    router.route("ShardServerProcessInterface::renameIfOptionsAndIndexesHaveNotChanged",
                  [&](OperationContext* opCtx, const CachedDatabaseInfo& cdb) {
                      auto newCmdObj = CommonMongodProcessInterface::_convertRenameToInternalRename(
                          opCtx, sourceNs, targetNs, originalCollectionOptions, originalIndexes);
@@ -401,9 +413,8 @@ query_shape::CollectionType ShardServerProcessInterface::getCollectionType(
 std::vector<BSONObj> ShardServerProcessInterface::getIndexSpecs(OperationContext* opCtx,
                                                                 const NamespaceString& ns,
                                                                 bool includeBuildUUIDs) {
-    sharding::router::CollectionRouter router(opCtx->getServiceContext(), ns);
+    sharding::router::CollectionRouter router(opCtx, ns);
     return router.routeWithRoutingContext(
-        opCtx,
         "ShardServerProcessInterface::getIndexSpecs",
         [&](OperationContext* opCtx, RoutingContext& routingCtx) -> std::vector<BSONObj> {
             StatusWith<Shard::QueryResponse> response =
@@ -435,10 +446,9 @@ void ShardServerProcessInterface::_createCollectionCommon(OperationContext* opCt
     // TODO (SERVER-77915): Remove the FCV check and keep only the 'else' branch
     if (!feature_flags::g80CollectionCreationPath.isEnabled(
             serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-        sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), dbName);
+        sharding::router::DBPrimaryRouter router(opCtx, dbName);
         router.createDbImplicitlyOnRoute(dataShard);
-        router.route(opCtx,
-                     "ShardServerProcessInterface::_createCollectionCommon",
+        router.route("ShardServerProcessInterface::_createCollectionCommon",
                      [&](OperationContext* opCtx, const CachedDatabaseInfo& cdb) {
                          BSONObjBuilder finalCmdBuilder(cmdObj);
                          finalCmdBuilder.append(WriteConcernOptions::kWriteConcernField,
@@ -481,10 +491,9 @@ void ShardServerProcessInterface::_createCollectionCommon(OperationContext* opCt
         request.setDataShard(dataShard);
 
         shardsvrCollCommand.setShardsvrCreateCollectionRequest(request);
-        sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), dbName);
+        sharding::router::DBPrimaryRouter router(opCtx, dbName);
         router.createDbImplicitlyOnRoute(dataShard);
-        router.route(opCtx,
-                     "ShardServerProcessInterface::_createCollectionCommon",
+        router.route("ShardServerProcessInterface::_createCollectionCommon",
                      [&](OperationContext* opCtx, const CachedDatabaseInfo& cdb) {
                          cluster::createCollection(opCtx, shardsvrCollCommand);
                      });
@@ -519,9 +528,8 @@ void ShardServerProcessInterface::createTempCollection(OperationContext* opCtx,
 
 void ShardServerProcessInterface::createIndexesOnEmptyCollection(
     OperationContext* opCtx, const NamespaceString& ns, const std::vector<BSONObj>& indexSpecs) {
-    sharding::router::CollectionRouter router(opCtx->getServiceContext(), ns);
+    sharding::router::CollectionRouter router(opCtx, ns);
     router.routeWithRoutingContext(
-        opCtx,
         fmt::format("copying index for empty collection {}",
                     NamespaceStringUtil::serialize(ns, SerializationContext::stateDefault())),
         [&](OperationContext* opCtx, RoutingContext& routingCtx) {
@@ -564,10 +572,9 @@ void ShardServerProcessInterface::dropCollection(OperationContext* opCtx,
                                                  const NamespaceString& ns) {
     // Build and execute the _shardsvrDropCollection command against the primary shard of the given
     // database.
-    sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), ns.dbName());
+    sharding::router::DBPrimaryRouter router(opCtx, ns.dbName());
     try {
-        router.route(opCtx,
-                     "ShardServerProcessInterface::dropCollection",
+        router.route("ShardServerProcessInterface::dropCollection",
                      [&](OperationContext* opCtx, const CachedDatabaseInfo& cdb) {
                          ShardsvrDropCollection dropCollectionCommand(ns);
                          generic_argument_util::setMajorityWriteConcern(dropCollectionCommand,
@@ -637,7 +644,7 @@ boost::optional<TimeseriesOptions> ShardServerProcessInterface::_getTimeseriesOp
                                          IDLParserContext("TimeseriesOptions"));
 }
 
-Status ShardServerProcessInterface::insertTimeseries(
+MongoProcessInterface::InsertResult ShardServerProcessInterface::insertTimeseries(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const NamespaceString& ns,
     std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,

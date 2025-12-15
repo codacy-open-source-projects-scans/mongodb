@@ -89,6 +89,9 @@ def _impl(ctx):
                             # Do not resolve our symlinked resource prefixes to real paths. This is required to
                             # make includes resolve correctly.
                             "-no-canonical-prefixes",
+                        ] if ctx.attr.compiler == COMPILERS.CLANG else [
+                            "-no-canonical-prefixes",
+                            "-fno-canonical-system-headers",
                         ],
                     ),
                 ],
@@ -203,6 +206,33 @@ def _impl(ctx):
                     flag_group(
                         flags = ["-isystem", "%{system_include_paths}"],
                         iterate_over = "system_include_paths",
+                    ),
+                ],
+            ),
+        ],
+    )
+
+    external_include_paths_feature = feature(
+        name = "external_include_paths",
+        enabled = True,
+        flag_sets = [
+            flag_set(
+                actions = [
+                    ACTION_NAMES.preprocess_assemble,
+                    ACTION_NAMES.linkstamp_compile,
+                    ACTION_NAMES.c_compile,
+                    ACTION_NAMES.cpp_compile,
+                    ACTION_NAMES.cpp_header_parsing,
+                    ACTION_NAMES.cpp_module_compile,
+                    ACTION_NAMES.clif_match,
+                    ACTION_NAMES.objc_compile,
+                    ACTION_NAMES.objcpp_compile,
+                ],
+                flag_groups = [
+                    flag_group(
+                        flags = ["-isystem", "%{external_include_paths}"],
+                        iterate_over = "external_include_paths",
+                        expand_if_available = "external_include_paths",
                     ),
                 ],
             ),
@@ -976,8 +1006,7 @@ def _impl(ctx):
                     # Disallow an executable stack. Also, issue a warning if any files are
                     # found that would cause the stack to become executable if the
                     # noexecstack flag was not in play, so that we can find them and fix
-                    # them. We do this here after we check for ld.gold because the
-                    # --warn-execstack is currently only offered with gold.
+                    # them.
                     "-Wl,-z,noexecstack",
                     "-Wl,--warn-execstack",
 
@@ -1550,9 +1579,9 @@ def _impl(ctx):
     # build isn't the same as the correct link graph for a regular dynamic build.
     ubsan_compile_flags = []
     if not ctx.attr.fsan_enabled:
-        ubsan_compile_flags += ["-fno-sanitize=vptr"]
-    if not ctx.attr.linkstatic:
         ubsan_compile_flags += ["-fno-sanitize-recover"]
+    if not ctx.attr.linkstatic:
+        ubsan_compile_flags += ["-fno-sanitize=vptr"]
     ubsan_feature = feature(
         name = "ubsan",
         enabled = ctx.attr.ubsan_enabled,
@@ -1574,7 +1603,7 @@ def _impl(ctx):
                     flag_group(
                         flags = [
                             "-fsanitize=undefined",
-                        ] + [] if ctx.attr.linkstatic else ["-fno-sanitize=vptr"],
+                        ] + ([] if ctx.attr.linkstatic else ["-fno-sanitize=vptr"]),
                     ),
                 ],
             ),
@@ -1706,6 +1735,7 @@ def _impl(ctx):
                     "-Wno-missing-template-arg-list-after-template-kw",
                     "-Wno-sign-compare",
                     "-Wno-implicit-fallthrough",
+                    "-Wno-shorten-64-to-32",
                 ])],
             ),
         ],
@@ -1749,6 +1779,7 @@ def _impl(ctx):
         bin_dirs_feature,
         default_compile_flags_feature,
         include_paths_feature,
+        external_include_paths_feature,
         library_search_directories_feature,
         supports_dynamic_linker_feature,
         supports_start_end_lib_feature,
@@ -1910,6 +1941,7 @@ mongo_linux_cc_toolchain_config = rule(
         "coverage_enabled": attr.bool(default = False, mandatory = False),
         "compress_debug_enabled": attr.bool(default = False, mandatory = False),
         "warnings_as_errors_enabled": attr.bool(default = False, mandatory = False),
+        "global_defines": attr.string_list(mandatory = False),
     },
     provides = [CcToolchainConfigInfo],
 )

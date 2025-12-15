@@ -58,6 +58,7 @@
 #include "mongo/executor/task_executor.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 
 #include <functional>
 #include <memory>
@@ -80,7 +81,7 @@ using PipelineValidatorCallback = std::function<void(const Pipeline&)>;
  * A Pipeline object represents a list of DocumentSources and is responsible for optimizing the
  * pipeline.
  */
-class Pipeline {
+class MONGO_MOD_PUBLIC Pipeline {
 public:
     /**
      * The list of default supported match expression features.
@@ -118,20 +119,13 @@ public:
 
     /**
      * Like parse, but takes a LiteParsedPipeline instead of raw BSONObjs.
+     * If 'isFacetPipeline' is true, skips top-level validators.
      */
     static std::unique_ptr<Pipeline> parseFromLiteParsed(
         const LiteParsedPipeline& liteParsedPipeline,
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
-        PipelineValidatorCallback validator = nullptr);
-
-    /**
-     * Parses sub-pipelines from a $facet aggregation. Like parse(), but skips top-level
-     * validators.
-     */
-    static std::unique_ptr<Pipeline> parseFacetPipeline(
-        const std::vector<BSONObj>& rawPipeline,
-        const boost::intrusive_ptr<ExpressionContext>& expCtx,
-        PipelineValidatorCallback validator = nullptr);
+        PipelineValidatorCallback validator = nullptr,
+        bool isFacetPipeline = false);
 
     /**
      * Like parse, but takes a BSONElement instead of a vector of objects. 'arrElem' must be an
@@ -507,5 +501,5 @@ private:
     bool _translatedForViewlessTimeseries{false};
 };
 
-using PipelinePtr = std::unique_ptr<Pipeline>;
+using PipelinePtr MONGO_MOD_PUBLIC = std::unique_ptr<Pipeline>;
 }  // namespace mongo
