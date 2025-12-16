@@ -32,6 +32,7 @@
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/query/query_shape/let_shape_component.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
@@ -46,9 +47,29 @@ namespace mongo::query_shape {
 namespace {
 
 BSONObj shapifyQuery(const ParsedUpdate& parsedUpdate, const SerializationOptions& opts) {
-    tassert(11034203, "query is required to be parsed", parsedUpdate.hasParsedFindCommand());
-    auto matchExpr = parsedUpdate.parsedFind->filter.get();
-    return matchExpr ? matchExpr->serialize(opts) : BSONObj{};
+    // Use the already-parsed query ('q' field) if we have it to avoid re-parsing. We won't have the
+    // parsed query in the case where the 'q' field is a simple match on _id (e.g. {_id: 1}) - in
+    // this case, we'll parse the query on-the-fly so we can shapify it.
+    if (parsedUpdate.hasParsedFindCommand()) {
+        auto matchExpr = parsedUpdate.parsedFind->filter.get();
+        return matchExpr ? matchExpr->serialize(opts) : BSONObj{};
+    }
+
+    auto expCtx = ExpressionContextBuilder{}
+                      .ns(parsedUpdate.getRequest()->getNsString())
+                      .blankExpressionContext(true)
+                      .build();
+    auto swParseResult =
+        MatchExpressionParser::parse(parsedUpdate.getRequest()->getQuery(),
+                                     expCtx,
+                                     ExtensionsCallbackNoop(),
+                                     MatchExpressionParser::kAllowAllSpecialFeatures);
+    tassert(11193001,
+            str::stream() << "Failed to parse simple _id query during shapification: "
+                          << swParseResult.getStatus(),
+            swParseResult.isOK());
+
+    return swParseResult.getValue()->serialize(opts);
 }
 
 Value shapifyUpdateOp(const ParsedUpdate& parsedUpdate,
@@ -208,9 +229,7 @@ void UpdateCmdShape::appendCmdSpecificShapeComponents(BSONObjBuilder& bob,
     }
 
     auto parsedUpdate = uassertStatusOK(parsed_update_command::parse(
-        expCtx,
-        &updateRequest,
-        makeExtensionsCallback<ExtensionsCallbackReal>(opCtx, &updateRequest.getNsString())));
+        expCtx, &updateRequest, makeExtensionsCallback<ExtensionsCallbackNoop>()));
 
     UpdateCmdShapeComponents{parsedUpdate, _components.let, opts}.appendTo(bob, opts, expCtx);
 }
