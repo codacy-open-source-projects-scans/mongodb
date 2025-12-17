@@ -40,9 +40,9 @@ feature_flags:
     featureFlagSbeAccumulators:
         description: "Feature flag to enable single-purpose SBE $group accumulators."
         cpp_varname: gFeatureFlagSbeAccumulators
-        default: true
+        default: false
         fcv_gated: false
-        incremental_rollout_phase: rollout
+        incremental_rollout_phase: in_development
 
     featureFlagSbeFull:
         description:
@@ -325,6 +325,20 @@ feature_flags:
     featureFlagUnifiedWriteExecutor:
         description: "Feature flag to use the unified write executor."
         cpp_varname: "gFeatureFlagUnifiedWriteExecutor"
+        default: false
+        fcv_gated: false
+        incremental_rollout_phase: in_development
+
+    featureFlagOriginalQueryShapeHash:
+        description: "Feature flag to to pass 'originalQueryShapeHash' field in commands from router to shards."
+        cpp_varname: gFeatureFlagOriginalQueryShapeHash
+        default: true
+        version: 8.3
+        fcv_gated: true
+
+    featureFlagVectorSearchExtension:
+        description: "Feature flag to enable vector search extension functionality."
+        cpp_varname: gFeatureFlagVectorSearchExtension
         default: false
         fcv_gated: false
         incremental_rollout_phase: in_development
