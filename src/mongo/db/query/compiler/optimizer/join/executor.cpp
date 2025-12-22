@@ -157,11 +157,13 @@ StatusWith<JoinReorderedExecutorResult> getJoinReorderedExecutor(
     }
 
     // Try to build JoinGraph.
-    auto swModel =
-        AggJoinModel::constructJoinModel(pipeline,
-                                         pipeline.getContext()
-                                             ->getQueryKnobConfiguration()
-                                             .getMaxNumberNodesConsideredForImplicitEdges());
+    const auto& config = pipeline.getContext()->getQueryKnobConfiguration();
+    AggModelBuildParams buildParams{
+        .joinGraphBuildParams =
+            JoinGraphBuildParams(config.getMaxNodesInJoinGraph(), config.getMaxEdgesInJoinGraph()),
+        .maxNumberNodesConsideredForImplicitEdges =
+            config.getMaxNumberNodesConsideredForImplicitEdges()};
+    auto swModel = AggJoinModel::constructJoinModel(pipeline, buildParams);
     if (!swModel.isOK()) {
         // We failed to apply join-reordering, so we take the regular path.
         const auto status = swModel.getStatus();
@@ -219,15 +221,13 @@ StatusWith<JoinReorderedExecutorResult> getJoinReorderedExecutor(
             JoinCardinalityEstimator estimator = JoinCardinalityEstimator::make(
                 ctx, swAccessPlans.getValue().estimate, samplingEstimators);
             reordered = constructSolutionBottomUp(
-                std::move(ctx), std::move(estimator), getPlanTreeShape(qkc.getJoinPlanTreeShape()));
+                ctx, std::move(estimator), getPlanTreeShape(qkc.getJoinPlanTreeShape()));
             break;
         }
         case JoinReorderModeEnum::kRandom:
             // Randomly reorder joins.
-            reordered =
-                constructSolutionWithRandomOrder(std::move(ctx),
-                                                 qkc.getRandomJoinOrderSeed(),
-                                                 qkc.getRandomJoinReorderDefaultToHashJoin());
+            reordered = constructSolutionWithRandomOrder(
+                ctx, qkc.getRandomJoinOrderSeed(), qkc.getRandomJoinReorderDefaultToHashJoin());
             break;
         default:
             MONGO_UNREACHABLE_TASSERT(11336911);

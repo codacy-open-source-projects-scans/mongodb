@@ -35,7 +35,33 @@
 #include "mongo/db/pipeline/search/search_helper_bson_obj.h"
 #include "mongo/db/views/resolved_view.h"
 
+#include <algorithm>
+#include <iterator>
+
 namespace mongo::pipeline_factory {
+std::unique_ptr<Pipeline> makePipeline(BSONElement rawPipelineElement,
+                                       const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                       MakePipelineOptions opts) {
+    tassert(11524600,
+            "Expected array for makePipeline() with BSONElement input",
+            rawPipelineElement.type() == BSONType::array);
+    auto rawStages = rawPipelineElement.Array();
+
+    std::vector<BSONObj> rawPipeline;
+    rawPipeline.reserve(rawStages.size());
+    std::transform(rawStages.cbegin(),
+                   rawStages.cend(),
+                   std::back_inserter(rawPipeline),
+                   [](const BSONElement& el) {
+                       uassert(11524601,
+                               "Pipeline array element must be an object",
+                               el.type() == BSONType::object);
+                       return el.embeddedObject();
+                   });
+
+    return makePipeline(rawPipeline, expCtx, opts);
+}
+
 std::unique_ptr<Pipeline> makePipeline(const std::vector<BSONObj>& rawPipeline,
                                        const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                        MakePipelineOptions opts) {
@@ -134,8 +160,7 @@ std::unique_ptr<Pipeline> viewPipelineHelperForSearch(
     // (from the _id values returned by mongot), apply the view's data transforms, and pass
     // said transformed documents through the rest of the user pipeline.
     const ResolvedView resolvedView{resolvedNs.ns, std::move(resolvedNs.pipeline), BSONObj()};
-    subPipelineExpCtx->setView(
-        boost::make_optional(std::make_pair(originalNs, resolvedView.getPipeline())));
+    subPipelineExpCtx->setView(resolvedView.toViewInfo(originalNs));
 
     // return the user pipeline without appending the view stages.
     return makePipeline(currentPipeline, subPipelineExpCtx, opts);

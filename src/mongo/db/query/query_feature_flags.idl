@@ -40,9 +40,9 @@ feature_flags:
     featureFlagSbeAccumulators:
         description: "Feature flag to enable single-purpose SBE $group accumulators."
         cpp_varname: gFeatureFlagSbeAccumulators
-        default: false
+        default: true
         fcv_gated: false
-        incremental_rollout_phase: in_development
+        incremental_rollout_phase: rollout
 
     featureFlagSbeFull:
         description:
@@ -110,7 +110,8 @@ feature_flags:
             "Feature flag to enable referencing array indices in $map, $filter, and $reduce
             expressions."
         cpp_varname: gFeatureFlagExposeArrayIndexInMapFilterReduce
-        default: false
+        default: true
+        version: 8.3
         fcv_gated: true
 
     featureFlagBinDataConvertNumeric:
@@ -300,6 +301,12 @@ feature_flags:
     featureFlagQueryStatsUpdateCommand:
         description: "Feature flag to enable query stats for the write commands."
         cpp_varname: gFeatureFlagQueryStatsUpdateCommand
+        default: false
+        fcv_gated: true
+
+    featureFlagQueryStatsCBRMetrics:
+        description: "Feature flag to enable cost-based ranker metrics in query stats."
+        cpp_varname: gFeatureFlagQueryStatsCBRMetrics
         default: false
         fcv_gated: true
 

@@ -64,15 +64,17 @@ auto& changeStreamsShowExpandedEvents =
     *MetricBuilder<Counter64>{"changeStreams.showExpandedEvents"};
 }
 
-ALLOCATE_STAGE_PARAMS_ID(changeStream, ChangeStreamStageParams::id);
+REGISTER_LITE_PARSED_DOCUMENT_SOURCE(changeStream,
+                                     DocumentSourceChangeStream::LiteParsed::parse,
+                                     AllowedWithApiStrict::kConditionally);
 
 // The $changeStream stage is an alias for many stages.
-REGISTER_DOCUMENT_SOURCE(changeStream,
-                         DocumentSourceChangeStream::LiteParsed::parse,
-                         DocumentSourceChangeStream::createFromBson,
-                         AllowedWithApiStrict::kConditionally);
+REGISTER_DOCUMENT_SOURCE_CONTAINER_WITH_STAGE_PARAMS_DEFAULT(changeStream,
+                                                             DocumentSourceChangeStream,
+                                                             ChangeStreamStageParams);
 
 ALLOCATE_DOCUMENT_SOURCE_ID(_internalChangeStreamStage, DocumentSourceInternalChangeStreamStage::id)
+
 
 void DocumentSourceChangeStream::checkValueType(const Value v,
                                                 const StringData fieldName,
@@ -349,8 +351,8 @@ ChangeStreamReaderVersionEnum DocumentSourceChangeStream::_determineChangeStream
 
     // The user has explicitly selected the v2 change stream reader version.
 
-    // v2 change stream readers are currently only supported for collection-level change streams.
-    if (changeStream.getChangeStreamType() != ChangeStreamType::kCollection) {
+    // v2 change stream readers are currently not supported for all databases level change streams.
+    if (changeStream.getChangeStreamType() == ChangeStreamType::kAllDatabases) {
         return ChangeStreamReaderVersionEnum::kV1;
     }
 

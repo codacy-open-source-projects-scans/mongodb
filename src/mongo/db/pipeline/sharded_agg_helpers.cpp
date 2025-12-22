@@ -32,7 +32,6 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/bson/util/builder.h"
@@ -56,7 +55,7 @@
 #include "mongo/db/pipeline/document_source_merge.h"
 #include "mongo/db/pipeline/document_source_set_variable_from_subpipeline.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
-#include "mongo/db/pipeline/optimization/optimize.h"
+#include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/db/pipeline/search/search_helper.h"
 #include "mongo/db/pipeline/semantic_analysis.h"
@@ -75,6 +74,7 @@
 #include "mongo/db/router_role/router_role.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
 #include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
@@ -714,7 +714,8 @@ std::unique_ptr<Pipeline> runPipelineDirectlyOnSingleShard(
 
             // We have not split the pipeline, and will execute entirely on the remote shard. Set up
             // an empty local pipeline which we will attach the merge cursors stage to.
-            auto mergePipeline = Pipeline::parse(std::vector<BSONObj>{}, expCtx);
+            auto mergePipeline = pipeline_factory::makePipeline(
+                std::vector<BSONObj>{}, expCtx, pipeline_factory::kOptionsMinimal);
 
             partitionAndAddMergeCursorsSource(mergePipeline.get(),
                                               std::move(ownedCursors),
@@ -1726,7 +1727,8 @@ std::unique_ptr<Pipeline> dispatchTargetedPipelineAndAddMergeCursors(
     } else {
         // We have not split the pipeline, and will execute entirely on the remote shards. Set up an
         // empty local pipeline which we will attach the merge cursors stage to.
-        mergePipeline = Pipeline::parse(std::vector<BSONObj>(), expCtx);
+        mergePipeline = pipeline_factory::makePipeline(
+            std::vector<BSONObj>(), expCtx, pipeline_factory::kOptionsMinimal);
     }
 
     partitionAndAddMergeCursorsSource(mergePipeline.get(),
@@ -1823,8 +1825,10 @@ std::unique_ptr<Pipeline> targetShardsAndAddMergeCursors(
                               },
                               [&](AggregateCommandRequest&& aggRequest) {
                                   auto rawPipeline = aggRequest.getPipeline();
-                                  return std::make_pair(std::move(aggRequest),
-                                                        Pipeline::parse(rawPipeline, expCtx));
+                                  return std::make_pair(
+                                      std::move(aggRequest),
+                                      pipeline_factory::makePipeline(
+                                          rawPipeline, expCtx, pipeline_factory::kOptionsMinimal));
                               },
                               [&](std::pair<AggregateCommandRequest, std::unique_ptr<Pipeline>>&&
                                       aggRequestPipelinePair) {

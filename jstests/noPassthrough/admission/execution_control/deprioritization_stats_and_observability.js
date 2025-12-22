@@ -528,25 +528,37 @@ describe("Execution control statistics and observability", function () {
         const kBusyTimeMs = 2000;
         let replTest, mongod, db, coll;
 
-        function assertExecutionStatsPresent(stats) {
-            const requiredKeys = [
-                "totalElapsedTimeMicros",
-                "totalCPUUsageMicros",
-                "totalTimeProcessingMicros",
-                "totalTimeQueuedMicros",
-                "totalAdmissions",
-                "newAdmissions",
-                "newAdmissionsLoadShed",
-                "totalElapsedTimeMicrosLoadShed",
-                "totalCPUUsageLoadShed",
-                "totalQueuedTimeMicrosLoadShed",
-                "totalDelinquentAcquisitions",
-                "totalAcquisitionDelinquencyMillis",
-                "maxAcquisitionDelinquencyMillis",
-            ];
+        // Keys for per-acquisition stats (in read/write shortRunning/longRunning).
+        const perAcquisitionKeys = [
+            "totalTimeProcessingMicros",
+            "totalTimeQueuedMicros",
+            "totalAdmissions",
+            "totalOpsFinished",
+            "totalDelinquentAcquisitions",
+            "totalAcquisitionDelinquencyMillis",
+            "maxAcquisitionDelinquencyMillis",
+        ];
 
-            requiredKeys.forEach((key) => {
-                assert(stats.hasOwnProperty(key), `Missing ${key} in execution stats: ` + tojson(stats));
+        // Keys for finalized stats (in top-level shortRunning/longRunning).
+        const finalizedStatsKeys = [
+            "totalCPUUsageMicros",
+            "totalElapsedTimeMicros",
+            "totalOpsLoadShed",
+            "totalCPUUsageLoadShed",
+            "totalElapsedTimeMicrosLoadShed",
+            "totalAdmissionsLoadShed",
+            "totalQueuedTimeMicrosLoadShed",
+        ];
+
+        function assertPerAcquisitionStatsPresent(stats) {
+            perAcquisitionKeys.forEach((key) => {
+                assert(stats.hasOwnProperty(key), `Missing ${key} in per-acquisition stats: ` + tojson(stats));
+            });
+        }
+
+        function assertFinalizedStatsPresent(stats) {
+            finalizedStatsKeys.forEach((key) => {
+                assert(stats.hasOwnProperty(key), `Missing ${key} in finalized stats: ` + tojson(stats));
             });
         }
 
@@ -593,34 +605,19 @@ describe("Execution control statistics and observability", function () {
                 executionStats.write.longRunning.totalAdmissions + executionStats.write.shortRunning.totalAdmissions,
                 "Write startedProcessing mismatch: " + tojson(executionStats),
             );
-            assert.gte(
-                executionStats.read.normalPriority.newAdmissions +
-                    executionStats.read.lowPriority.newAdmissions +
-                    executionStats.read.exempt.newAdmissions,
-                executionStats.read.longRunning.newAdmissions + executionStats.read.shortRunning.newAdmissions,
-                "Read newAdmissions mismatch: " + tojson(executionStats),
-            );
-            assert.gte(
-                executionStats.write.normalPriority.newAdmissions +
-                    executionStats.write.lowPriority.newAdmissions +
-                    executionStats.write.exempt.newAdmissions,
-                executionStats.write.longRunning.newAdmissions + executionStats.write.shortRunning.newAdmissions,
-                "Write newAdmissions mismatch: " + tojson(executionStats),
-            );
         }
 
         function assertExecutionShedStatsCorrect(executionStats) {
             assert.gt(
-                executionStats.read.shortRunning.newAdmissionsLoadShed +
-                    executionStats.read.longRunning.newAdmissionsLoadShed,
+                executionStats.shortRunning.totalOpsLoadShed + executionStats.longRunning.totalOpsLoadShed,
                 0,
-                "Read newAdmissionsLoadShed mismatch: " + tojson(executionStats),
+                "totalOpsLoadShed mismatch: " + tojson(executionStats),
             );
             assert.gt(
-                executionStats.read.shortRunning.totalElapsedTimeMicrosLoadShed +
-                    executionStats.read.longRunning.totalElapsedTimeMicrosLoadShed,
+                executionStats.shortRunning.totalElapsedTimeMicrosLoadShed +
+                    executionStats.longRunning.totalElapsedTimeMicrosLoadShed,
                 0,
-                "Read totalElapsedTimeMicrosLoadShed mismatch: " + tojson(executionStats),
+                "totalElapsedTimeMicrosLoadShed mismatch: " + tojson(executionStats),
             );
         }
 
@@ -690,27 +687,84 @@ describe("Execution control statistics and observability", function () {
             insertTestDocuments(coll, kNumDocs);
 
             let executionStats = db.serverStatus().queues.execution;
+
+            // Check top-level shortRunning/longRunning finalized stats.
+            assert(
+                executionStats.hasOwnProperty("shortRunning"),
+                "Missing top-level shortRunning stats: " + tojson(executionStats),
+            );
+            assertFinalizedStatsPresent(executionStats.shortRunning);
+            assert(
+                executionStats.hasOwnProperty("longRunning"),
+                "Missing top-level longRunning stats: " + tojson(executionStats),
+            );
+            assertFinalizedStatsPresent(executionStats.longRunning);
+
+            // Check per-acquisition stats in read shortRunning/longRunning.
             assert(
                 executionStats.read.hasOwnProperty("shortRunning"),
-                "Missing shortRunning stats :" + tojson(executionStats.read),
+                "Missing read shortRunning stats: " + tojson(executionStats.read),
             );
-            assertExecutionStatsPresent(executionStats.read.shortRunning);
+            assertPerAcquisitionStatsPresent(executionStats.read.shortRunning);
             assert(
                 executionStats.read.hasOwnProperty("longRunning"),
-                "Missing longRunning stats :" + tojson(executionStats.read),
+                "Missing read longRunning stats: " + tojson(executionStats.read),
             );
-            assertExecutionStatsPresent(executionStats.read.longRunning);
+            assertPerAcquisitionStatsPresent(executionStats.read.longRunning);
+
+            // Check per-acquisition stats in write shortRunning/longRunning.
             assert(
                 executionStats.write.hasOwnProperty("shortRunning"),
-                "Missing shortRunning stats :" + tojson(executionStats.write),
+                "Missing write shortRunning stats: " + tojson(executionStats.write),
             );
-            assertExecutionStatsPresent(executionStats.write.shortRunning);
+            assertPerAcquisitionStatsPresent(executionStats.write.shortRunning);
             assert(
                 executionStats.write.hasOwnProperty("longRunning"),
-                "Missing longRunning stats :" + tojson(executionStats.write),
+                "Missing write longRunning stats: " + tojson(executionStats.write),
             );
-            assertExecutionStatsPresent(executionStats.write.longRunning);
+            assertPerAcquisitionStatsPresent(executionStats.write.longRunning);
         });
+
+        it("should increment shortRunning stats for a single read", function () {
+            const beforeStats = getExecutionControlStats(mongod).read.shortRunning;
+            coll.find({_id: 1}).toArray();
+            const afterStats = getExecutionControlStats(mongod).read.shortRunning;
+            assert.gt(afterStats.totalOpsFinished, beforeStats.totalOpsFinished);
+        });
+
+        it("should increment shortRunning stats for a single write", function () {
+            const beforeStats = getExecutionControlStats(mongod).write.shortRunning;
+            coll.insertOne({x: 1});
+            const afterStats = getExecutionControlStats(mongod).write.shortRunning;
+            assert.gt(afterStats.totalOpsFinished, beforeStats.totalOpsFinished);
+        });
+
+        it("should report admissions histogram in serverStatus", function () {
+            let executionStats = db.serverStatus().queues.execution;
+            assert(
+                executionStats.hasOwnProperty("admissions"),
+                "Missing admissions histogram: " + tojson(executionStats),
+            );
+
+            const histogram = executionStats.admissions;
+            const expectedBuckets = [
+                "1-2",
+                "3-4",
+                "5-8",
+                "9-16",
+                "17-32",
+                "33-64",
+                "65-128",
+                "129-256",
+                "257-512",
+                "513-1024",
+                "1025+",
+            ];
+            for (const bucket of expectedBuckets) {
+                assert(histogram.hasOwnProperty(bucket), `Missing histogram bucket ${bucket}: ` + tojson(histogram));
+            }
+        });
+
         function configureExecutionControlState(enableDeprioritization, shedding) {
             setExecutionControlAlgorithm(mongod, kFixedConcurrentTransactionsAlgorithm);
 

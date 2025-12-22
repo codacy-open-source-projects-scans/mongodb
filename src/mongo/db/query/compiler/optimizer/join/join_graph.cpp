@@ -101,6 +101,72 @@ void JoinEdge::insertPredicate(JoinPredicate pred) {
     }
 }
 
+boost::optional<NodeId> MutableJoinGraph::addNode(NamespaceString collectionName,
+                                                  std::unique_ptr<CanonicalQuery> cq,
+                                                  boost::optional<FieldPath> embedPath) {
+    if (numNodes() >= _buildParams.maxNodesInJoin) {
+        return boost::none;
+    }
+
+    _nodes.emplace_back(std::move(collectionName), std::move(cq), std::move(embedPath));
+    return static_cast<NodeId>(_nodes.size()) - 1;
+}
+
+boost::optional<EdgeId> MutableJoinGraph::addEdge(NodeId left,
+                                                  NodeId right,
+                                                  JoinEdge::PredicateList predicates) {
+    // Self-edges are not permitted; when joining a collection to itself, we should use a different
+    // node for each instance of the collection.
+    tassert(11180001, "Self edges are not permitted", left != right);
+
+    if (auto edgeId = _edgeMap.find(makeNodeSet(left, right)); edgeId != _edgeMap.end()) {
+        return updateEdge(edgeId->second, left, std::move(predicates));
+    }
+
+    return makeEdge(left, right, std::move(predicates));
+}
+
+boost::optional<EdgeId> MutableJoinGraph::makeEdge(NodeId left,
+                                                   NodeId right,
+                                                   JoinEdge::PredicateList predicates) {
+    if (_edges.size() >= _buildParams.maxEdgesInJoin ||
+        _numberOfAddedPredicates + predicates.size() > _buildParams.maxPredicatesInJoin) {
+        return boost::none;
+    }
+
+    if (right < left) {
+        std::swap(left, right);
+        swapPredicateSides(predicates);
+    }
+
+    NodeSet key = makeNodeSet(left, right);
+    tassert(11116501, "The edge has been already added", !_edgeMap.contains(key));
+
+    EdgeId edgeId = static_cast<EdgeId>(_edges.size());
+    _edges.emplace_back(std::move(predicates), left, right);
+
+    _edgeMap.emplace(key, edgeId);
+    _numberOfAddedPredicates += _edges[edgeId].predicates.size();
+    return edgeId;
+}
+
+boost::optional<EdgeId> MutableJoinGraph::updateEdge(EdgeId edgeId,
+                                                     NodeId leftSideOfPredicates,
+                                                     JoinEdge::PredicateList predicates) {
+    if (_numberOfAddedPredicates + predicates.size() > _buildParams.maxPredicatesInJoin) {
+        return boost::none;
+    }
+
+    auto&& edge = _edges[edgeId];
+    if (edge.left != leftSideOfPredicates) {
+        swapPredicateSides(predicates);
+    }
+    _numberOfAddedPredicates -= edge.predicates.size();
+    edge.insertPredicates(predicates.begin(), predicates.end());
+    _numberOfAddedPredicates += edge.predicates.size();
+    return edgeId;
+}
+
 std::vector<EdgeId> JoinGraph::getJoinEdges(NodeSet left, NodeSet right) const {
     std::vector<EdgeId> result;
 
@@ -145,36 +211,6 @@ NodeSet JoinGraph::getNeighbors(NodeId nodeIndex) const {
     return neighbors;
 }
 
-boost::optional<NodeId> JoinGraph::addNode(NamespaceString collectionName,
-                                           std::unique_ptr<CanonicalQuery> cq,
-                                           boost::optional<FieldPath> embedPath) {
-    if (numNodes() >= kMaxNodesInJoin) {
-        return boost::none;
-    }
-
-    _nodes.emplace_back(std::move(collectionName), std::move(cq), std::move(embedPath));
-    return static_cast<NodeId>(_nodes.size()) - 1;
-}
-
-boost::optional<EdgeId> JoinGraph::addEdge(NodeId left,
-                                           NodeId right,
-                                           JoinEdge::PredicateList predicates) {
-    // Self-edges are not permitted; when joining a collection to itself, we should use a different
-    // node for each instance of the collection.
-    tassert(11180001, "Self edges are not permitted", left != right);
-
-    if (auto edgeId = findEdge(left, right); edgeId.has_value()) {
-        auto&& edge = _edges[*edgeId];
-        if (edge.left == right) {
-            swapPredicateSides(predicates);
-        }
-        edge.insertPredicates(predicates.begin(), predicates.end());
-        return *edgeId;
-    }
-
-    return makeEdge(left, right, std::move(predicates));
-}
-
 boost::optional<EdgeId> JoinGraph::findEdge(NodeId u, NodeId v) const {
     NodeSet key = makeNodeSet(u, v);
     auto pos = _edgeMap.find(key);
@@ -202,23 +238,5 @@ BSONObj JoinGraph::toBSON() const {
         result.append("edges", ab.arr());
     }
     return result.obj();
-}
-
-boost::optional<EdgeId> JoinGraph::makeEdge(NodeId left,
-                                            NodeId right,
-                                            JoinEdge::PredicateList predicates) {
-    if (right < left) {
-        std::swap(left, right);
-        swapPredicateSides(predicates);
-    }
-
-    NodeSet key = makeNodeSet(left, right);
-    tassert(11116501, "The edge has been already added", !_edgeMap.contains(key));
-
-    EdgeId edgeId = static_cast<EdgeId>(_edges.size());
-    _edges.emplace_back(std::move(predicates), left, right);
-
-    _edgeMap.emplace(key, edgeId);
-    return edgeId;
 }
 }  // namespace mongo::join_ordering

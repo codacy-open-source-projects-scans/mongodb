@@ -35,6 +35,28 @@
 
 namespace mongo::admission::execution_control {
 
+void AdmissionsHistogram::record(int32_t admissions) {
+    if (admissions <= 0) {
+        return;
+    }
+    size_t index = _getBucketIndex(admissions);
+    _buckets[index].fetchAndAddRelaxed(1);
+}
+
+void AdmissionsHistogram::appendStats(BSONObjBuilder& b) const {
+    for (size_t i = 0; i < kNumBuckets; ++i) {
+        b.append(kBucketNames[i], _buckets[i].loadRelaxed());
+    }
+}
+
+size_t AdmissionsHistogram::_getBucketIndex(int32_t admissions) {
+    if (admissions <= 2) {
+        return 0;
+    }
+    auto idx = static_cast<size_t>(std::ceil(std::log2(admissions))) - 1;
+    return std::min(idx, static_cast<size_t>(kNumBuckets - 1));
+}
+
 DelinquencyStats::DelinquencyStats(int64_t totalDelinquentAcquisitions,
                                    int64_t totalAcquisitionDelinquencyMillis,
                                    int64_t maxAcquisitionDelinquencyMillis)
@@ -74,56 +96,71 @@ void DelinquencyStats::appendStats(BSONObjBuilder& b) const {
     b.append("maxAcquisitionDelinquencyMillis", maxAcquisitionDelinquencyMillis.loadRelaxed());
 }
 
+OperationFinalizedStats::OperationFinalizedStats(const OperationFinalizedStats& other) {
+    *this = other;
+}
+
+OperationFinalizedStats& OperationFinalizedStats::operator=(const OperationFinalizedStats& other) {
+    totalCPUUsageMicros.storeRelaxed(other.totalCPUUsageMicros.loadRelaxed());
+    totalElapsedTimeMicros.storeRelaxed(other.totalElapsedTimeMicros.loadRelaxed());
+    totalOpsLoadShed.storeRelaxed(other.totalOpsLoadShed.loadRelaxed());
+    totalCPUUsageLoadShed.storeRelaxed(other.totalCPUUsageLoadShed.loadRelaxed());
+    totalElapsedTimeMicrosLoadShed.storeRelaxed(other.totalElapsedTimeMicrosLoadShed.loadRelaxed());
+    totalAdmissionsLoadShed.storeRelaxed(other.totalAdmissionsLoadShed.loadRelaxed());
+    totalQueuedTimeMicrosLoadShed.storeRelaxed(other.totalQueuedTimeMicrosLoadShed.loadRelaxed());
+    return *this;
+}
+
+OperationFinalizedStats& OperationFinalizedStats::operator+=(const OperationFinalizedStats& other) {
+    totalCPUUsageMicros.fetchAndAddRelaxed(other.totalCPUUsageMicros.loadRelaxed());
+    totalElapsedTimeMicros.fetchAndAddRelaxed(other.totalElapsedTimeMicros.loadRelaxed());
+    totalOpsLoadShed.fetchAndAddRelaxed(other.totalOpsLoadShed.loadRelaxed());
+    totalCPUUsageLoadShed.fetchAndAddRelaxed(other.totalCPUUsageLoadShed.loadRelaxed());
+    totalElapsedTimeMicrosLoadShed.fetchAndAddRelaxed(
+        other.totalElapsedTimeMicrosLoadShed.loadRelaxed());
+    totalAdmissionsLoadShed.fetchAndAddRelaxed(other.totalAdmissionsLoadShed.loadRelaxed());
+    totalQueuedTimeMicrosLoadShed.fetchAndAddRelaxed(
+        other.totalQueuedTimeMicrosLoadShed.loadRelaxed());
+    return *this;
+}
+
+void OperationFinalizedStats::appendStats(BSONObjBuilder& b) const {
+    b.append("totalCPUUsageMicros", totalCPUUsageMicros.loadRelaxed());
+    b.append("totalElapsedTimeMicros", totalElapsedTimeMicros.loadRelaxed());
+    b.append("totalOpsLoadShed", totalOpsLoadShed.loadRelaxed());
+    b.append("totalCPUUsageLoadShed", totalCPUUsageLoadShed.loadRelaxed());
+    b.append("totalElapsedTimeMicrosLoadShed", totalElapsedTimeMicrosLoadShed.loadRelaxed());
+    b.append("totalAdmissionsLoadShed", totalAdmissionsLoadShed.loadRelaxed());
+    b.append("totalQueuedTimeMicrosLoadShed", totalQueuedTimeMicrosLoadShed.loadRelaxed());
+}
+
 OperationExecutionStats::OperationExecutionStats(const OperationExecutionStats& other) {
     *this = other;
 }
 
 OperationExecutionStats& OperationExecutionStats::operator=(const OperationExecutionStats& other) {
-    totalElapsedTimeMicros.storeRelaxed(other.totalElapsedTimeMicros.loadRelaxed());
     totalTimeQueuedMicros.storeRelaxed(other.totalTimeQueuedMicros.loadRelaxed());
     totalTimeProcessingMicros.storeRelaxed(other.totalTimeProcessingMicros.loadRelaxed());
-    totalCPUUsageMicros.storeRelaxed(other.totalCPUUsageMicros.loadRelaxed());
     totalAdmissions.storeRelaxed(other.totalAdmissions.loadRelaxed());
-    newAdmissions.storeRelaxed(other.newAdmissions.loadRelaxed());
-    newAdmissionsLoadShed.storeRelaxed(other.newAdmissionsLoadShed.loadRelaxed());
-    totalAdmissionsLoadShed.storeRelaxed(other.totalAdmissionsLoadShed.loadRelaxed());
-    totalQueuedTimeMicrosLoadShed.storeRelaxed(other.totalQueuedTimeMicrosLoadShed.loadRelaxed());
-    totalElapsedTimeMicrosLoadShed.storeRelaxed(other.totalElapsedTimeMicrosLoadShed.loadRelaxed());
-    totalCPUUsageLoadShed.storeRelaxed(other.totalCPUUsageLoadShed.loadRelaxed());
+    totalOpsFinished.storeRelaxed(other.totalOpsFinished.loadRelaxed());
     delinquencyStats = other.delinquencyStats;
     return *this;
 }
 
 OperationExecutionStats& OperationExecutionStats::operator+=(const OperationExecutionStats& other) {
-    totalElapsedTimeMicros.fetchAndAddRelaxed(other.totalElapsedTimeMicros.loadRelaxed());
     totalTimeQueuedMicros.fetchAndAddRelaxed(other.totalTimeQueuedMicros.loadRelaxed());
     totalTimeProcessingMicros.fetchAndAddRelaxed(other.totalTimeProcessingMicros.loadRelaxed());
-    totalCPUUsageMicros.fetchAndAddRelaxed(other.totalCPUUsageMicros.loadRelaxed());
     totalAdmissions.fetchAndAddRelaxed(other.totalAdmissions.loadRelaxed());
-    newAdmissions.fetchAndAddRelaxed(other.newAdmissions.loadRelaxed());
-    newAdmissionsLoadShed.fetchAndAddRelaxed(other.newAdmissionsLoadShed.loadRelaxed());
-    totalAdmissionsLoadShed.fetchAndAddRelaxed(other.totalAdmissionsLoadShed.loadRelaxed());
-    totalQueuedTimeMicrosLoadShed.fetchAndAddRelaxed(
-        other.totalQueuedTimeMicrosLoadShed.loadRelaxed());
-    totalElapsedTimeMicrosLoadShed.fetchAndAddRelaxed(
-        other.totalElapsedTimeMicrosLoadShed.loadRelaxed());
-    totalCPUUsageLoadShed.fetchAndAddRelaxed(other.totalCPUUsageLoadShed.loadRelaxed());
+    totalOpsFinished.fetchAndAddRelaxed(other.totalOpsFinished.loadRelaxed());
     delinquencyStats += other.delinquencyStats;
     return *this;
 }
 
 void OperationExecutionStats::appendStats(BSONObjBuilder& b) const {
-    b.append("totalElapsedTimeMicros", totalElapsedTimeMicros.loadRelaxed());
-    b.append("totalCPUUsageMicros", totalCPUUsageMicros.loadRelaxed());
     b.append("totalTimeProcessingMicros", totalTimeProcessingMicros.loadRelaxed());
     b.append("totalTimeQueuedMicros", totalTimeQueuedMicros.loadRelaxed());
     b.append("totalAdmissions", totalAdmissions.loadRelaxed());
-    b.append("newAdmissions", newAdmissions.loadRelaxed());
-    b.append("newAdmissionsLoadShed", newAdmissionsLoadShed.loadRelaxed());
-    b.append("totalElapsedTimeMicrosLoadShed", totalElapsedTimeMicrosLoadShed.loadRelaxed());
-    b.append("totalCPUUsageLoadShed", totalCPUUsageLoadShed.loadRelaxed());
-    b.append("totalQueuedTimeMicrosLoadShed", totalQueuedTimeMicrosLoadShed.loadRelaxed());
-    b.append("totalAdmissionsLoadShed", totalAdmissionsLoadShed.loadRelaxed());
+    b.append("totalOpsFinished", totalOpsFinished.loadRelaxed());
     delinquencyStats.appendStats(b);
 }
 }  // namespace mongo::admission::execution_control

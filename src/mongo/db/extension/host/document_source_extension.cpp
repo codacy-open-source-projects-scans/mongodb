@@ -31,12 +31,37 @@
 
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/db/extension/host/document_source_extension_expandable.h"
+#include "mongo/db/extension/host/document_source_extension_optimizable.h"
 #include "mongo/db/extension/shared/handle/aggregation_stage/stage_descriptor.h"
 
 namespace mongo::extension::host {
 
 ALLOCATE_STAGE_PARAMS_ID(expandable, ExpandableStageParams::id);
+
 ALLOCATE_STAGE_PARAMS_ID(expanded, ExpandedStageParams::id);
+
+DocumentSourceContainer expandableStageParamsToDocumentSourceFn(
+    const std::unique_ptr<StageParams>& stageParams,
+    const boost::intrusive_ptr<ExpressionContext>& expCtx) {
+    auto* expandableParams = static_cast<ExpandableStageParams*>(stageParams.get());
+    return {
+        DocumentSourceExtensionExpandable::create(expCtx, expandableParams->releaseParseNode())};
+}
+
+REGISTER_STAGE_PARAMS_TO_DOCUMENT_SOURCE_MAPPING(expandable,
+                                                 ExpandableStageParams::id,
+                                                 expandableStageParamsToDocumentSourceFn);
+
+DocumentSourceContainer expandedStageParamsToDocumentSourceFn(
+    const std::unique_ptr<StageParams>& stageParams,
+    const boost::intrusive_ptr<ExpressionContext>& expCtx) {
+    auto* extensionParams = static_cast<ExpandedStageParams*>(stageParams.get());
+    return {DocumentSourceExtensionOptimizable::create(expCtx, extensionParams->releaseAstNode())};
+}
+
+REGISTER_STAGE_PARAMS_TO_DOCUMENT_SOURCE_MAPPING(expanded,
+                                                 ExpandedStageParams::id,
+                                                 expandedStageParamsToDocumentSourceFn);
 
 class DocumentSourceExtension::LiteParsedExpandable::ExpansionValidationFrame {
 public:
@@ -152,20 +177,8 @@ void DocumentSourceExtension::registerStage(AggStageDescriptorHandle descriptor)
         };
     }();
 
-    // Register the correct DocumentSource to construct the stage with.
-    DocumentSource::registerParser(
-        stageName,
-        [descriptor](BSONElement specElem, const boost::intrusive_ptr<ExpressionContext>& expCtx)
-            -> boost::intrusive_ptr<DocumentSource> {
-            return DocumentSourceExtensionExpandable::create(expCtx, specElem.wrap(), descriptor);
-        });
-
     LiteParsedDocumentSource::registerParser(
         stageName, std::move(parser), AllowedWithApiStrict::kAlways, AllowedWithClientType::kAny);
-}
-
-void DocumentSourceExtension::unregisterParser_forTest(const std::string& name) {
-    DocumentSource::unregisterParser_forTest(name);
 }
 
 DocumentSourceExtension::DocumentSourceExtension(

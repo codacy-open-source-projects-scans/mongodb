@@ -806,7 +806,32 @@ tasks:
       - func: "run tests"
 
   - <<: *task_template
+    name: change_streams_whole_db_passthrough_v2
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+      ]
+    commands:
+      - func: "do setup"
+      - func: "run tests"
+
+  - <<: *task_template
     name: change_streams_whole_db_secondary_reads_sharded_collections
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "secondary_reads",
+      ]
+    commands:
+      - func: "do setup"
+      - func: "run tests"
+
+  - <<: *task_template
+    name: change_streams_whole_db_secondary_reads_sharded_collections_v2
     tags:
       [
         "assigned_to_jira_team_server_query_execution",
@@ -1147,8 +1172,8 @@ tasks:
       [
         "assigned_to_jira_team_server_query_execution",
         "development_critical",
+        "no_commit_queue",
         "requires_large_host",
-        "requires_large_host_commit_queue",
         "jscore",
         "common",
       ]
@@ -2579,6 +2604,31 @@ tasks:
       - func: "run tests"
         vars:
           suite: query_golden_cbr_histogram
+
+  - <<: *gen_task_template
+    name: query_golden_join_optimization
+    tags: [
+        "assigned_to_jira_team_server_query_optimization",
+        "experimental",
+        "blocked_in_query_alias", # We explicitly specify this task in query alias
+      ]
+    commands:
+      - func: "do setup"
+      - func: "run tests"
+        vars:
+          suite: query_golden_join_optimization
+
+  - <<: *task_template
+    name: query_join_optimization_passthrough_gen
+    tags: [
+        "assigned_to_jira_team_server_query_optimization",
+        "experimental",
+        "blocked_in_query_alias", # We explicitly specify this task in query alias
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          resmoke_jobs_max: 5
 
   ################################################
   #           Query Integration tasks            #
