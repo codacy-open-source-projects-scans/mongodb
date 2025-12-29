@@ -35,21 +35,42 @@
 #include "mongo/db/query/shard_key_diagnostic_printer.h"
 #include "mongo/db/router_role/collection_routing_info_targeter.h"
 #include "mongo/db/router_role/ns_targeter.h"
-#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/write_ops/bulk_write_exec.h"
 #include "mongo/s/write_ops/fle.h"
+#include "mongo/s/write_ops/unified_write_executor/stats.h"
 #include "mongo/s/write_ops/unified_write_executor/unified_write_executor.h"
 #include "mongo/util/decorable.h"
 
 #include <memory>
 
-#include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 namespace mongo {
+namespace {
+
+// Utility to port 'uweStats' to 'batchStats'. This is done to enable re-using the existing logic
+// for cluster write statistics.
+// TODO SERVER-109104: This can be removed once we delete BatchWriteExec.
+void fillOutBatchWriteStats(unified_write_executor::Stats& uweStats,
+                            BatchWriteExecStats& batchStats) {
+    const auto& map = uweStats.getTargetingStatsMap();
+    if (map.empty()) {
+        return;
+    }
+    tassert(11499200,
+            "Expected only a single entry in targeting stats map for a batch write",
+            map.size() == 1 && map.count(0) != 0);
+    const auto& targetingStats = map.at(0);
+    batchStats.noteNumShardsOwningChunks(targetingStats.numShardsOwningChunks);
+    batchStats.noteTargetedCollectionIsSharded(targetingStats.isSharded);
+    for (const auto& shard : uweStats.getTargetedShards()) {
+        batchStats.noteTargetedShard(shard);
+    }
+}
+}  // namespace
 namespace cluster {
 
 void write(OperationContext* opCtx,
@@ -61,6 +82,7 @@ void write(OperationContext* opCtx,
     NotPrimaryErrorTracker::Disabled scopeDisabledTracker(
         &NotPrimaryErrorTracker::get(opCtx->getClient()));
 
+    tassert(11499201, "Should have initialized 'stats' object", stats);
     CollectionRoutingInfoTargeter targeter(opCtx, request.getNS(), targetEpoch);
     if (nss) {
         *nss = targeter.getNS();
@@ -70,9 +92,10 @@ void write(OperationContext* opCtx,
         4817400, 2, {logv2::LogComponent::kShardMigrationPerf}, "Starting batch write");
 
     if (unified_write_executor::isEnabled(opCtx)) {
-        *response = unified_write_executor::write(opCtx, request, targetEpoch);
+        unified_write_executor::Stats uweStats;
+        *response = unified_write_executor::write(opCtx, request, uweStats, targetEpoch);
         // SERVER-109104 This can be removed once we delete BatchWriteExec.
-        stats->markIgnore();
+        fillOutBatchWriteStats(uweStats, *stats);
     } else {
         // Create an RAII object that prints the collection's shard key in the case of a tassert
         // or crash.
@@ -103,14 +126,18 @@ bulk_write_exec::BulkWriteReplyInfo bulkWrite(
     const BulkWriteCommandRequest& request,
     const std::vector<std::unique_ptr<NSTargeter>>& targeters,
     bulk_write_exec::BulkWriteExecStats& execStats) {
-    if (request.getNsInfo()[0].getEncryptionInformation().has_value()) {
-        auto [result, replies] = attemptExecuteFLE(opCtx, request);
-        if (result == FLEBatchResult::kProcessed) {
-            return replies;
-        }  // else fallthrough.
+    if (unified_write_executor::isEnabled(opCtx)) {
+        unified_write_executor::Stats uweStats;
+        return unified_write_executor::bulkWrite(opCtx, request, uweStats);
+    } else {
+        if (request.getNsInfo()[0].getEncryptionInformation().has_value()) {
+            auto [result, replies] = attemptExecuteFLE(opCtx, request);
+            if (result == FLEBatchResult::kProcessed) {
+                return replies;
+            }  // else fallthrough.
+        }
+        return bulk_write_exec::execute(opCtx, targeters, request, execStats);
     }
-
-    return bulk_write_exec::execute(opCtx, targeters, request, execStats);
 }
 
 }  // namespace cluster

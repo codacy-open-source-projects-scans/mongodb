@@ -343,7 +343,6 @@ ProcessorResult WriteBatchResponseProcessor::_onWriteBatchResponse(
     OperationContext* opCtx,
     RoutingContext& routingCtx,
     const NoRetryWriteBatchResponse& response) {
-    // TODO SERVER-104122 Support for 'WouldChangeOwningShard' writes.
     const auto& op = response.getOp();
 
     // Process write concern error (if any).
@@ -356,7 +355,6 @@ ProcessorResult WriteBatchResponseProcessor::_onWriteBatchResponse(
     if (response.isError()) {
         const auto& status = response.getStatus();
 
-        // TODO SERVER-104122 Support for 'WouldChangeOwningShard' writes.
         LOGV2_DEBUG(10896500,
                     4,
                     "Cluster write op executing in internal transaction failed with error",
@@ -1221,8 +1219,8 @@ WriteCommandResponse WriteBatchResponseProcessor::generateClientResponse(Operati
         }});
 }
 
-BulkWriteCommandReply WriteBatchResponseProcessor::generateClientResponseForBulkWriteCommand(
-    OperationContext* opCtx) {
+bulk_write_exec::BulkWriteReplyInfo
+WriteBatchResponseProcessor::generateClientResponseForBulkWriteCommand(OperationContext* opCtx) {
     const bool errorsOnly = _cmdRef.getErrorsOnly().value_or(false);
 
     std::vector<BulkWriteReplyItem> results;
@@ -1230,6 +1228,11 @@ BulkWriteCommandReply WriteBatchResponseProcessor::generateClientResponseForBulk
     auto finalResults = finalizeRepliesForOps(opCtx);
 
     for (auto& [id, item] : finalResults) {
+        // Check to see if we've recieved a WCOS error. If we have, then we should skip incrementing
+        // the relevant op counters as this will doulbe count our update. Instead, we will increment
+        // this as part of the WCOS handling in the command layer.
+        const bool isNotAWCOSError = !item || item->getStatus().isOK() ||
+            item->getStatus() != ErrorCodes::WouldChangeOwningShard || _cmdRef.getNumOps() > 1;
         if (!_isNonVerbose && (!errorsOnly || (item && !item->getStatus().isOK()))) {
             tassert(11182221, "Expected a BulkWriteReplyItem", item.has_value());
 
@@ -1240,10 +1243,9 @@ BulkWriteCommandReply WriteBatchResponseProcessor::generateClientResponseForBulk
                                 item->getIdx(),
                                 id),
                     static_cast<WriteOpId>(item->getIdx()) == id);
-
             results.emplace_back(std::move(*item));
         }
-        _stats.incrementOpCounters(opCtx, _cmdRef.getOp(id));
+        _stats.incrementOpCounters(opCtx, _cmdRef.getOp(id), isNotAWCOSError);
     }
 
     bulk_write_exec::SummaryFields fields(
@@ -1256,9 +1258,15 @@ BulkWriteCommandReply WriteBatchResponseProcessor::generateClientResponseForBulk
         info.wcErrors = BulkWriteWriteConcernError{totalWcError->toStatus().code(),
                                                    totalWcError->toStatus().reason()};
     }
+    return info;
+}
 
-    return populateCursorReply(
-        opCtx, _cmdRef.getBulkWriteCommandRequest(), _originalCommand, std::move(info));
+BulkWriteCommandReply WriteBatchResponseProcessor::generateClientResponseForBulkWriteForTest(
+    OperationContext* opCtx) {
+    return populateCursorReply(opCtx,
+                               _cmdRef.getBulkWriteCommandRequest(),
+                               _originalCommand,
+                               generateClientResponseForBulkWriteCommand(opCtx));
 }
 
 BatchedCommandResponse WriteBatchResponseProcessor::generateClientResponseForBatchedCommand(
