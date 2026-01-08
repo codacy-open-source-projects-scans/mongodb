@@ -77,7 +77,7 @@ TEST_F(InMemIterTest, Sorted) {
 
 TEST_F(InMemIterTest, DoesNoReorderGivenInput) {
     static const int unsorted[] = {6, 3, 7, 4, 0, 9, 5, 7, 1, 8};
-    class UnsortedIter : public IWIterator {
+    class UnsortedIter : public IWIteratorBase {
     public:
         UnsortedIter() : _pos(0) {}
         bool more() override {
@@ -200,7 +200,8 @@ public:
         {  // test empty (no inputs)
             std::vector<std::shared_ptr<IWIterator>> vec;
             std::shared_ptr<IWIterator> mergeIter(
-                IWIterator::merge(vec, SortOptions(), IWComparator()));
+                sorter::merge<IntWrapper, IntWrapper, IWComparator>(
+                    vec, SortOptions(), IWComparator()));
             ASSERT_ITERATORS_EQUIVALENT(mergeIter, std::make_shared<EmptyIterator>());
         }
         {  // test empty (only empty inputs)
