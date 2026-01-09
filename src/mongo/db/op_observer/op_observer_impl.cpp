@@ -2048,6 +2048,8 @@ void OpObserverImpl::onBatchedWriteCommit(OperationContext* opCtx,
 
         // TODO (SERVER-114338): Pull commonalities out of switch cases if possible.
         switch (oplogEntry.getOpType()) {
+            case repl::OpTypeEnum::kUpdate:
+            case repl::OpTypeEnum::kDelete:
             case repl::OpTypeEnum::kInsert: {
                 if (!oplogEntry.getStatementIds().empty()) {
                     repl::OplogLink oplogLink;
@@ -2071,15 +2073,6 @@ void OpObserverImpl::onBatchedWriteCommit(OperationContext* opCtx,
 
                 return;
             }
-            // // TODO (SERVER-114444): Handle single update ops
-            // case repl::OpTypeEnum::kUpdate: {
-            //     OpTimeBundle opTimes;
-            //     opTimes.writeOpTime = logOperation(
-            //         opCtx, &oplogEntry, true /*assignCommonFields*/, _operationLogger.get());
-            //     opTimes.wallClockTime = oplogEntry.getWallClockTime();
-            // }
-            // // TODO (SERVER-114445): Handle single delete ops
-            // case repl::OpTypeEnum::kDelete:
             // // TODO (SERVER-114446): Handle single container insert
             // case repl::OpTypeEnum::kContainerInsert:
             // // TODO (SERVER-114447): Handle single container delete

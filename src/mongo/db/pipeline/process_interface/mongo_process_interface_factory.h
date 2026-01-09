@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2025-present MongoDB, Inc.
+ *    Copyright (C) 2026-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -27,27 +27,24 @@
  *    it in the license file.
  */
 
-#include "mongo/db/repl/optime.h"
+#pragma once
 
-#include "mongo/unittest/unittest.h"
+#include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
-namespace repl {
 
-TEST(OpTimeTest, OpTimeSerDeser) {
-    auto o0 = OpTime(Timestamp(1357913579), 12);
-    auto buf = o0.serializeForLockFreeReads();
-    auto o1 = OpTime::parseForLockFreeReads(buf);
-    ASSERT_EQ(o0, o1);
-}
+class OperationContext;
 
-TEST(OpTimeTest, OpTimeAndWallTimeSerDeser) {
-    auto o = OpTime(Timestamp(123456789), 17);
-    auto w = Date_t::fromMillisSinceEpoch(987654321);
-    auto owt0 = OpTimeAndWallTime(o, w);
-    auto buf = owt0.serializeForLockFreeReads();
-    auto owt1 = OpTimeAndWallTime::parseForLockFreeReads(buf);
-    ASSERT_EQ(owt0, owt1);
-}
-}  // namespace repl
+class MONGO_MOD_OPEN MongoProcessInterfaceFactory {
+public:
+    virtual ~MongoProcessInterfaceFactory() = default;
+    virtual std::shared_ptr<MongoProcessInterface> create(OperationContext* opCtx) = 0;
+};
+
+class MONGO_MOD_OPEN MongoProcessInterfaceFactoryImpl : public MongoProcessInterfaceFactory {
+public:
+    std::shared_ptr<MongoProcessInterface> create(OperationContext* opCtx) override;
+};
+
 }  // namespace mongo
