@@ -1,5 +1,7 @@
 /**
  * Tests insert generating duplicate key during initial sync are skipped.
+ *
+ * @tags: [requires_fcv_83]
  */
 
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";

@@ -6,6 +6,8 @@
  * 1. Configure mongod with file-based OTel metrics export
  * 2. Establish connections which trigger the network.connections_processed counter
  * 3. Verify the metric appears in the exported JSONL file
+ *
+ * @tags: [requires_otel_build]
  */
 
 import {
@@ -33,7 +35,6 @@ jsTest.log.info("Starting mongod with OTel file exporter, metrics directory: " +
 // Use a short export interval to avoid long test times
 const mongod = MongoRunner.runMongod({
     setParameter: {
-        featureFlagOtelMetrics: true,
         openTelemetryMetricsDirectory: metricsDir,
         openTelemetryExportIntervalMillis: 500,
         openTelemetryExportTimeoutMillis: 200,

@@ -42,7 +42,9 @@
 #include "mongo/db/query/compiler/rewrites/matcher/expression_optimizer.h"
 #include "mongo/db/query/compiler/rewrites/matcher/expression_parameterization.h"
 #include "mongo/db/query/parsed_find_command.h"
-#include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/query_execution_knobs_gen.h"
+#include "mongo/db/query/query_integration_knobs_gen.h"
+#include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/db/server_parameter.h"
 #include "mongo/logv2/log.h"
@@ -221,7 +223,8 @@ void CanonicalQuery::initCq(boost::intrusive_ptr<ExpressionContext> expCtx,
     _isSearchQuery = isSearchQuery;
 
     // Perform SBE auto-parameterization if there is not already a reason not to.
-    _disablePlanCache = internalQueryDisablePlanCache.load();
+    _disablePlanCache = internalQueryDisablePlanCache.load() ||
+        _expCtx->getPlanCache() == ExpressionContext::PlanCacheOptions::kDisablePlanCache;
     _maxMatchExpressionParams = loadMaxMatchExpressionParams();
     if (expCtx->getSbeCompatibility() != SbeCompatibility::notCompatible &&
         shouldParameterizeSbe(_primaryMatchExpression.get())) {

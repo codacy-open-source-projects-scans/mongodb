@@ -411,6 +411,14 @@ void CurOp::setGenericCursor(WithLock, GenericCursor gc) {
 CurOp::~CurOp() {
     if (parent() != nullptr) {
         parent()->yielded(_numYields.load());
+    } else if (_stack) {
+        if (auto ticketingSystem =
+                admission::execution_control::TicketingSystem::get(opCtx()->getServiceContext())) {
+            // For top-level operations, ensure execution stats are finalized even if the operation
+            // has no valid response and, therefore, completeAndLogOperation() was never called.
+            // We don't record time stats because the counters are lost in the ~CurOp destructor.
+            ticketingSystem->finalizeOperationStats(opCtx(), 0, 0);
+        }
     }
     invariant(!_stack || this == _stack->pop());
 }
@@ -820,9 +828,7 @@ bool CurOp::completeAndLogOperation(const logv2::LogOptions& logOptions,
     // Record execution and delinquency stats for the top-level operation only. We don't want to
     // double count stats from child operations (e.g., bulk writes, sub-operations in aggregations)
     // that share the same ExecutionAdmissionContext.
-    if (!parent() && !opCtx->inMultiDocumentTransaction()) {
-        // If we're not in a txn, we record information about delinquent ticket acquisitions to the
-        // Queue's stats.
+    if (!parent()) {
         if (auto ticketingSystem =
                 admission::execution_control::TicketingSystem::get(opCtx->getServiceContext())) {
             calculateCpuTime();

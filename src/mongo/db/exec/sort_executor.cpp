@@ -32,6 +32,7 @@
 
 #include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/exec/sort_key_comparator.h"
+#include "mongo/db/sorter/file_based_spiller.h"
 #include "mongo/db/sorter/sorter_template_defs.h"  // IWYU pragma: keep
 
 namespace mongo {
@@ -46,8 +47,8 @@ std::unique_ptr<Sorter<Value, T>> SortExecutor<T>::makeSorter() {
     return Sorter<Value, T>::make(opts,
                                   comparator,
                                   (opts.tempDir)
-                                      ? std::make_unique<FileBasedSorterSpiller<Value, T>>(
-                                            *opts.tempDir, opts.sorterFileStats)
+                                      ? std::make_shared<sorter::FileBasedSorterSpiller<Value, T>>(
+                                            *opts.tempDir, _sorterFileStats.get())
                                       : nullptr);
 }
 template class SortExecutor<Document>;

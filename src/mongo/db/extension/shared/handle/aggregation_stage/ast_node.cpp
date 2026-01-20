@@ -48,11 +48,13 @@ MongoExtensionStaticProperties AggStageAstNodeAPI::getProperties() const {
     return MongoExtensionStaticProperties::parse(propertiesObj);
 }
 
-LogicalAggStageHandle AggStageAstNodeAPI::bind() const {
+LogicalAggStageHandle AggStageAstNodeAPI::bind(
+    const ::MongoExtensionCatalogContext& catalogContext) const {
     ::MongoExtensionLogicalAggStage* logicalStagePtr{nullptr};
 
     // The API's contract mandates that logicalStagePtr will only be allocated if status is OK.
-    invokeCAndConvertStatusToException([&]() { return vtable().bind(get(), &logicalStagePtr); });
+    invokeCAndConvertStatusToException(
+        [&]() { return vtable().bind(get(), &catalogContext, &logicalStagePtr); });
 
     return LogicalAggStageHandle(logicalStagePtr);
 }
@@ -65,5 +67,19 @@ AggStageAstNodeHandle AggStageAstNodeAPI::clone() const {
     invokeCAndConvertStatusToException([&]() { return vtable().clone(get(), &astNodePtr); });
 
     return AggStageAstNodeHandle(astNodePtr);
+}
+
+MongoExtensionFirstStageViewApplicationPolicy
+AggStageAstNodeAPI::getFirstStageViewApplicationPolicy() const {
+    MongoExtensionFirstStageViewApplicationPolicy policy =
+        MongoExtensionFirstStageViewApplicationPolicy::kDefaultPrepend;
+    invokeCAndConvertStatusToException(
+        [&]() { return vtable().get_first_stage_view_application_policy(get(), &policy); });
+    return policy;
+}
+
+void AggStageAstNodeAPI::bindViewInfo(std::string_view viewName) const {
+    invokeCAndConvertStatusToException(
+        [&]() { return vtable().bind_view_info(get(), stringViewAsByteView(viewName)); });
 }
 }  // namespace mongo::extension

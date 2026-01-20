@@ -32,7 +32,9 @@
 #include "mongo/base/string_data.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/query_execution_knobs_gen.h"
+#include "mongo/db/query/query_integration_knobs_gen.h"
+#include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/str.h"
 
@@ -51,9 +53,9 @@ class PlanStage;
 struct DebugPrintInfo {
     const bool printBytecode = false;
     int32_t callDepth = 0;
-    // Some aggregation pipeline stages manifest as more than one SBE stage. Provide a 50% buffer
+    // Some aggregation pipeline stages manifest as more than one SBE stage. Provide a 33% buffer
     // before capping the printing depth.
-    const int32_t maxCallDepth = 3 * internalPipelineLengthLimit.loadRelaxed() / 2;
+    const int32_t maxCallDepth = 4 * internalPipelineLengthLimit.loadRelaxed() / 3;
 };
 
 class DebugPrinter {

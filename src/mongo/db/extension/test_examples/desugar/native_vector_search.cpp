@@ -161,6 +161,10 @@ public:
         return boost::none;
     }
 
+    std::unique_ptr<sdk::LogicalAggStage> clone() const override {
+        return std::make_unique<MetricsLogicalStage>(_algorithm);
+    }
+
 private:
     std::string _algorithm;
 };
@@ -170,7 +174,8 @@ public:
     MetricsAstNode(const std::string& algorithm)
         : sdk::AggStageAstNode(kMetricsStageName), _algorithm(algorithm) {}
 
-    std::unique_ptr<sdk::LogicalAggStage> bind() const override {
+    std::unique_ptr<sdk::LogicalAggStage> bind(
+        const ::MongoExtensionCatalogContext& catalogContext) const override {
         return std::make_unique<MetricsLogicalStage>(_algorithm);
     }
 

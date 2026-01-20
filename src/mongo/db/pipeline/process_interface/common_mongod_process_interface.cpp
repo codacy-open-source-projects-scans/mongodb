@@ -49,6 +49,7 @@
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/pipeline_d.h"
+#include "mongo/db/pipeline/search/document_source_internal_search_id_lookup.h"
 #include "mongo/db/pipeline/search/search_helper.h"
 #include "mongo/db/pipeline/shard_role_transaction_resources_stasher_for_pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
@@ -61,7 +62,9 @@
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/plan_cache/plan_cache.h"
 #include "mongo/db/query/plan_cache/sbe_plan_cache.h"
-#include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/query_execution_knobs_gen.h"
+#include "mongo/db/query/query_integration_knobs_gen.h"
+#include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/db/repl/primary_only_service.h"
 #include "mongo/db/s/query_analysis_writer.h"
 #include "mongo/db/s/transaction_coordinator_curop.h"
@@ -295,7 +298,12 @@ bool requiresCollectionAcquisition(const Pipeline& pipeline) {
             !firstStage || !dynamic_cast<DocumentSourceCursor*>(*firstStage));
 
     const bool isMongotPipeline = search_helpers::isMongotPipeline(&pipeline);
-    if (!isMongotPipeline && firstStage && !(*firstStage)->constraints().requiresInputDocSource) {
+    const bool hasIdLookup = std::any_of(sources.begin(), sources.end(), [](const auto& source) {
+        return source->getSourceName() == DocumentSourceInternalSearchIdLookUp::kStageName;
+    });
+
+    if (!hasIdLookup && !isMongotPipeline && firstStage &&
+        !(*firstStage)->constraints().requiresInputDocSource) {
         // There's no need to attach a cursor or perform collection acquisition here (for stages
         // like $documents or $collStats that will not read from a user collection). Mongot
         // pipelines will not need a cursor but _do_ need to acquire the collection to check for a
@@ -369,21 +377,14 @@ std::unique_ptr<Pipeline> attachCursorSourceToPipelineForLocalReadImpl(
 
     auto resolvedAggRequest = aggRequest ? &aggRequest.get() : nullptr;
     auto sharedStasher = make_intrusive<ShardRoleTransactionResourcesStasherForPipeline>();
-    auto catalogResourceHandle = make_intrusive<DSCursorCatalogResourceHandle>(sharedStasher);
-    PipelineD::buildAndAttachInnerQueryExecutorToPipeline(holder,
-                                                          expCtx->getNamespaceString(),
-                                                          resolvedAggRequest,
-                                                          pipeline.get(),
-                                                          catalogResourceHandle);
 
     const bool isMongotPipeline = search_helpers::isMongotPipeline(pipeline.get());
-    // We split up mongot special logic as bindCatalogInfo() should be called on a desugared search
-    // pipeline and requires catalog locks.
     if (isMongotPipeline) {
         search_helpers::desugarSearchPipeline(pipeline.get());
     }
 
-    pipeline->bindCatalogInfo(holder, sharedStasher);
+    PipelineD::buildAndAttachInnerQueryExecutorAndBindCatalogInfoToPipeline(
+        holder, expCtx->getNamespaceString(), resolvedAggRequest, pipeline.get(), sharedStasher);
 
     // Mongot pipelines may not use the MultipleCollectionAccessor and related acquisitions. Clear
     // them to prevent dangling references to CollectionAcquistions.
@@ -776,13 +777,12 @@ CommonMongodProcessInterface::attachCursorSourceToPipelineForLocalReadWithCatalo
     const boost::intrusive_ptr<ExpressionContext>& expCtx = pipeline->getContext();
 
     auto stasher = catalogResourceHandle->getStasher();
-    PipelineD::buildAndAttachInnerQueryExecutorToPipeline(
+    PipelineD::buildAndAttachInnerQueryExecutorAndBindCatalogInfoToPipeline(
         collections,
         expCtx->getNamespaceString(),
         nullptr /*resolvedAggRequest*/,
         pipeline.get(),
-        make_intrusive<DSCursorCatalogResourceHandle>(stasher));
-    pipeline->bindCatalogInfo(collections, stasher);
+        stasher);
 
     return pipeline;
 }

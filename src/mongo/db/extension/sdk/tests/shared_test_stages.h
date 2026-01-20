@@ -120,6 +120,10 @@ public:
     TestLogicalStageCompile()
         : TestLogicalStage(toStdStringViewForInterop(kStageName), BSON(kStageSpec << "")) {}
 
+    std::unique_ptr<extension::sdk::LogicalAggStage> clone() const override {
+        return make();
+    }
+
     static inline std::unique_ptr<extension::sdk::LogicalAggStage> make() {
         return std::make_unique<TestLogicalStageCompile>();
     }
@@ -375,7 +379,8 @@ static constexpr std::string_view kLeafDName = "$leafD";
 class LeafAAstNode : public sdk::AggStageAstNode {
 public:
     LeafAAstNode() : sdk::AggStageAstNode(kLeafAName) {}
-    std::unique_ptr<sdk::LogicalAggStage> bind() const override {
+    std::unique_ptr<sdk::LogicalAggStage> bind(
+        const ::MongoExtensionCatalogContext& catalogContext) const override {
         return std::make_unique<TransformLogicalAggStage>();
     }
     std::unique_ptr<sdk::AggStageAstNode> clone() const override {
@@ -386,7 +391,8 @@ public:
 class LeafBAstNode : public sdk::AggStageAstNode {
 public:
     LeafBAstNode() : sdk::AggStageAstNode(kLeafBName) {}
-    std::unique_ptr<sdk::LogicalAggStage> bind() const override {
+    std::unique_ptr<sdk::LogicalAggStage> bind(
+        const ::MongoExtensionCatalogContext& catalogContext) const override {
         return std::make_unique<TransformLogicalAggStage>();
     }
     std::unique_ptr<sdk::AggStageAstNode> clone() const override {
@@ -397,7 +403,8 @@ public:
 class LeafCAstNode : public sdk::AggStageAstNode {
 public:
     LeafCAstNode() : sdk::AggStageAstNode(kLeafCName) {}
-    std::unique_ptr<sdk::LogicalAggStage> bind() const override {
+    std::unique_ptr<sdk::LogicalAggStage> bind(
+        const ::MongoExtensionCatalogContext& catalogContext) const override {
         return std::make_unique<TransformLogicalAggStage>();
     }
     std::unique_ptr<sdk::AggStageAstNode> clone() const override {
@@ -408,7 +415,8 @@ public:
 class LeafDAstNode : public sdk::AggStageAstNode {
 public:
     LeafDAstNode() : sdk::AggStageAstNode(kLeafDName) {}
-    std::unique_ptr<sdk::LogicalAggStage> bind() const override {
+    std::unique_ptr<sdk::LogicalAggStage> bind(
+        const ::MongoExtensionCatalogContext& catalogContext) const override {
         return std::make_unique<TransformLogicalAggStage>();
     }
     std::unique_ptr<sdk::AggStageAstNode> clone() const override {
@@ -676,7 +684,8 @@ public:
         --alive;
     }
 
-    std::unique_ptr<sdk::LogicalAggStage> bind() const override {
+    std::unique_ptr<sdk::LogicalAggStage> bind(
+        const ::MongoExtensionCatalogContext& catalogContext) const override {
         return std::make_unique<TransformLogicalAggStage>();
     }
 

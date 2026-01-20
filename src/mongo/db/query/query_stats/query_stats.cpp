@@ -37,8 +37,10 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/partitioned.h"
 #include "mongo/db/query/lru_key_value.h"
+#include "mongo/db/query/query_execution_knobs_gen.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
-#include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/query_integration_knobs_gen.h"
+#include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/db/query/query_stats/query_stats_failed_to_record_info.h"
 #include "mongo/db/query/query_stats/query_stats_on_parameter_change.h"
 #include "mongo/db/query/query_stats/rate_limiting.h"
@@ -291,6 +293,7 @@ void updateQueryPlannerStatistics(QueryPlannerEntry& queryPlannerEntryToUpdate,
     queryPlannerEntryToUpdate.usedDisk.aggregate(snapshot.usedDisk);
     queryPlannerEntryToUpdate.fromMultiPlanner.aggregate(snapshot.fromMultiPlanner);
     queryPlannerEntryToUpdate.fromPlanCache.aggregate(snapshot.fromPlanCache);
+    queryPlannerEntryToUpdate.planningTimeMicros.aggregate(snapshot.planningTimeMicros);
 }
 
 void updateWriteStatistics(WritesEntry& writeEntryToUpdate, const QueryStatsSnapshot& snapshot) {
@@ -372,8 +375,13 @@ void registerRequest(OperationContext* opCtx,
         return;
     }
 
-    // Don't record queries from internal clients.
-    if (opCtx->getClient()->isInternalClient()) {
+    // Don't record queries from internal clients if the feature flag is disabled.
+    if (!feature_flags::gFeatureFlagQueryStatsForInternalClients.isEnabled() &&
+        opCtx->getClient()->isInternalClient()) {
+        LOGV2_DEBUG(11434101,
+                    5,
+                    "not collecting query stats for this internal request",
+                    "collection"_attr = collection);
         return;
     }
 
@@ -503,6 +511,7 @@ QueryStatsSnapshot captureMetrics(const OperationContext* opCtx,
         metrics.usedDisk,
         metrics.fromMultiPlanner,
         metrics.fromPlanCache.value_or(false),
+        metrics.planningTime.value_or(Microseconds(0)).count(),
         static_cast<uint64_t>(metrics.nMatched.value_or(0)),
         static_cast<uint64_t>(metrics.nUpserted.value_or(0)),
         static_cast<uint64_t>(metrics.nModified.value_or(0)),

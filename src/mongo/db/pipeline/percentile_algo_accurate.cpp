@@ -29,7 +29,9 @@
 
 #include "mongo/db/pipeline/percentile_algo_accurate.h"
 
-#include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/query_execution_knobs_gen.h"
+#include "mongo/db/query/query_integration_knobs_gen.h"
+#include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/db/sorter/sorter_template_defs.h"
 #include "mongo/platform/atomic_word.h"
 
@@ -83,7 +85,7 @@ void AccuratePercentile::spill() {
 
     _numTotalValuesSpilled += _accumulatedValues.size();
 
-    FileBasedSorterStorage<Value, Value> sorterStorage(_spillFile, _expCtx->getTempDir());
+    sorter::FileBasedSorterStorage<Value, Value> sorterStorage(_spillFile, _expCtx->getTempDir());
     std::unique_ptr<SortedStorageWriter<Value, Value>> writer =
         sorterStorage.makeWriter(SortOptions().TempDir(_expCtx->getTempDir()));
 

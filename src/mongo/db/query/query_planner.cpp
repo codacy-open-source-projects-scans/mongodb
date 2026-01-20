@@ -82,8 +82,10 @@
 #include "mongo/db/query/planner_access.h"
 #include "mongo/db/query/planner_analysis.h"
 #include "mongo/db/query/planner_ixselect.h"
+#include "mongo/db/query/query_execution_knobs_gen.h"
+#include "mongo/db/query/query_integration_knobs_gen.h"
 #include "mongo/db/query/query_knob_configuration.h"
-#include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/db/query/query_request_helper.h"
@@ -1752,7 +1754,8 @@ StatusWith<QueryPlanner::PlanRankingResult> QueryPlanner::planWithCostBasedRanki
 
     return QueryPlanner::PlanRankingResult{.solutions = std::move(acceptedSoln),
                                            .rejectedPlans = std::move(rejectedSoln),
-                                           .estimates = std::move(estimates)};
+                                           .estimates = std::move(estimates),
+                                           .needsWorksMeasured = true};
 }
 
 /**

@@ -50,7 +50,9 @@
 #include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
 #include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
 #include "mongo/db/query/plan_summary_stats.h"
-#include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/query_execution_knobs_gen.h"
+#include "mongo/db/query/query_integration_knobs_gen.h"
+#include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/service_context.h"
@@ -105,12 +107,15 @@ public:
     /**
      * Like parse, but takes a LiteParsedPipeline instead of raw BSONObjs.
      * If 'isFacetPipeline' is true, skips top-level validators.
+     * If `useStubInterface` is true, a StubMongoProcessInterface will be used during parsing,
+     * then restored with the original interface after parsing.
      */
     static std::unique_ptr<Pipeline> parseFromLiteParsed(
         const LiteParsedPipeline& liteParsedPipeline,
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         PipelineValidatorCallback validator = nullptr,
-        bool isFacetPipeline = false);
+        bool isFacetPipeline = false,
+        bool useStubInterface = false);
 
     /**
      * Creates a Pipeline from an existing DocumentSourceContainer.

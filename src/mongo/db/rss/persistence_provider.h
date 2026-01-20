@@ -31,6 +31,8 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
+#include "mongo/db/repl/read_concern_level.h"
+#include "mongo/db/write_concern_options.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/version/releases.h"
 
@@ -152,6 +154,12 @@ public:
     virtual bool supportsUnstableCheckpoints() const = 0;
 
     /**
+     * If true, the provider can support preserving prepared transactions in the precise
+     * checkpoints.
+     */
+    virtual bool supportsPreservingPreparedTxnInPreciseCheckpoints() const = 0;
+
+    /**
      * If true, the provider can support logging (i.e. journaling) on individual tables.
      */
     virtual bool supportsTableLogging() const = 0;
@@ -172,6 +180,11 @@ public:
      * TODO SERVER-113061: remove this workaround.
      */
     virtual bool supportsTableVerify() const = 0;
+
+    virtual bool supportsWriteConcernOptions(
+        const WriteConcernOptions& writeConcernOptions) const = 0;
+
+    virtual bool supportsReadConcernLevel(const repl::ReadConcernLevel& readConcernLevel) const = 0;
 
     /**
      * If true, we disable transaction update coalescing on secondaries.

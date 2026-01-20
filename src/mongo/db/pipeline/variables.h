@@ -254,6 +254,13 @@ public:
     }
 
     /**
+     * Return true if the passed-in variable name belongs to a builtin variable.
+     */
+    static auto isBuiltin(const char* name) {
+        return kBuiltinVarNameToId.find(name) != kBuiltinVarNameToId.end();
+    }
+
+    /**
      * Define the value of the $$USER_ROLES variable.
      */
     void defineUserRoles(OperationContext* opCtx);
@@ -286,7 +293,7 @@ private:
     absl::flat_hash_map<Id, ValueAndState> _definitions;
 
     // Contains variables that should be constant throughout the whole query execution. We create
-    // copies of Varialbes object for sub-pipelines (e.g $lookup). std::shared_ptr allows us to keep
+    // copies of Variables object for sub-pipelines (e.g $lookup). std::shared_ptr allows us to keep
     // these values the same across all copies.
     std::shared_ptr<absl::flat_hash_map<Id, ValueAndState>> _queryConstantDefinitions;
 };

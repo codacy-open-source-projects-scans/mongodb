@@ -150,13 +150,15 @@ namespace mongo {
         bool evaluatedCondition{__VA_ARGS__};                                                   \
         if (!evaluatedCondition || (featureFlagValue && !featureFlagValue->canBeEnabled())) {   \
             LiteParsedDocumentSource::registerParser("$" #key,                                  \
-                                                     LiteParsedDocumentSource::parseDisabled,   \
-                                                     allowedWithApiStrict,                      \
-                                                     clientType);                               \
+                                                     {LiteParsedDocumentSource::parseDisabled,  \
+                                                      false,                                    \
+                                                      false,                                    \
+                                                      allowedWithApiStrict,                     \
+                                                      clientType});                             \
             return;                                                                             \
         }                                                                                       \
         LiteParsedDocumentSource::registerParser(                                               \
-            "$" #key, liteParser, allowedWithApiStrict, clientType);                            \
+            "$" #key, {liteParser, false, false, allowedWithApiStrict, clientType});            \
     }
 
 #define ALLOCATE_AND_REGISTER_STAGE_PARAMS(registrationName, StageParamsClass) \
@@ -206,14 +208,16 @@ namespace mongo {
  * Registers a fallback LiteParsedDocumentSource parser that will be used when no primary parser is
  * registered or when the associated feature flag is disabled.
  */
-#define REGISTER_LITE_PARSED_DOCUMENT_SOURCE_FALLBACK(                                             \
-    key, liteParser, allowedWithApiStrict, featureFlag)                                            \
-    MONGO_INITIALIZER_GENERAL(addToLiteParsedFallbackParserMap_##key,                              \
-                              ("BeginDocumentSourceFallbackRegistration"),                         \
-                              ("EndDocumentSourceFallbackRegistration"))                           \
-    (InitializerContext*) {                                                                        \
-        LiteParsedDocumentSource::registerFallbackParser(                                          \
-            "$" #key, liteParser, featureFlag, allowedWithApiStrict, AllowedWithClientType::kAny); \
+#define REGISTER_LITE_PARSED_DOCUMENT_SOURCE_FALLBACK(                                      \
+    key, liteParser, allowedWithApiStrict, featureFlag)                                     \
+    MONGO_INITIALIZER_GENERAL(addToLiteParsedFallbackParserMap_##key,                       \
+                              ("BeginDocumentSourceFallbackRegistration"),                  \
+                              ("EndDocumentSourceFallbackRegistration"))                    \
+    (InitializerContext*) {                                                                 \
+        LiteParsedDocumentSource::registerFallbackParser(                                   \
+            "$" #key,                                                                       \
+            featureFlag,                                                                    \
+            {liteParser, false, false, allowedWithApiStrict, AllowedWithClientType::kAny}); \
     }
 
 /**
@@ -326,7 +330,7 @@ public:
     };
 
     /**
-     * Describes context pipelineDependentDistributedPlanLogic() should take into account to make a
+     * Describes context distributedPlanLogic() should take into account to make a
      * decision about whether or not a document source can be pushed down to shards.
      */
     struct DistributedPlanContext {
@@ -625,23 +629,13 @@ public:
      * behaviour is required, a new source should be created and configured appropriately. It is an
      * error for the returned DistributedPlanLogic to have identical pointers for 'shardsStage' and
      * 'mergingStage'.
-     */
-    virtual boost::optional<DistributedPlanLogic> distributedPlanLogic() = 0;
-
-    /**
-     * Check if a source is able to run in parallel across a distributed collection, given
-     * sharding context and that it will be evaluated _after_ pipelinePrefix, and _before_
-     * pipelineSuffix.
      *
-     * For stages which do not have any pipeline-dependent behaviour, the default impl
-     * calls distributedPlanLogic.
-     *
-     * See distributedPlanLogic() for conditions and return values.
+     * Stages with pipeline-dependent behaviour (such as $group) rely on the sharding and pipeline
+     * context when provided to determine the distributed plan logic. Other stages will ignore the
+     * context.
      */
-    virtual boost::optional<DistributedPlanLogic> pipelineDependentDistributedPlanLogic(
-        const DistributedPlanContext& ctx) {
-        return distributedPlanLogic();
-    }
+    virtual boost::optional<DistributedPlanLogic> distributedPlanLogic(
+        const DistributedPlanContext* ctx = nullptr) = 0;
 
     /**
      * Returns true if it would be correct to execute this stage in parallel across the shards in
@@ -685,8 +679,6 @@ public:
      *
      * Pipeline::bindCatalogInfo() MUST be invoked on any pipeline before execution begins to
      * ensure all stages receive the necessary catalog information.
-     *
-     * TODO SERVER-113754: $cursor and $geoNearCursor should implement this function.
      */
     virtual void bindCatalogInfo(
         const MultipleCollectionAccessor& collections,

@@ -31,31 +31,23 @@
 
 #include "mongo/unittest/unittest.h"
 
-#include <opentelemetry/metrics/noop.h>
+#ifdef MONGO_CONFIG_OTEL
 #include <opentelemetry/metrics/provider.h>
+#endif  // MONGO_CONFIG_OTEL
 
 namespace mongo::otel::metrics {
-namespace {
 
-class OtelMetricsHistogramTest : public unittest::Test {
-public:
-    void setUp() override {
-        opentelemetry::metrics::Provider::SetMeterProvider(
-            std::make_shared<opentelemetry::metrics::NoopMeterProvider>());
-    }
-
-    void tearDown() override {
-        opentelemetry::metrics::Provider::SetMeterProvider({});
-    }
-};
-}  // namespace
-
-TEST_F(OtelMetricsHistogramTest, Int64Histogram) {
-    auto histogram = HistogramImpl<int64_t>(
-        opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("test_meter").get(),
+TEST(OtelMetricsHistogramTest, Int64Histogram) {
+#ifdef MONGO_CONFIG_OTEL
+    HistogramImpl<int64_t> histogram(
+        *opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("test_meter"),
         "name",
         "description",
-        "unit");
+        "unit",
+        boost::none);
+#else
+    HistogramImpl<int64_t> histogram;
+#endif  // MONGO_CONFIG_OTEL
 
     histogram.record(0);
     histogram.record(std::numeric_limits<int64_t>::max());
@@ -67,12 +59,17 @@ TEST_F(OtelMetricsHistogramTest, Int64Histogram) {
         histogram.record(std::numeric_limits<uint64_t>::max()), DBException, ErrorCodes::BadValue);
 }
 
-TEST_F(OtelMetricsHistogramTest, DoubleHistogram) {
-    auto histogram = HistogramImpl<double>(
-        opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("test_meter").get(),
+TEST(OtelMetricsHistogramTest, DoubleHistogram) {
+#ifdef MONGO_CONFIG_OTEL
+    HistogramImpl<double> histogram(
+        *opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("test_meter"),
         "name",
         "description",
-        "unit");
+        "unit",
+        boost::none);
+#else
+    HistogramImpl<double> histogram;
+#endif  // MONGO_CONFIG_OTEL
 
     histogram.record(0.0);
     histogram.record(std::numeric_limits<double>::max());
@@ -81,12 +78,17 @@ TEST_F(OtelMetricsHistogramTest, DoubleHistogram) {
     ASSERT_THROWS_CODE(histogram.record(-1), DBException, ErrorCodes::BadValue);
 }
 
-TEST_F(OtelMetricsHistogramTest, HistogramSerialization) {
-    auto histogram = HistogramImpl<int64_t>(
-        opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("test_meter").get(),
+TEST(OtelMetricsHistogramTest, HistogramSerialization) {
+#ifdef MONGO_CONFIG_OTEL
+    HistogramImpl<int64_t> histogram(
+        *opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("test_meter"),
         "name",
         "description",
-        "unit");
+        "unit",
+        boost::none);
+#else
+    HistogramImpl<int64_t> histogram;
+#endif  // MONGO_CONFIG_OTEL
 
     const auto document1 = histogram.serializeToBson("histogram_seconds");
     ASSERT_BSONOBJ_EQ(document1,

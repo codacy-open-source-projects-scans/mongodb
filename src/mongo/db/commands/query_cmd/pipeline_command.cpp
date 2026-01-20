@@ -36,6 +36,7 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/query_cmd/extension_metrics.h"
 #include "mongo/db/commands/query_cmd/run_aggregate.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/namespace_string.h"
@@ -47,7 +48,9 @@
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/explain_verbosity_gen.h"
-#include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/query_execution_knobs_gen.h"
+#include "mongo/db/query/query_integration_knobs_gen.h"
+#include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/query/query_settings/query_settings_service.h"
 #include "mongo/db/read_concern_support_result.h"
@@ -131,7 +134,7 @@ public:
                     !aggregationRequest.getQuerySettings().has_value());
 
         return std::make_unique<Invocation>(
-            this, opMsgRequest, std::move(aggregationRequest), std::move(privileges));
+            this, opMsgRequest, std::move(aggregationRequest), std::move(privileges), opCtx);
     }
 
     bool allowedWithSecurityToken() const final {
@@ -167,18 +170,44 @@ public:
         Invocation(Command* cmd,
                    const OpMsgRequest& request,
                    AggregateCommandRequest aggregationRequest,
-                   PrivilegeVector privileges)
+                   PrivilegeVector privileges,
+                   OperationContext* opCtx)
             : CommandInvocation(cmd),
               _request(request),
               _dbName(aggregationRequest.getDbName()),
               _aggregationRequest(std::move(aggregationRequest)),
               _ifrContext([&]() {
-                  if (const auto& requestFlagValues = _aggregationRequest.getIfrFlags()) {
-                      return std::make_shared<IncrementalFeatureRolloutContext>(*requestFlagValues);
+                  const auto& requestFlagValues = _aggregationRequest.getIfrFlags();
+                  auto ifrContext = requestFlagValues.has_value()
+                      ? std::make_shared<IncrementalFeatureRolloutContext>(
+                            requestFlagValues.value())
+                      : std::make_shared<IncrementalFeatureRolloutContext>();
+
+                  // If there is no value for the feature flag passed on the request, that either
+                  // means we have a direct user request (so we should check the node's flag value),
+                  // or it means we have a request from a router where the value of the flag is
+                  // false (so we should also commit to flag value false).
+                  // TODO SERVER-116472 Remove this when the router sends all IFRContext flags,
+                  // regardless of flag value.
+                  const auto& vectorSearchFlagName =
+                      feature_flags::gFeatureFlagVectorSearchExtension.getName();
+                  bool hasVectorSearchFlag = requestFlagValues.has_value() &&
+                      std::any_of(requestFlagValues->begin(),
+                                  requestFlagValues->end(),
+                                  [&](const BSONObj& obj) {
+                                      return obj["name"].valueStringData() == vectorSearchFlagName;
+                                  });
+                  const bool isComingFromRouter =
+                      aggregation_request_helper::getFromRouter(_aggregationRequest);
+                  if (!hasVectorSearchFlag && isComingFromRouter) {
+                      ifrContext->disableFlag(feature_flags::gFeatureFlagVectorSearchExtension);
                   }
-                  return std::make_shared<IncrementalFeatureRolloutContext>();
+                  return ifrContext;
               }()),
-              _liteParsedPipeline(_aggregationRequest, false, {.ifrContext = _ifrContext}),
+              _extensionMetrics(
+                  static_cast<const PipelineCommand*>(cmd)->getExtensionMetricsAllocation()),
+              _liteParsedPipeline(
+                  _aggregationRequest, false, {.ifrContext = _ifrContext, .opCtx = opCtx}),
               _privileges(std::move(privileges)) {
             auto externalDataSources = _aggregationRequest.getExternalDataSources();
             // Support collection-less aggregate commands without $_externalDataSources.
@@ -306,6 +335,7 @@ public:
                     _aggregationRequest.getNamespace().tenantId(),
                     _aggregationRequest.getSerializationContext());
             }
+            _extensionMetrics.markSuccess();
         }
 
         NamespaceString ns() const override {
@@ -368,6 +398,7 @@ public:
         // that a consistent and single IFR context is used across the entirety of query processing,
         // including in child subpipelines.
         std::shared_ptr<IncrementalFeatureRolloutContext> _ifrContext;
+        ExtensionMetrics _extensionMetrics;
         const LiteParsedPipeline _liteParsedPipeline;
         const PrivilegeVector _privileges;
         std::vector<std::pair<NamespaceString, std::vector<ExternalDataSourceInfo>>>
@@ -396,6 +427,22 @@ public:
     bool allowedInTransactions() const final {
         return true;
     }
+
+    const ExtensionMetricsAllocation& getExtensionMetricsAllocation() const {
+        tassert(
+            11695901,
+            "Expected cluster role to have been initialized before requesting extension metrics",
+            _extensionMetricsAllocation.has_value());
+        return _extensionMetricsAllocation.get();
+    }
+
+protected:
+    void doInitializeClusterRole(ClusterRole role) override {
+        _extensionMetricsAllocation.emplace(getName(), role);
+    }
+
+private:
+    boost::optional<ExtensionMetricsAllocation> _extensionMetricsAllocation;
 };
 MONGO_REGISTER_COMMAND(PipelineCommand).forShard();
 

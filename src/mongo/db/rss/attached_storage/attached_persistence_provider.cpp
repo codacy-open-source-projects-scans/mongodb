@@ -111,6 +111,10 @@ bool AttachedPersistenceProvider::supportsUnstableCheckpoints() const {
     return true;
 }
 
+bool AttachedPersistenceProvider::supportsPreservingPreparedTxnInPreciseCheckpoints() const {
+    return false;
+}
+
 bool AttachedPersistenceProvider::supportsTableLogging() const {
     return true;
 }
@@ -124,6 +128,16 @@ bool AttachedPersistenceProvider::supportsOplogSampling() const {
 }
 
 bool AttachedPersistenceProvider::supportsTableVerify() const {
+    return true;
+}
+
+bool AttachedPersistenceProvider::supportsWriteConcernOptions(
+    const WriteConcernOptions& writeConcernOptions) const {
+    return true;
+}
+
+bool AttachedPersistenceProvider::supportsReadConcernLevel(
+    const repl::ReadConcernLevel& readConcernLevel) const {
     return true;
 }
 

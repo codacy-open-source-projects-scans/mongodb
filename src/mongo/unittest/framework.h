@@ -63,6 +63,8 @@
 #define GTEST_FATAL_FAILURE_(message) \
     GTEST_FATAL_FAILURE_RETURN_ GTEST_MESSAGE_(message, ::testing::TestPartResult::kFatalFailure)
 
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
 #include "mongo/platform/source_location.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/modules.h"
@@ -242,7 +244,75 @@ struct AutoUpdateConfig {
 
 AutoUpdateConfig& getAutoUpdateConfig();
 
+/**
+ * Expose an interface to Googletest's universal printer,
+ * which is necessary for composition of its `PrintTo` hook,
+ * but is unfortunately "internal". We should always use this
+ * wrapper instead of directly calling that internal function.
+ */
+void universalPrint(const auto& v, std::ostream& os) {
+    testing::internal::UniversalTersePrint(v, &os);
+}
+
+/**
+ * It's configurable what Gmock will do with an "uninteresting"
+ * call. That is, a call to a function that has no `EXPECT_CALL`
+ * set upon it.
+ *
+ * Gmock behavior is "naggy" by default. Our wrapper changes this to "nice",
+ * which is actually preferred by Gmock's docs despite not being the default.
+ * Temporarily setting the default mock behavior to "naggy" during development
+ * can be very useful instrumentation.
+ *
+ * For more information on the behaviors, see
+ * https://google.github.io/googletest/gmock_cook_book.html#NiceStrictNaggy
+ *
+ * This default can be observed and adjusted on a per-test basis with
+ * `getDefaultMockBehavior` and `setDefaultMockBehavior`.
+ *
+ * The adjustments rely on an undocumented `GMOCK_FLAG`, so we're exporting
+ * this facility to our framework wrapper as an abstraction.
+ */
+enum class MockBehavior {
+    nice,    ///< The call is silently accepted
+    naggy,   ///< The call is warned about
+    strict,  ///< The call induces test failure
+};
+
+MockBehavior getDefaultMockBehavior();
+
+/**
+ * Changes to this behavior are reset after each test case.
+ * Internally it's a Gmock flag, so it is saved and restored by FlagSaver.
+ * It's not necessary to reset the behavior after each test case.
+ */
+void setDefaultMockBehavior(MockBehavior behavior);
+
 }  // namespace mongo::unittest
+
+namespace mongo {
+/**
+ * A gtest printer for `mongo::StringData`.
+ * Renders it as if it was a `std::string_view`.
+ * https://google.github.io/googletest/advanced.html#teaching-googletest-how-to-print-your-values
+ */
+inline void PrintTo(StringData s, std::ostream* os) {
+    unittest::universalPrint(toStdStringViewForInterop(s), *os);
+}
+
+inline void PrintTo(const Status& s, std::ostream* os) {
+    *os << s.toString();
+}
+
+template <typename T>
+inline void PrintTo(const StatusWith<T>& s, std::ostream* os) {
+    if (s.isOK()) {
+        *os << ::testing::PrintToString(s.getValue());
+    } else {
+        *os << ::testing::PrintToString(s.getStatus());
+    }
+}
+}  // namespace mongo
 
 /**
  * Defines a gtest-compatible printer for boost::optional in the boost namespace so that it's

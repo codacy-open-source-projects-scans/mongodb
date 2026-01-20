@@ -40,7 +40,9 @@ constexpr StringData kUsingOtelOnWindows =
 }
 #endif  // not MONGO_CONFIG_OTEL
 
-OtelMetricsCapturer::OtelMetricsCapturer() {
+OtelMetricsCapturer::OtelMetricsCapturer() : OtelMetricsCapturer(MetricsService::instance()) {}
+
+OtelMetricsCapturer::OtelMetricsCapturer(MetricsService& metricsService) {
 #ifdef MONGO_CONFIG_OTEL
     invariant(isNoopMeterProvider(opentelemetry::metrics::Provider::GetMeterProvider().get()));
 
@@ -57,6 +59,10 @@ OtelMetricsCapturer::OtelMetricsCapturer() {
     std::shared_ptr<opentelemetry::sdk::metrics::MeterProvider> provider =
         opentelemetry::sdk::metrics::MeterProviderFactory::Create();
     provider->AddMetricReader(std::move(reader));
+
+    // Initialize metrics that were created before the MeterProvider was set.
+    metricsService.initialize(*provider);
+
     opentelemetry::metrics::Provider::SetMeterProvider(std::move(provider));
 #endif  // MONGO_CONFIG_OTEL
 }
@@ -100,6 +106,21 @@ int64_t OtelMetricsCapturer::readInt64Gauge(MetricName name) {
             std::holds_alternative<int64_t>(data.value_));
 
     return std::get<int64_t>(data.value_);
+#else
+    invariant(false, kUsingOtelOnWindows);
+    return {};
+#endif  // MONGO_CONFIG_OTEL
+}
+
+double OtelMetricsCapturer::readDoubleGauge(MetricName name) {
+#ifdef MONGO_CONFIG_OTEL
+    auto data = getMetricData<opentelemetry::sdk::metrics::LastValuePointData>(name);
+
+    massert(ErrorCodes::TypeMismatch,
+            fmt::format("Metric {} does not have matching value type", name.getName()),
+            std::holds_alternative<double>(data.value_));
+
+    return std::get<double>(data.value_);
 #else
     invariant(false, kUsingOtelOnWindows);
     return {};

@@ -112,6 +112,10 @@ constexpr double kDefaultOptimizeAtPriority = 10.0;
 // For rules that optimize a stage in place.
 constexpr double kDefaultOptimizeInPlacePriority = 1.0;
 
+namespace registration_detail {
+class RuleRegistry;
+}
+
 /**
  * Provides methods for walking and modifying a pipeline. Treats the pipeline as a linked list. Uses
  * the document source visitor registry to track which rules can apply to which document sources.
@@ -124,15 +128,16 @@ public:
         InPlace = 1 << 0,
         // Rules that may e.g. reorder, combine or remove stages.
         Reordering = 1 << 1,
+        // Rules that will be applied for testing.
+        // Protected by 'enablePipelineOptimizationAdditionalTestingRules' query knob.
+        Testing = 1 << 2,
     };
 
-    PipelineRewriteContext(Pipeline& pipeline)
-        : PipelineRewriteContext(*pipeline.getContext(), pipeline.getSources()) {}
+    PipelineRewriteContext(Pipeline& pipeline);
 
     PipelineRewriteContext(ExpressionContext& expCtx,
                            DocumentSourceContainer& container,
-                           boost::optional<DocumentSourceContainer::iterator> startingPos = {})
-        : _container(container), _itr(startingPos.value_or(_container.begin())), _expCtx(expCtx) {}
+                           boost::optional<DocumentSourceContainer::iterator> startingPos = {});
 
     bool hasMore() const final {
         return _itr != _container.end();
@@ -181,6 +186,14 @@ public:
         return std::next(_itr) == _container.end();
     }
 
+    const PathArrayness& getPathArrayness() {
+        return _expCtx.getMainCollPathArrayness();
+    }
+
+    ExpressionContext& getExpCtx() {
+        return _expCtx;
+    }
+
     std::string debugString() const;
 
 private:
@@ -188,6 +201,7 @@ private:
     DocumentSourceContainer::iterator _itr;
 
     ExpressionContext& _expCtx;
+    registration_detail::RuleRegistry& _registry;
 
     friend struct Transforms;
 };
@@ -200,6 +214,8 @@ using PipelineRewriteEngine = RewriteEngine<PipelineRewriteContext>;
  * transforms to manipulate the pipeline.
  */
 struct Transforms {
+    static void replaceCurrentStage(PipelineRewriteContext& ctx,
+                                    boost::intrusive_ptr<DocumentSource> ds);
     static bool swapStageWithPrev(PipelineRewriteContext& ctx);
     static bool swapStageWithNext(PipelineRewriteContext& ctx);
     static bool insertBefore(PipelineRewriteContext& ctx, DocumentSource& d);
@@ -280,7 +296,7 @@ inline bool alwaysTrue(PipelineRewriteContext&) {
 namespace registration_detail {
 
 void registerRules(ServiceContext* serviceCtx,
-                   std::type_index key,
+                   DocumentSource::Id key,
                    std::vector<Rule<PipelineRewriteContext>> rules,
                    FeatureFlag* featureFlag = nullptr);
 
@@ -288,7 +304,7 @@ template <std::derived_from<DocumentSource> DS>
 void registerRules(ServiceContext* serviceCtx,
                    std::vector<Rule<PipelineRewriteContext>> rules,
                    FeatureFlag* featureFlag = nullptr) {
-    registerRules(serviceCtx, typeid(DS), std::move(rules), featureFlag);
+    registerRules(serviceCtx, DS::id, std::move(rules), featureFlag);
 }
 
 void clearRulesForTest(ServiceContext* serviceCtx);

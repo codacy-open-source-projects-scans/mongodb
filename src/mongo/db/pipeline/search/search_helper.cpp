@@ -178,6 +178,15 @@ parseMongotResponseCursors(std::vector<std::unique_ptr<executor::TaskExecutorCur
 
 void planShardedSearch(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                        InternalSearchMongotRemoteSpec* remoteSpec) {
+    // The parsed pipeline won't be executed so we don't need the planShardedSearch result.
+    if (!expCtx->getMongoProcessInterface()->isExpectedToExecuteQueries()) {
+        LOGV2_DEBUG(11507801,
+                    5,
+                    "Skipping planShardedSearch while parsing only for query shape",
+                    "ns"_attr = expCtx->getNamespaceString().coll());
+        return;
+    }
+
     LOGV2_DEBUG(9497008,
                 5,
                 "planShardedSearch",
@@ -240,11 +249,9 @@ bool isSearchMetaPipeline(const Pipeline* pipeline) {
 }
 
 void checkAndSetViewOnExpCtx(boost::intrusive_ptr<ExpressionContext> expCtx,
-                             const std::vector<mongo::BSONObj> pipelineObj,
+                             const LiteParsedPipeline& liteParsedPipeline,
                              ResolvedView resolvedView,
                              const NamespaceString& viewName) {
-    auto lpp = LiteParsedPipeline(viewName, pipelineObj);
-
     // Search queries on views behave differently than non-search aggregations on views.
     // When a user pipeline contains a $search/$vectorSearch stage, idLookup will apply the
     // view transforms as part of its subpipeline. In this way, the view stages will always
@@ -254,7 +261,7 @@ void checkAndSetViewOnExpCtx(boost::intrusive_ptr<ExpressionContext> expCtx,
     // storedSource is disabled, idLookup will retrieve full/unmodified documents during
     // (from the _id values returned by mongot), apply the view's data transforms, and pass
     // said transformed documents through the rest of the user pipeline.
-    if (lpp.hasSearchStage() && !resolvedView.getPipeline().empty()) {
+    if (liteParsedPipeline.hasSearchStage() && !resolvedView.getPipeline().empty()) {
         expCtx->setView(boost::make_optional(
             ViewInfo(viewName, resolvedView.getNamespace(), resolvedView.getPipeline())));
     }
@@ -305,6 +312,12 @@ bool isMongotStage(DocumentSource* stage) {
          dynamic_cast<mongo::DocumentSourceVectorSearch*>(stage) ||
          dynamic_cast<mongo::DocumentSourceListSearchIndexes*>(stage) ||
          dynamic_cast<mongo::DocumentSourceSearchMeta*>(stage));
+}
+
+// TODO SERVER-116021 Remove this function when the extension can do this through ViewPolicy.
+bool isExtensionVectorSearchStage(std::string stageName) {
+    return stageName == kExtensionVectorSearchStageName ||
+        stageName == DocumentSourceVectorSearch::kStageName;
 }
 
 void assertSearchMetaAccessValid(const DocumentSourceContainer& pipeline,

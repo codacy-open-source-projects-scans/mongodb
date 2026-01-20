@@ -50,19 +50,22 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/exec/agg/exchange_stage.h"
 #include "mongo/db/exec/disk_use_options_gen.h"
+#include "mongo/db/extension/host/extension_vector_search_server_status.h"
+#include "mongo/db/feature_flag.h"
 #include "mongo/db/fle_crud.h"
+#include "mongo/db/ifr_flag_retry_info.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/memory_tracking/operation_memory_usage_tracker.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/aggregation_hint_translation.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/pipeline/change_stream_invalidation_info.h"
-#include "mongo/db/pipeline/desugarer.h"
 #include "mongo/db/pipeline/document_source_exchange.h"
 #include "mongo/db/pipeline/document_source_geo_near.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/expression_context_diagnostic_printer.h"
+#include "mongo/db/pipeline/lite_parsed_desugarer.h"
 #include "mongo/db/pipeline/optimization/optimize.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/pipeline_d.h"
@@ -639,6 +642,30 @@ std::vector<std::unique_ptr<Pipeline>> createExchangePipelinesIfNeeded(
     return pipelines;
 }
 
+/**
+ * Creates a new metadata pipeline for mongot queries if needed. Otherwise, return the original
+ * 'pipeline' as a single vector element.
+ */
+std::vector<std::unique_ptr<Pipeline>> createMongotMetadataPipelineIfNeeded(
+    const AggExState& aggExState,
+    AggCatalogState& aggCatalogState,
+    std::unique_ptr<Pipeline> pipeline,
+    const DocsNeededBounds& mongotBounds) {
+    std::vector<std::unique_ptr<Pipeline>> pipelines;
+    pipelines.push_back(std::move(pipeline));
+
+    auto metadataPipe = search_helpers::prepareSearchForTopLevelPipelineLegacyExecutor(
+        pipelines.back()->getContext(),
+        pipelines.back().get(),
+        mongotBounds,
+        aggExState.getRequest().getCursor().getBatchSize());
+    if (metadataPipe) {
+        pipelines.push_back(std::move(metadataPipe));
+    }
+
+    return pipelines;
+}
+
 std::vector<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> prepareExecutorsForPipeline(
     const AggExState& aggExState,
     AggCatalogState& aggCatalogState,
@@ -656,15 +683,7 @@ std::vector<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> prepareExecuto
         // have gotten from find command.
         execs.emplace_back(std::move(executor));
     } else {
-        // Complete creation of the initial $cursor stage, if needed.
         auto sharedStasher = make_intrusive<ShardRoleTransactionResourcesStasherForPipeline>();
-        auto catalogResourceHandle = make_intrusive<DSCursorCatalogResourceHandle>(sharedStasher);
-        PipelineD::attachInnerQueryExecutorToPipeline(aggCatalogState.getCollections(),
-                                                      attachCallback,
-                                                      std::move(executor),
-                                                      pipeline.get(),
-                                                      catalogResourceHandle);
-
         // We split up mongot setup as bindCatalogInfo() should be called on
         // a desugared search pipeline and requires catalog locks.
         bool isMongotPipeline = search_helpers::isMongotPipeline(pipeline.get());
@@ -677,27 +696,26 @@ std::vector<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> prepareExecuto
             search_helpers::desugarSearchPipeline(pipeline.get());
         }
 
-        pipeline->bindCatalogInfo(aggCatalogState.getCollections(), sharedStasher);
+        // Complete creation of the initial $cursor stage and bind catalog information to stages, if
+        // needed.
+        PipelineD::attachInnerQueryExecutorAndBindCatalogInfoToPipeline(
+            aggCatalogState.getCollections(),
+            attachCallback,
+            std::move(executor),
+            pipeline.get(),
+            sharedStasher);
 
         std::vector<std::unique_ptr<Pipeline>> pipelines;
 
         // Any pipeline that relies on calls to mongot requires additional setup.
         if (isMongotPipeline) {
-            pipelines.push_back(std::move(pipeline));
             // Release locks early, before we make network calls to mongot. This is fine for search
             // setup since they are not reading any local (lock-protected) data in the main
             // pipeline. Stash the ShardRole TransactionResources on the 'sharedStasher' we shared
             // with the pipeline stages.
             aggCatalogState.stashResources(sharedStasher.get());
-
-            auto metadataPipe = search_helpers::prepareSearchForTopLevelPipelineLegacyExecutor(
-                pipelines.back()->getContext(),
-                pipelines.back().get(),
-                mongotBounds,
-                aggExState.getRequest().getCursor().getBatchSize());
-            if (metadataPipe) {
-                pipelines.push_back(std::move(metadataPipe));
-            }
+            pipelines = createMongotMetadataPipelineIfNeeded(
+                aggExState, aggCatalogState, std::move(pipeline), mongotBounds);
         } else {
             // Takes ownership of 'pipeline'.
             pipelines = createExchangePipelinesIfNeeded(aggExState, std::move(pipeline));
@@ -827,80 +845,75 @@ void executeExplain(const AggExState& aggExState,
  */
 Status _runAggregate(std::shared_ptr<AggExState> aggExState, rpc::ReplyBuilderInterface* result);
 
-std::unique_ptr<Pipeline> parsePipelineAndRegisterQueryStats(
-    const AggExState& aggExState,
-    const AggCatalogState& aggCatalogState,
-    boost::intrusive_ptr<ExpressionContext> expCtx) {
-    // If applicable, ensure that the resolved namespace is added to the resolvedNamespaces map on
-    // the expCtx before calling pipeline_factory::makePipeline(). This is necessary for search on
-    // views as pipeline_factory::makePipeline() will first check if a view exists directly on the
-    // stage specification and if none is found, will then check for the view using the expCtx. As
-    // such, it's necessary to add the resolved namespace to the expCtx prior to any call to
-    // pipeline_factory::makePipeline().
+/**
+ * If this is a view aggregation, sets up the resolved namespace on the expression context. This is
+ * necessary for search-on-views as pipeline parsing will first check if a view exists directly on
+ * the stage specification and if none is found, will then check for the view using the expCtx.
+ */
+void setupViewContext(const AggExState& aggExState,
+                      const AggCatalogState& aggCatalogState,
+                      const boost::intrusive_ptr<ExpressionContext>& expCtx) {
+    if (!aggExState.isView()) {
+        return;
+    }
+
+    auto* opCtx = expCtx->getOperationContext();
+    search_helpers::checkAndSetViewOnExpCtx(expCtx,
+                                            aggExState.getOriginalLiteParsedPipeline(),
+                                            aggExState.getResolvedView(),
+                                            aggExState.getOriginalNss());
+
+    if (aggExState.isHybridSearchPipeline()) {
+        uassert(ErrorCodes::OptionNotSupportedOnView,
+                "$rankFusion and $scoreFusion are currently unsupported on views",
+                feature_flags::gFeatureFlagSearchHybridScoringFull
+                    .isEnabledUseLatestFCVWhenUninitialized(
+                        VersionContext::getDecoration(opCtx),
+                        serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
+
+        // This insertion into the ExpressionContext ResolvedNamespaceMap is to handle cases
+        // where the original query desugars into a $unionWith that runs on a view (like
+        // $rankFusion and $scoreFusion). After view resolution (here), we treat the query as if
+        // it was running on the underlying collection, with the view pipeline already
+        // pre-pended to the top of original query, so we don't insert this mapping into all
+        // queries by default. Further, if the original query had a $unionWith on a view, that
+        // ResolvedNamespaceMap entry would already be added at LiteParseing. So in the specific
+        // cases where we have a stage that desugars into $unionWith on a view, this insertion
+        // is necessary.
+        //
+        // Also, in the Hybrid Search case, we know that the view that the $unionWith will run on
+        // will be the same one the entire query is running on (whereas you could conceive of a
+        // situation where a stage desugars into a $unionWith that runs on a different view as
+        // the top-level query view), so we gate this call to only happen during Hybrid Search
+        // queries.
+        expCtx->addResolvedNamespace(aggExState.getOriginalNss(),
+                                     ResolvedNamespace(aggExState.getResolvedView().getNamespace(),
+                                                       aggExState.getResolvedView().getPipeline(),
+                                                       aggCatalogState.getUUID(),
+                                                       true /*involvedNamespaceIsAView*/));
+    }
+}
+
+/**
+ * Computes the query shape hash and looks up query settings for this aggregation. Attaches the
+ * query settings to the expression context and registers query stats for this aggregation request.
+ */
+void computeShapeAndRegisterQueryStats(const AggExState& aggExState,
+                                       const AggCatalogState& aggCatalogState,
+                                       const AggregateCommandRequest& userRequest,
+                                       const Pipeline& pipeline,
+                                       const boost::intrusive_ptr<ExpressionContext>& expCtx) {
     auto* opCtx = expCtx->getOperationContext();
 
-    if (aggExState.isView()) {
-        search_helpers::checkAndSetViewOnExpCtx(expCtx,
-                                                aggExState.getOriginalRequest().getPipeline(),
-                                                aggExState.getResolvedView(),
-                                                aggExState.getOriginalNss());
-
-        if (aggExState.isHybridSearchPipeline()) {
-            uassert(ErrorCodes::OptionNotSupportedOnView,
-                    "$rankFusion and $scoreFusion are currently unsupported on views",
-                    feature_flags::gFeatureFlagSearchHybridScoringFull
-                        .isEnabledUseLatestFCVWhenUninitialized(
-                            VersionContext::getDecoration(opCtx),
-                            serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
-
-            // This insertion into the ExpressionContext ResolvedNamespaceMap is to handle cases
-            // where the original query desugars into a $unionWith that runs on a view (like
-            // $rankFusion and $scoreFusion). After view resolution (here), we treat the query as if
-            // it was running on the underlying collection, with the view pipeline already
-            // pre-pended to the top of original query, so we don't insert this mapping into all
-            // queries by default. Further, if the original query had a $unionWith on a view, that
-            // ResolvedNamespaceMap entry would already be added at LiteParseing. So in the specific
-            // cases where we have a stage that desugars into $unionWith on a view, this insertion
-            // is necessary.
-            //
-            // Also, in the Hybrid Search case, we know that view that the $unionWith will run on
-            // will be the same one the entire query is running on (whereas you could conceive of a
-            // situation where a stage desugars into a $unionWith that runs on a different view as
-            // the top-level query view), so we gate this call to only happen during Hybrid Search
-            // queries.
-            expCtx->addResolvedNamespace(
-                aggExState.getOriginalNss(),
-                ResolvedNamespace(aggExState.getResolvedView().getNamespace(),
-                                  aggExState.getResolvedView().getPipeline(),
-                                  aggCatalogState.getUUID(),
-                                  true /*involvedNamespaceIsAView*/));
-        }
-    }
-
-    // The query shape captured in query stats should reflect the original user request as close as
-    // possible. If we're operating over a view, we first parse just the original user-given request
-    // for the sake of registering query stats. Then, we'll parse the view pipeline and stitch
-    // the two pipelines together below.
-    auto userRequest = aggExState.getOriginalRequest();
-    expCtx->startExpressionCounters();
-    auto pipeline =
-        Pipeline::parseFromLiteParsed(aggExState.getOriginalLiteParsedPipeline(), expCtx);
-    expCtx->stopExpressionCounters();
-
-    const auto& request = aggExState.getRequest();
-    if (request.getTranslatedForViewlessTimeseries()) {
-        pipeline->setTranslated();
-    }
-
-    // Perform the query settings lookup and attach it to 'expCtx'.
-    query_shape::DeferredQueryShape deferredShape{[&]() {
+    query_shape::DeferredQueryShape deferredShape = query_shape::DeferredQueryShape{[&]() {
         return shape_helpers::tryMakeShape<query_shape::AggCmdShape>(
             userRequest,
             aggExState.getOriginalNss(),
             aggExState.getInvolvedNamespaces(),
-            *pipeline,
+            pipeline,
             expCtx);
     }};
+
     auto queryShapeHash = CurOp::get(opCtx)->debug().ensureQueryShapeHash(opCtx, [&]() {
         return shape_helpers::computeQueryShapeHash(
             expCtx, deferredShape, aggExState.getOriginalNss());
@@ -912,41 +925,113 @@ std::unique_ptr<Pipeline> parsePipelineAndRegisterQueryStats(
         expCtx, queryShapeHash, aggExState.getOriginalNss(), userRequest.getQuerySettings());
     expCtx->setQuerySettingsIfNotPresent(std::move(querySettings));
 
-    // Register query stats with the pre-optimized pipeline. Exclude queries with encrypted fields
-    // as indicated by the inclusion of encryptionInformation in the request. We still collect query
-    // stats on collection-less aggregations.
-    if (!aggExState.getRequest().getEncryptionInformation()) {
-        // If this is a query over a resolved view, we want to register query stats with the
-        // original user-given request and pipeline, rather than the new request generated when
-        // resolving the view.
-        auto collectionType = aggCatalogState.determineCollectionType();
-        NamespaceStringSet pipelineInvolvedNamespaces(aggExState.getInvolvedNamespaces());
-        query_stats::registerRequest(
-            aggExState.getOpCtx(),
-            aggExState.getOriginalNss(),
-            [&]() {
-                uassertStatusOKWithContext(deferredShape->getStatus(),
-                                           "Failed to compute query shape");
-                return std::make_unique<query_stats::AggKey>(expCtx,
-                                                             userRequest,
-                                                             std::move(deferredShape->getValue()),
-                                                             std::move(pipelineInvolvedNamespaces),
-                                                             collectionType);
-            },
-            aggExState.hasChangeStream());
-
-        if (aggExState.getRequest().getIncludeQueryStatsMetrics()) {
-            CurOp::get(aggExState.getOpCtx())->debug().getQueryStatsInfo().metricsRequested = true;
-        }
+    // Exclude queries with encrypted fields as indicated by the inclusion of encryptionInformation
+    // in the request. We still collect query stats on collection-less aggregations.
+    if (aggExState.getRequest().getEncryptionInformation()) {
+        return;
     }
 
-    if (aggExState.isView()) {
-        expCtx->startExpressionCounters();
-        // Knowing that the aggregation is a view, overwrite the pipeline.
-        pipeline =
-            aggExState.applyViewToPipeline(expCtx, std::move(pipeline), aggCatalogState.getUUID());
-        expCtx->stopExpressionCounters();
+    // If this is a query over a resolved view, we want to register query stats with the
+    // original user-given request and pipeline, rather than the new request generated when
+    // resolving the view.
+    auto collectionType = aggCatalogState.determineCollectionType();
+    NamespaceStringSet pipelineInvolvedNamespaces(aggExState.getInvolvedNamespaces());
+
+    // Register query stats with the pre-optimized pipeline.
+    query_stats::registerRequest(
+        aggExState.getOpCtx(),
+        aggExState.getOriginalNss(),
+        [&]() {
+            uassertStatusOKWithContext(deferredShape->getStatus(), "Failed to compute query shape");
+            return std::make_unique<query_stats::AggKey>(expCtx,
+                                                         userRequest,
+                                                         std::move(deferredShape->getValue()),
+                                                         std::move(pipelineInvolvedNamespaces),
+                                                         collectionType);
+        },
+        aggExState.hasChangeStream());
+
+    if (aggExState.getRequest().getIncludeQueryStatsMetrics()) {
+        CurOp::get(aggExState.getOpCtx())->debug().getQueryStatsInfo().metricsRequested = true;
     }
+}
+
+/**
+ * Conditionally re-parses the Pipeline from a desugared LiteParsedPipeline. Returns the desugared
+ * pipeline or the original if no desugaring was needed. Certain pipelines don't have desugarable
+ * stages, as indicated by needsSecondParse.
+ */
+std::unique_ptr<Pipeline> reparseIfDesugared(const AggExState& aggExState,
+                                             const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                             std::unique_ptr<Pipeline> pipeline,
+                                             const LiteParsedPipeline& desugaredLPP,
+                                             bool needsSecondParse) {
+    // LiteParsedDesugarer::desugar() is called on the router, so if we're from the router
+    // the pipeline is already desugared.
+    if (expCtx->getFromRouter() || !needsSecondParse) {
+        return pipeline;
+    }
+
+    return Pipeline::parseFromLiteParsed(desugaredLPP, expCtx);
+}
+
+/**
+ * Applies the view pipeline to the user's pipeline if this is a view aggregation.
+ */
+std::unique_ptr<Pipeline> maybeApplyViewPipeline(
+    const AggExState& aggExState,
+    const AggCatalogState& aggCatalogState,
+    const boost::intrusive_ptr<ExpressionContext>& expCtx,
+    std::unique_ptr<Pipeline> pipeline) {
+    if (!aggExState.isView()) {
+        return pipeline;
+    }
+
+    expCtx->startExpressionCounters();
+    pipeline =
+        aggExState.applyViewToPipeline(expCtx, std::move(pipeline), aggCatalogState.getUUID());
+    expCtx->stopExpressionCounters();
+    return pipeline;
+}
+
+std::unique_ptr<Pipeline> parsePipelineAndRegisterQueryStats(
+    const AggExState& aggExState,
+    const AggCatalogState& aggCatalogState,
+    boost::intrusive_ptr<ExpressionContext> expCtx) {
+    // Set up view context if this is a view aggregation.
+    setupViewContext(aggExState, aggCatalogState, expCtx);
+
+    const auto& userRequest = aggExState.getOriginalRequest();
+
+    // Clone and desugar the LiteParsedPipeline. If the pipeline is modified by desugar,
+    // a second parse is required. This is because query shape generation required a full-parsed
+    // pipeline to occur. If there is no second parse required (i.e. desugaring the pipeline doesn't
+    // change it), we can optimize out the second parse.
+    // TODO SPM-4488: Once query shape can be generated from LiteParsed, a second parse will no
+    // longer be required. Simplify the logic as such.
+    LiteParsedPipeline desugaredLPP = aggExState.getOriginalLiteParsedPipeline().clone();
+    bool needsSecondParse = LiteParsedDesugarer::desugar(&desugaredLPP);
+
+    // Parse the user's original pipeline pre-desugar to capture query stats. If the pipeline needs
+    // a second parse, the first parse will be executed with a StubMongoProcessInterface to indicate
+    // that the pipeline isn't expected to execute queries.
+    expCtx->startExpressionCounters();
+    auto pipeline = Pipeline::parseFromLiteParsed(
+        aggExState.getOriginalLiteParsedPipeline(), expCtx, nullptr, false, needsSecondParse);
+    expCtx->stopExpressionCounters();
+
+    computeShapeAndRegisterQueryStats(aggExState, aggCatalogState, userRequest, *pipeline, expCtx);
+
+    // Reparse the desugared pipeline if applicable.
+    pipeline =
+        reparseIfDesugared(aggExState, expCtx, std::move(pipeline), desugaredLPP, needsSecondParse);
+
+    const auto& request = aggExState.getRequest();
+    if (request.getTranslatedForViewlessTimeseries()) {
+        pipeline->setTranslated();
+    }
+
+    pipeline = maybeApplyViewPipeline(aggExState, aggCatalogState, expCtx, std::move(pipeline));
 
     // Validate the entire pipeline with the view definition.
     if (aggCatalogState.lockAcquired()) {
@@ -957,10 +1042,6 @@ std::unique_ptr<Pipeline> parsePipelineAndRegisterQueryStats(
 
     // Report usage statistics for each stage in the pipeline.
     aggExState.tickGlobalStageCounters();
-
-    // Find stages with stage expanders and desugar. We desugar after registering query stats to
-    // ensure that the query shape is representative of the user's original query.
-    Desugarer(pipeline.get())();
 
     return pipeline;
 }
@@ -1069,6 +1150,23 @@ Status executeResolvedAggregate(const AggExState& aggExState,
                   "Namespace changed from collection to view during aggregation planning");
     }
 
+    // TODO SERVER-116021 Remove this check when the extension itself can check and uassert
+    // in its ViewPolicy function, rather than doing it here in the runAggregate
+    // infrastructure. $vectorSearch-as-an-extension is not allowed to run against views, at
+    // least in v8.3. If we see that a $vectorSearch stage exists in the pipeline AND a view
+    // exists, then we throw the IFRFlagRetry to disable the vector search extension flag
+    // and use legacy vector search instead.
+    // TODO SERVER-116994 Remove this check either from here or SERVER-116021 when
+    // $vectorSearch-as-an-extension is allowed against views.
+    if (aggExState.isView() &&
+        aggExState.getIfrContext()->getSavedFlagValue(
+            feature_flags::gFeatureFlagVectorSearchExtension) &&
+        aggExState.getOriginalLiteParsedPipeline().hasExtensionVectorSearchStage()) {
+        uassertStatusOK(
+            Status(IFRFlagRetryInfo(feature_flags::gFeatureFlagVectorSearchExtension.getName()),
+                   "$vectorSearch-as-an-extension is not allowed against views."));
+    }
+
     // Create an RAII object that prints the collection's shard key in the case of a tassert
     // or crash.
     ScopedDebugInfo shardKeyDiagnostics(
@@ -1110,20 +1208,15 @@ Status executeResolvedAggregate(const AggExState& aggExState,
          * that QSN tree may be unowned, so accessing them may lead to use-after-free.
          */
         auto& resForJoin = swResForJoin.getValue();
-        auto attachExecutorCallback =
-            [](const MultipleCollectionAccessor& collections,
-               std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec,
-               Pipeline* pipeline,
-               const boost::intrusive_ptr<CatalogResourceHandle>& catalogResourceHandle) {
-                auto cursor =
-                    DocumentSourceCursor::create(collections,
-                                                 std::move(exec),
-                                                 catalogResourceHandle,
-                                                 pipeline->getContext(),
-                                                 DocumentSourceCursor::CursorType::kRegular,
-                                                 DocumentSourceCursor::ResumeTrackingType::kNone);
-                pipeline->addInitialSource(std::move(cursor));
-            };
+        auto attachExecutorCallback = [](std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec,
+                                         Pipeline* pipeline) {
+            auto cursor =
+                DocumentSourceCursor::create(std::move(exec),
+                                             pipeline->getContext(),
+                                             DocumentSourceCursor::CursorType::kRegular,
+                                             DocumentSourceCursor::ResumeTrackingType::kNone);
+            pipeline->addInitialSource(std::move(cursor));
+        };
 
         // Attach pipeline suffix to SBE executor for join-reordered prefix of the pipeline.
         execs = prepareExecutorsForPipeline(aggExState,
@@ -1316,33 +1409,83 @@ Status runAggregate(
     if (ifrContext == nullptr) {
         ifrContext = std::make_shared<IncrementalFeatureRolloutContext>();
     }
-    auto body = [&]() {
-        auto aggExState = std::make_unique<AggExState>(opCtx,
-                                                       request,
-                                                       liteParsedPipeline,
-                                                       cmdObj,
-                                                       privileges,
-                                                       usedExternalDataSources,
-                                                       verbosity,
-                                                       std::move(ifrContext));
 
-        // NOTE: It's possible this aggExState will be unusable by the time _runAggregate returns.
-        auto status = _runAggregate(std::move(aggExState), result);
+    stdx::unordered_set<IncrementalRolloutFeatureFlag*> initialFlagsToDisable;
+    std::unique_ptr<LiteParsedPipeline> updatedLiteParsed;
+    auto body =
+        [&](stdx::unordered_set<IncrementalRolloutFeatureFlag*>& ifrFlagsToDisableOnRetries) {
+            // Track potentially multiple IFR flags. For example, consider the following case:
+            // 1. runAggregate with IFR Flag A enabled
+            // 2. IFRFlagRetryInfo gets thrown signalling to disable IFR Flag A
+            // 3. runAggregate retries with IFR Flag A pre-disabled
+            // 4. IFRFlagRetryInfo gets thrown signalling to disable IFR Flag B
+            // The correct behavior for the next retry is to run with both IFR Flags A and B
+            // disabled.
+            for (auto* ifrFlag : ifrFlagsToDisableOnRetries) {
+                ifrContext->disableFlag(*ifrFlag);
+            }
 
-        // The aggregation pipeline may change the namespace of the curop and we need to set it back
-        // to the original namespace to correctly report command stats. One example when the
-        // namespace can be changed is when the pipeline contains an $out stage, which executes an
-        // internal command to create a temp collection, changing the curop namespace to the name of
-        // this temp collection.
-        {
-            stdx::lock_guard<Client> lk(*opCtx->getClient());
-            CurOp::get(opCtx)->setNS(lk, request.getNamespace());
-        }
-        return status;
-    };
+            std::unique_ptr<AggExState> aggExState;
+            if (ifrFlagsToDisableOnRetries.empty()) {
+                aggExState = std::make_unique<AggExState>(opCtx,
+                                                          request,
+                                                          liteParsedPipeline,
+                                                          cmdObj,
+                                                          privileges,
+                                                          usedExternalDataSources,
+                                                          verbosity,
+                                                          ifrContext);
+            } else {
+                // Save the newly lite parsed pipeline in a unique pointer. This is because the
+                // AggExState and the resulting AggRequestDerivatives do not take ownership of the
+                // LiteParsedPipeline and we must keep in scope.
+                // TODO SERVER-116471 Investigate ways that we could better keep this alive and in
+                // scope.
+                updatedLiteParsed = std::make_unique<LiteParsedPipeline>(
+                    request, false, LiteParserOptions{.ifrContext = ifrContext});
 
-    // Retry if the namespace concurrently transitioned from collection to view during aggregation
-    // planning.
-    return retryOn<ErrorCodes::CollectionBecameView>("runAggregate", body);
+                // Reparse the LiteParsedPipeline with the updated IFR context.
+                aggExState = std::make_unique<AggExState>(opCtx,
+                                                          request,
+                                                          *updatedLiteParsed,
+                                                          cmdObj,
+                                                          privileges,
+                                                          usedExternalDataSources,
+                                                          verbosity,
+                                                          ifrContext);
+            }
+
+            // NOTE: It's possible this aggExState will be unusable by the time _runAggregate
+            // returns.
+            auto status = _runAggregate(std::move(aggExState), result);
+
+            // The aggregation pipeline may change the namespace of the curop and we need to set it
+            // back to the original namespace to correctly report command stats. One example when
+            // the namespace can be changed is when the pipeline contains an $out stage, which
+            // executes an internal command to create a temp collection, changing the curop
+            // namespace to the name of this temp collection.
+            {
+                stdx::lock_guard<Client> lk(*opCtx->getClient());
+                CurOp::get(opCtx)->setNS(lk, request.getNamespace());
+            }
+            return status;
+        };
+
+    auto onIFRError =
+        [&](const ExceptionFor<ErrorCodes::IFRFlagRetry>& ex,
+            stdx::unordered_set<IncrementalRolloutFeatureFlag*>& ifrFlagsToDisableOnRetries) {
+            sVectorSearchMetrics.onViewKickbackRetryCount.addAndFetch(1);
+            ifrFlagsToDisableOnRetries.insert(IncrementalRolloutFeatureFlag::findByName(
+                ex.extraInfo<IFRFlagRetryInfo>()->getDisabledFlagName()));
+        };
+
+    // Retry on CollectionBecameView if the namespace concurrently transitioned from collection to
+    // view during aggregation planning.
+    return retryOnWithState("runAggregate",
+                            std::move(initialFlagsToDisable),
+                            kDefaultMaxRetries,
+                            body,
+                            makeErrorHandler<ErrorCodes::IFRFlagRetry>(onIFRError),
+                            makeErrorHandler<ErrorCodes::CollectionBecameView>([](auto, auto) {}));
 }
 }  // namespace mongo

@@ -526,10 +526,10 @@ mongo_cc_library(
         ":accumulator",
         ":change_stream_error_extra_info",
         ":change_stream_helpers",
-        ":desugarer",
         ":document_path_support",
         ":document_sources_idl",
         ":granularity_rounder",
+        ":lite_parsed_desugarer",
         ":lite_parsed_document_source",
         "//src/mongo/bson/dotted_path:dotted_path_support",
         "//src/mongo/client:clientdriver_minimal",
@@ -550,6 +550,7 @@ mongo_cc_library(
         "//src/mongo/db/exec:scoped_timer",
         "//src/mongo/db/exec:sort_executor",
         "//src/mongo/db/exec/document_value",
+        "//src/mongo/db/extension/host:extension_vector_search_server_status",
         "//src/mongo/db/fts:base_fts",
         "//src/mongo/db/index:index_access_method",
         "//src/mongo/db/memory_tracking",
@@ -626,6 +627,22 @@ mongo_cc_library(
         ":stage_params",
         "//src/mongo/db/query:common_query_enums_and_helpers",
         "//src/mongo/db/stats:counters",
+    ],
+)
+
+mongo_cc_unit_test(
+    name = "lite_parsed_test",
+    srcs = [
+        "lite_parsed_document_source_test.cpp",
+        "lite_parsed_pipeline_test.cpp",
+    ],
+    tags = ["mongo_unittest_sixth_group"],
+    deps = [
+        ":lite_parsed_document_source",
+        ":pipeline",
+        ":stage_params",
+        "//src/mongo:base",
+        "//src/mongo/unittest",
     ],
 )
 
@@ -1117,7 +1134,6 @@ mongo_cc_unit_test(
         "change_stream_test.cpp",
         "data_to_shards_allocation_query_service_test.cpp",
         "dependencies_test.cpp",
-        "desugarer_test.cpp",
         "dispatch_shard_pipeline_test.cpp",
         "document_path_support_test.cpp",
         "document_source_add_fields_test.cpp",
@@ -1201,7 +1217,6 @@ mongo_cc_unit_test(
         "granularity_rounder_powers_of_two_test.cpp",
         "granularity_rounder_preferred_numbers_test.cpp",
         "lite_parsed_desugarer_test.cpp",
-        "lite_parsed_document_source_test.cpp",
         "lookup_set_cache_test.cpp",
         "monotonic_expression_test.cpp",
         "partition_key_comparator_test.cpp",
@@ -1220,9 +1235,8 @@ mongo_cc_unit_test(
         "stage_params_to_document_source_registry_test.cpp",
         "tee_buffer_test.cpp",
         "//src/mongo/db/exec/agg:document_source_to_stage_registry_test.cpp",
-        "//src/mongo/db/extension/host:document_source_extension_expandable_test.cpp",
+        "//src/mongo/db/extension/host:document_source_extension_for_query_shape_test.cpp",
         "//src/mongo/db/extension/host:document_source_extension_optimizable_test.cpp",
-        "//src/mongo/db/extension/host:document_source_extension_test.cpp",
         "//src/mongo/db/pipeline:document_source_coll_stats_test.cpp",
         "//src/mongo/db/pipeline:document_source_internal_all_collection_stats_test.cpp",
         "//src/mongo/db/pipeline/document_source_internal_unpack_bucket_test:create_predicates_on_bucket_level_field_test.cpp",
@@ -1457,6 +1471,17 @@ mongo_cc_benchmark(
     ],
 )
 
+mongo_cc_benchmark(
+    name = "field_path_bm",
+    srcs = ["field_path_bm.cpp"],
+    tags = ["query_bm"],
+    deps = [
+        ":field_path",
+        "//src/mongo/db/query:query_test_service_context",
+        "//src/mongo/db/query/compiler/ce:ce_test_utils",
+    ],
+)
+
 idl_generator(
     name = "document_source_coll_stats_gen",
     src = "document_source_coll_stats.idl",
@@ -1485,9 +1510,8 @@ idl_generator(
 )
 
 mongo_cc_library(
-    name = "desugarer",
+    name = "lite_parsed_desugarer",
     srcs = [
-        "desugarer.cpp",
         "lite_parsed_desugarer.cpp",
     ],
     visibility = ["//visibility:public"],

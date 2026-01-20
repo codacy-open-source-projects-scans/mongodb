@@ -44,7 +44,9 @@
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
-#include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/query_execution_knobs_gen.h"
+#include "mongo/db/query/query_integration_knobs_gen.h"
+#include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -274,10 +276,18 @@ CreateCollCatalogIdentifier acquireCatalogIdentifierForCreate(
         catalogIdentifiers.idIndexIdent = storageEngine->generateNewIndexIdent(nss.dbName());
     }
 
+    auto mdbCatalog = storageEngine->getMDBCatalog();
+    invariant(mdbCatalog,
+              fmt::format("MDB catalog unavailable - unable to create collection {}; "
+                          "collection ident: {}; _id index ident: {}; (idents auto-generated?: {})",
+                          nss.toStringForErrorMsg(),
+                          catalogIdentifiers.ident,
+                          catalogIdentifiers.idIndexIdent.value_or("(no _id index ident)"),
+                          !providedIdentifier));
+
     // The acquired catalogId can be different than one specified in the 'providedIdentifier' unless
     // disaggregated storage is enabled.
-    catalogIdentifiers.catalogId =
-        acquireCatalogId(opCtx, providedIdentifier, storageEngine->getMDBCatalog());
+    catalogIdentifiers.catalogId = acquireCatalogId(opCtx, providedIdentifier, mdbCatalog);
     return catalogIdentifiers;
 }
 

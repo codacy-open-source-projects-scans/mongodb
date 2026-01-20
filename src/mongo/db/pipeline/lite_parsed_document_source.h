@@ -76,6 +76,8 @@ struct LiteParserOptions {
     // consistent parser selection across the query execution, especially when flag values are
     // modified mid-query.
     std::shared_ptr<IncrementalFeatureRolloutContext> ifrContext = nullptr;
+
+    OperationContext* opCtx = nullptr;
 };
 
 namespace exec::agg {
@@ -94,13 +96,13 @@ class LiteParsedDocumentSource;
  * desugared view pipeline from ResolvedView.
  */
 struct MONGO_MOD_PUBLIC ViewInfo {
-    using LiteParsedVec = std::vector<std::unique_ptr<LiteParsedDocumentSource>>;
-
     ViewInfo() = default;
+    ~ViewInfo();
 
     // Move-only semantics (viewPipeline contains unique_ptrs which are non-copyable).
-    ViewInfo(ViewInfo&&) noexcept = default;
-    ViewInfo& operator=(ViewInfo&&) noexcept = default;
+    ViewInfo(ViewInfo&&) noexcept;
+    ViewInfo& operator=(ViewInfo&&) noexcept;
+
     ViewInfo(const ViewInfo&) = delete;
     ViewInfo& operator=(const ViewInfo&) = delete;
 
@@ -121,22 +123,27 @@ struct MONGO_MOD_PUBLIC ViewInfo {
      */
     std::vector<BSONObj> getOriginalBson() const;
 
+    /**
+     * Returns a cloned instance of the view pipeline with all stages owning their BSON.
+     */
+    LiteParsedPipeline getViewPipeline() const;
+
     ViewInfo clone() const;
 
     NamespaceString viewName;     // Unresolved view namespace.
     NamespaceString resolvedNss;  // Underlying collection that the view runs.
 
 private:
-    // Owns the BSON data that viewPipeline's LiteParsedDocumentSource objects reference.
+    // Stores the original pre-desugar BSON view pipeline and owns the underlying BSON.
     // Must be declared before viewPipeline so it is destroyed after viewPipeline (C++ destroys
     // members in reverse declaration order, and LiteParsedDocumentSource holds BSONElement
     // references into this data).
     std::vector<BSONObj> _ownedOriginalBsonPipeline;
 
 public:
-    // The desugared view pipeline as a vector of LiteParsedDocumentSources. This vector can be
-    // added to existing pipelines to apply a view to a pipeline.
-    LiteParsedVec viewPipeline;
+    // The desugared view pipeline, represented as a LiteParsedPipeline so it can be cloned and
+    // applied repeatedly.
+    std::unique_ptr<LiteParsedPipeline> viewPipeline;
 };
 
 using ViewPolicyCallbackFn = std::function<void(const ViewInfo&, StringData)>;
@@ -202,6 +209,14 @@ struct DisallowViewsPolicy : public ViewPolicy {
  *
  * This is the non-template base class for polymorphism. Derived classes should inherit from the
  * templates below which provide a default clone() implementation.
+ *
+ * Instances of this class can be unowned or owned with respect to their BSON data:
+ *
+ * - Unowned (default): The instance holds a BSONElement view into external BSON data. The caller
+ * must ensure the source BSONObj's lifetime exceeds that of this instance.
+ *
+ * - Owned: The instance owns BSON data via '_ownedBson'. Call makeOwned() to transition from
+ * unowned to owned when the source BSON lifetime cannot be guaranteed.
  */
 class MONGO_MOD_UNFORTUNATELY_OPEN LiteParsedDocumentSource {
 public:
@@ -218,6 +233,11 @@ public:
 
     struct LiteParserInfo {
         Parser parser;
+        // True if this stage is implemented by an extension.
+        bool fromExtension = false;
+        // Stub parsers are registered just to give a better error message if a stage is not loaded
+        // that might otherwise be available.
+        bool isStub = false;
         AllowedWithApiStrict allowedWithApiStrict;
         AllowedWithClientType allowedWithClientType;
     };
@@ -234,9 +254,7 @@ public:
         void setPrimaryParser(LiteParserInfo&& lpi);
 
         // TODO SERVER-114028 Update when fallback parsing supports all feature flags.
-        void setFallbackParser(LiteParserInfo&& lpi,
-                               IncrementalRolloutFeatureFlag* ff,
-                               bool isStub = false);
+        void setFallbackParser(LiteParserInfo&& lpi, IncrementalRolloutFeatureFlag* ff);
 
         bool isPrimarySet() const;
 
@@ -245,7 +263,7 @@ public:
         // Returns true if the parser is executable, meaning it has either a primary or a non-stub
         // fallback.
         bool isExecutable() const {
-            return _primaryIsSet || !_isStub;
+            return _primaryIsSet || !_fallbackParser.isStub;
         }
 
     private:
@@ -267,9 +285,6 @@ public:
 
         // Whether or not the fallback parser has been registered or not.
         bool _fallbackIsSet = false;
-
-        // Whether the fallback parser is a stub parser that just throws an error.
-        bool _isStub = false;
     };
 
     using ParserMap = StringMap<LiteParsedDocumentSource::LiteParserRegistration>;
@@ -283,28 +298,48 @@ public:
     LiteParsedDocumentSource(const BSONElement& originalBson)
         : _originalBson(originalBson), _parseTimeName(originalBson.fieldNameStringData()) {}
 
+    /**
+     * Copy constructor. When the source is owned, the copy shares ownership of the underlying BSON
+     * buffer via BSONObj's shared pointer semantics. This ensures the copy's '_originalBson'
+     * remains valid even if the source is destroyed.
+     */
+    LiteParsedDocumentSource(const LiteParsedDocumentSource& other) = default;
+
+    LiteParsedDocumentSource& operator=(const LiteParsedDocumentSource&) = delete;
+
     virtual ~LiteParsedDocumentSource() = default;
 
     /**
      * Registers a DocumentSource with a spec parsing function, so that when a stage with the given
-     * name is encountered, it will call 'parser' to construct that stage's specification object.
-     * The flag 'allowedWithApiStrict' is used to control the allowance of the stage when
-     * 'apiStrict' is set to true.
+     * name is encountered, it will call 'parserInfo.parser' to construct that stage's specification
+     * object. The flag 'parserInfo.allowedWithApiStrict' is used to control the allowance of the
+     * stage when 'apiStrict' is set to true.
      *
      * DO NOT call this method directly. Instead, use the REGISTER_DOCUMENT_SOURCE macro defined in
      * document_source.h.
      */
-    static void registerParser(const std::string& name,
-                               Parser parser,
-                               AllowedWithApiStrict allowedWithApiStrict,
-                               AllowedWithClientType allowedWithClientType);
+    static void registerParser(const std::string& name, LiteParserInfo parserInfo);
 
     static void registerFallbackParser(const std::string& name,
-                                       Parser parser,
                                        FeatureFlag* parserFeatureFlag,
-                                       AllowedWithApiStrict allowedWithApiStrict,
-                                       AllowedWithClientType allowedWithClientType,
-                                       bool isStub = false);
+                                       LiteParserInfo);
+
+
+    /**
+     * Constructs a LiteParsedDocumentSource from the user-supplied BSON, or throws an
+     * AssertionException.
+     *
+     * Extracts the first field name from 'spec', and delegates to the parser that was registered
+     * with that field name using registerParser() above.
+     *
+     * NOTE: The returned instance holds an UNOWNED reference to 'spec'. The caller must ensure
+     * 'spec' remains valid for the lifetime of the returned LiteParsedDocumentSource. If the BSON
+     * lifetime cannot be guaranteed, call makeOwned() on the returned instance.
+     */
+    static std::unique_ptr<LiteParsedDocumentSource> parse(
+        const NamespaceString& nss,
+        const BSONObj& spec,
+        const LiteParserOptions& options = LiteParserOptions{});
 
     /**
      * Function that will be used as an alternate parser for a document source that has been
@@ -335,18 +370,6 @@ public:
     const AllowedWithClientType& getClientType() {
         return _clientType;
     };
-
-    /**
-     * Constructs a LiteParsedDocumentSource from the user-supplied BSON, or throws a
-     * AssertionException.
-     *
-     * Extracts the first field name from 'spec', and delegates to the parser that was registered
-     * with that field name using registerParser() above.
-     */
-    static std::unique_ptr<LiteParsedDocumentSource> parse(
-        const NamespaceString& nss,
-        const BSONObj& spec,
-        const LiteParserOptions& options = LiteParserOptions{});
 
     /**
      * Returns the foreign collection(s) referenced by this stage (that is, any collection that
@@ -446,6 +469,14 @@ public:
     }
 
     /**
+     * Returns true if this is a vector search stage ($vectorSearch).
+     * TODO SERVER-116021 Remove this override when extensions can handle views through ViewPolicy.
+     */
+    virtual bool isExtensionVectorSearchStage() const {
+        return false;
+    }
+
+    /**
      * Returns true if this is a $rankFusion pipeline
      */
     virtual bool isHybridSearchStage() const {
@@ -515,10 +546,38 @@ public:
 
     /**
      * Returns a copy of the current LiteParsedDocumentSource.
+     *
+     * Cloning behavior depends on the ownership state of the original:
+     * - If the original is unowned, the clone also references the same external BSON.
+     * - If the original is owned, the clone shares ownership of the BSON buffer via BSONObj's
+     * shared pointer semantics. This means the clone's data remains valid even after the original
+     * is destroyed.
+     *
+     * Call makeOwned() on an unowned clone if the external BSON lifetime cannot be guaranteed.
      */
     virtual std::unique_ptr<LiteParsedDocumentSource> clone() const = 0;
 
+    /**
+     * Converts the LiteParsedDocumentSource to own the BSON it holds, similar to
+     * BSONObj::getOwned(). This should be called when the source BSONObj's lifetime cannot be
+     * guaranteed to exceed that of this instance.
+     *
+     * If '_ownedBson' already has a value, this is a no-op since the BSON data is already
+     * guaranteed to remain valid.
+     */
+    void makeOwned() {
+        if (_originalBson.eoo() || _ownedBson) {
+            // Nothing to own, or already owned.
+            return;
+        }
+
+        _ownedBson = _originalBson.wrap();
+        _originalBson = _ownedBson->firstElement();
+    }
+
 protected:
+    boost::optional<BSONObj> _ownedBson;
+
     BSONElement _originalBson;
 
     void transactionNotSupported(StringData stageName) const {
@@ -558,6 +617,7 @@ private:
      */
     friend class LiteParserRegistrationTest;
     friend class LiteParsedDocumentSourceParseTest;
+    friend class LiteParsedPipelineViewPolicyTest;
     friend class extension::host::LoadExtensionsTest;
     friend class extension::host::LoadNativeVectorSearchTest;
     friend class LiteParsedDesugarerTest;
@@ -588,8 +648,8 @@ private:
     static const ParserMap& getParserMap();
 
     std::string _parseTimeName;
-    AllowedWithApiStrict _apiStrict;
-    AllowedWithClientType _clientType;
+    AllowedWithApiStrict _apiStrict = AllowedWithApiStrict::kAlways;
+    AllowedWithClientType _clientType = AllowedWithClientType::kAny;
 };
 
 /**

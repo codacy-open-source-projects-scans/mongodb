@@ -66,7 +66,9 @@
 #include "mongo/db/query/collection_index_usage_tracker_decoration.h"
 #include "mongo/db/query/collection_query_info.h"
 #include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
-#include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/query_execution_knobs_gen.h"
+#include "mongo/db/query/query_integration_knobs_gen.h"
+#include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/db/repl/repl_set_member_in_standalone_mode.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -1009,7 +1011,7 @@ Status IndexCatalogImpl::_isSpecOk(OperationContext* opCtx,
         }
     }
 
-    const bool isSparse = spec["sparse"].trueValue();
+    const bool isSetSparseByUser = spec["sparse"].trueValue();
 
     if (pluginName == IndexNames::WILDCARD) {
         if (auto wildcardSpecStatus = validateWildcardSpec(spec, indexVersion);
@@ -1027,7 +1029,7 @@ Status IndexCatalogImpl::_isSpecOk(OperationContext* opCtx,
     // Ensure if there is a filter, its valid.
     BSONElement filterElement = spec.getField("partialFilterExpression");
     if (filterElement) {
-        if (isSparse) {
+        if (isSetSparseByUser) {
             return Status(ErrorCodes::CannotCreateIndex,
                           "cannot mix \"partialFilterExpression\" and \"sparse\" options");
         }
@@ -1082,7 +1084,7 @@ Status IndexCatalogImpl::_isSpecOk(OperationContext* opCtx,
             return Status(ErrorCodes::CannotCreateIndex, "_id index cannot be a partial index");
         }
 
-        if (isSparse) {
+        if (isSetSparseByUser) {
             return Status(ErrorCodes::CannotCreateIndex, "_id index cannot be sparse");
         }
 

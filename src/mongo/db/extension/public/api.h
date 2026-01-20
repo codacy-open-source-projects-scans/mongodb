@@ -404,6 +404,11 @@ typedef struct MongoExtensionLogicalAggStageVTable {
         const MongoExtensionLogicalAggStage* logicalStage,
         struct MongoExtensionDistributedPlanLogic** output);
 
+    /**
+     * Clones the logical stage. Ownership of the output pointer is transferred to the caller.
+     */
+    MongoExtensionStatus* (*clone)(const MongoExtensionLogicalAggStage* logicalStage,
+                                   MongoExtensionLogicalAggStage** output);
 } MongoExtensionLogicalAggStageVTable;
 
 /**
@@ -592,6 +597,30 @@ typedef struct MongoExtensionDistributedPlanLogicVTable {
 } MongoExtensionDistributedPlanLogicVTable;
 
 /**
+ * MongoExtensionNamespaceString contains a collection's NamespaceString components. Note that the
+ * members of this struct are provided as views, meaning the values' underlying data is not owned by
+ * this struct. Callees are responsible for making owned copies if the values must persist beyond
+ * the scope of the callee function.
+ */
+typedef struct MongoExtensionNamespaceString {
+    const MongoExtensionByteView databaseName;
+    const MongoExtensionByteView collectionName;
+} MongoExtensionNamespaceString;
+
+/**
+ * MongoExtensionCatalogContext contains a collection's catalog context information (i.e
+ * MongoExtensionNamespaceString, uuidString), which is generally available when an AstNode binds
+ * into a LogicalStage. Note that the members of this struct are provided as views, meaning the
+ * values' underlying data is not owned by this struct. When a callee receives a
+ * MongoExtensionCatalogContext as a parameter, the callee is responsible for immediately copying
+ * the values into an owned copy if they must persist beyond the scope of the callee function.
+ */
+typedef struct MongoExtensionCatalogContext {
+    const ::MongoExtensionNamespaceString namespaceString;
+    const MongoExtensionByteView uuidString;
+} MongoExtensionCatalogContext;
+
+/**
  * Virtual function table for MongoExtensionAggStageParseNode.
  */
 typedef struct MongoExtensionAggStageParseNodeVTable {
@@ -648,6 +677,18 @@ typedef struct MongoExtensionAggStageParseNodeVTable {
 } MongoExtensionAggStageParseNodeVTable;
 
 /**
+ * Types of first stage view application policies that an extension can implement.
+ */
+typedef enum MongoExtensionFirstStageViewApplicationPolicy : uint32_t {
+    // If this stage is at the front of the pipeline, the pipeline should
+    // prepend the view.
+    kDefaultPrepend = 0,
+    // If this stage is at the front of the pipeline, the pipeline should not
+    // prepend the view. The stage will apply the view pipeline itself internally.
+    kDoNothing = 1,
+} MongoExtensionFirstStageViewApplicationPolicy;
+
+/**
  * Virtual function table for MongoExtensionAggStageAstNode.
  */
 typedef struct MongoExtensionAggStageAstNodeVTable {
@@ -672,8 +713,11 @@ typedef struct MongoExtensionAggStageAstNodeVTable {
      * Populates `logicalStage` with the stage's runtime implementation of the optimization
      * interface, ownership of which is transferred to the caller. This step should be called after
      * validating `astNode` and is used when converting into an optimizable stage.
+     * Note: catalogContext's contents must be copied by the extension into an owned copy in order
+     * for the values to persist beyond bind()'s scope.
      */
     MongoExtensionStatus* (*bind)(const MongoExtensionAggStageAstNode* astNode,
+                                  const MongoExtensionCatalogContext* catalogContext,
                                   MongoExtensionLogicalAggStage** logicalStage);
 
     /**
@@ -681,6 +725,22 @@ typedef struct MongoExtensionAggStageAstNodeVTable {
      */
     MongoExtensionStatus* (*clone)(const MongoExtensionAggStageAstNode* astNode,
                                    MongoExtensionAggStageAstNode** output);
+
+    /**
+     * Populates the MongoExtensionFirstStageViewApplicationPolicy with the extension's desired
+     * FirstStageViewApplicationPolicy. The caller should allocate and own the enum for the callee
+     * to populate. Ownership is not transferred to the callee.
+     */
+    MongoExtensionStatus* (*get_first_stage_view_application_policy)(
+        const MongoExtensionAggStageAstNode* astNode,
+        MongoExtensionFirstStageViewApplicationPolicy* viewPolicyOutput);
+
+    /**
+     * Passes viewInfo over to the extension. For now we just send the view name.
+     * Ownership of the view name is not transferred over the API boundary.
+     */
+    MongoExtensionStatus* (*bind_view_info)(const MongoExtensionAggStageAstNode* astNode,
+                                            MongoExtensionByteView viewName);
 } MongoExtensionAggStageAstNodeVTable;
 
 /**

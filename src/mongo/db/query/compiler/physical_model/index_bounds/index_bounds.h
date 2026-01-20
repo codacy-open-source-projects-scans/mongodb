@@ -108,11 +108,6 @@ struct MONGO_MOD_NEEDS_REPLACEMENT OrderedIntervalList {
     bool isFullyOpen() const;
 
     /**
-     * Returns true if any of the intervals in this OIL intersect with the provided interval.
-     */
-    bool intersectsInterval(const Interval& interval) const;
-
-    /**
      * Returns true if this OIL represents a point predicate: [N, N].
      *
      * These predicates are interesting because if you have an index on {a:1, b:1},
@@ -374,23 +369,5 @@ private:
 
     friend size_t sbe::size_estimator::estimate(const IndexBoundsChecker&);
 };
-
-/**
- * Returns true if the value can serve as a type lower bound for the purposes of type bracketing.
- * The function is designed to work with the 'interesting' for index prefix heuristic types only:
- * Number, String, Date, Timestamp, Boolean, Object, Array, ObjectId. For other types it may return
- * false positive results. The code of the function is based on index bounds build logic from
- * 'index_bounds_builder.cpp'.
- */
-bool isLowerBound(const BSONElement& value, bool isInclusive);
-
-/**
- * Returns true if the value can serve as a type upper bound for the purposes of type bracketing.
- * The function is designed to work with the 'interesting' for index prefix heuristic types only:
- * Number, String, Date, Timestamp, Boolean, Object, Array, ObjectId. For other types it may return
- * false positive results. The code of the function is based on index bounds build logic from
- * 'index_bounds_builder.cpp'.
- */
-bool isUpperBound(const BSONElement& value, bool isInclusive);
 
 }  // namespace mongo

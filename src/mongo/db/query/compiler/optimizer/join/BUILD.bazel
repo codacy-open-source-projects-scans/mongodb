@@ -23,6 +23,7 @@ mongo_cc_library(
         "graph_cycle_breaker.cpp",
         "join_graph.cpp",
         "path_resolver.cpp",
+        "predicate_extractor.cpp",
     ],
     deps = [
         "//src/mongo/db:server_base",
@@ -44,6 +45,7 @@ mongo_cc_library(
     deps = [
         ":join_ordering",
         ":solution_storage",
+        "//src/mongo/db/query/compiler/ce:ce_common",
         "//src/mongo/db/query/compiler/ce/sampling:sampling_estimator_interface",
         "//src/mongo/db/query/compiler/optimizer/cost_based_ranker:estimates",
     ],
@@ -70,7 +72,6 @@ mongo_cc_unit_test(
     deps = [
         ":join_ordering",
         ":plan_enumerator",
-        ":predicate_extractor",
         ":reorder_joins",
         ":unit_test_helpers",
         "//src/mongo/db:query_exec",
@@ -156,15 +157,11 @@ mongo_cc_library(
 )
 
 mongo_cc_library(
-    name = "predicate_extractor",
+    name = "join_estimates",
     srcs = [
-        "predicate_extractor.cpp",
-    ],
-    hdrs = [
-        "predicate_extractor.h",
+        "join_estimates.cpp",
     ],
     deps = [
-        "//src/mongo/db:server_base",
-        "//src/mongo/db/query:canonical_query_base",
+        "//src/mongo/db/query/compiler/optimizer/cost_based_ranker:estimates",
     ],
 )

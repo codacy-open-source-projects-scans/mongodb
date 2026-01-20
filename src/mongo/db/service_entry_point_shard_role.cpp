@@ -1366,6 +1366,12 @@ void RunCommandAndWaitForWriteConcern::_setup() {
                   fmt::format("unexpected unset provenance on writeConcern: {}",
                               _extractedWriteConcern->toBSON().jsonString()));
 
+        uassert(ErrorCodes::UnsatisfiableWriteConcern,
+                "Unsupported WriteConcernOptions",
+                rss::ReplicatedStorageService::get(opCtx->getServiceContext())
+                    .getPersistenceProvider()
+                    .supportsWriteConcernOptions(_extractedWriteConcern.get()));
+
         opCtx->setWriteConcern(*_extractedWriteConcern);
     }
 }
@@ -1881,6 +1887,10 @@ void ExecCommandDatabase::_initiateCommand() {
             stdx::lock_guard<Client> lk(*opCtx->getClient());
             readConcernArgs = std::move(newReadConcernArgs);
         }
+
+        uassert(ErrorCodes::InvalidOptions,
+                "Unsupported ReadConcernLevel",
+                rss.getPersistenceProvider().supportsReadConcernLevel(readConcernArgs.getLevel()));
     }
 
     uassert(ErrorCodes::InvalidOptions,
@@ -1910,18 +1920,32 @@ void ExecCommandDatabase::_initiateCommand() {
                 OperationShardingState::setShardRole(
                     opCtx, invocationNss, shardVersion, databaseVersion);
 
-                // If a timeseries collection is sharded, only the buckets collection would be
-                // sharded. We expect all versioned commands to be sent over 'system.buckets'
-                // namespace. But it is possible that a stale mongos may send the request over a
-                // view namespace. In this case, we initialize the 'OperationShardingState' with
-                // both the invocation and buckets namespaces.
-                // TODO: SERVER-80719 revisit this.
-                auto bucketNss = invocationNss.makeTimeseriesBucketsNamespace();
-                auto catalog = CollectionCatalog::get(opCtx);
-                auto coll = catalog->lookupCollectionByNamespace(opCtx, bucketNss);
-
-                if (coll && coll->getTimeseriesOptions()) {
-                    OperationShardingState::setShardRole(opCtx, bucketNss, shardVersion, {});
+                // For legacy viewful timeseries, a router may target the main namespace but the
+                // shard will translate the namespace and execute on the underlying timeseries
+                // system buckets.
+                //
+                // This NSS translation is only safe if both router and shard agree the collection
+                // is 'untracked'.
+                //
+                // We enforce this by initializing the 'OperationShardingState' with the timeseries
+                // system buckets namespace, but intentionally passing it the router's version for
+                // the main nss.
+                //
+                // This forces a check of the router's main namespace version vs. the shard's
+                // timeseries system buckets version. This check will only pass if both are
+                // 'untracked'. All other combinations (e.g., 'tracked' vs 'untracked', or 'tracked'
+                // vs 'tracked') will cause the shard to throw a StaleConfigInfo.
+                //
+                // TODO SERVER-117124 remove this workaround once 9.0 becomes last LTS and all
+                // timeseries are viewless
+                if (!invocationNss.isTimeseriesBucketsCollection()) {
+                    auto timeseriesBucketsNss = invocationNss.makeTimeseriesBucketsNamespace();
+                    OperationShardingState::setShardRole(
+                        opCtx,
+                        timeseriesBucketsNss,
+                        shardVersion,
+                        {},
+                        true /* disableCheckVersioningCorrectness */);
                 }
             }
         }

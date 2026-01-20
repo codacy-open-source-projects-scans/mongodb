@@ -39,7 +39,9 @@
 #include "mongo/db/query/compiler/optimizer/join/reorder_joins.h"
 #include "mongo/db/query/compiler/optimizer/join/single_table_access.h"
 #include "mongo/db/query/plan_executor_factory.h"
-#include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/query_execution_knobs_gen.h"
+#include "mongo/db/query/query_integration_knobs_gen.h"
+#include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/stage_builder/sbe/builder.h"
 #include "mongo/db/query/stage_builder/stage_builder_util.h"
@@ -109,8 +111,9 @@ bool isAggEligibleForJoinReordering(const MultipleCollectionAccessor& mca,
 
 bool indexIsValidForINLJ(const std::shared_ptr<const IndexCatalogEntry>& ice) {
     auto desc = ice->descriptor();
-    return !desc->isHashedIdIndex() && !desc->hidden() && !desc->isPartial() && !desc->isSparse() &&
-        desc->collation().isEmpty() && !dynamic_cast<WildcardAccessMethod*>(ice->accessMethod());
+    return !desc->isHashedIdIndex() && !desc->hidden() && !desc->isPartial() &&
+        !desc->isSetSparseByUser() && desc->collation().isEmpty() &&
+        !dynamic_cast<WildcardAccessMethod*>(ice->accessMethod());
 }
 
 /**
@@ -169,12 +172,6 @@ StatusWith<JoinReorderedExecutorResult> getJoinReorderedExecutor(
         const auto status = swModel.getStatus();
         LOGV2_DEBUG(11083903, 5, "Unable to construct join model", "status"_attr = status);
         return status;
-    }
-
-    // TODO SERVER-111798: Support cycles in the join graph.
-    if (swModel.getValue().graph.numEdges() >= swModel.getValue().graph.numNodes()) {
-        return Status(ErrorCodes::QueryFeatureNotAllowed,
-                      "Join reordering does not support cycles");
     }
 
     // Validate we have all the collection acquisitions we need here.

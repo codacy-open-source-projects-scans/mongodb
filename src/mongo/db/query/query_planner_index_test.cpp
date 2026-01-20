@@ -36,7 +36,9 @@
 #include "mongo/db/matcher/expression_always_boolean.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
 #include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
-#include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/query_execution_knobs_gen.h"
+#include "mongo/db/query/query_integration_knobs_gen.h"
+#include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/query_planner_test_fixture.h"
 #include "mongo/idl/server_parameter_test_util.h"
@@ -1461,8 +1463,8 @@ TEST_F(QueryPlannerTest, EmptyQueryWithProjectionUsesCollscanIfIndexIsMultikey) 
 TEST_F(QueryPlannerTest, EmptyQueryWithProjectionUsesCollscanIfIndexIsSparse) {
     params.mainCollectionInfo.options = QueryPlannerParams::GENERATE_COVERED_IXSCANS;
     constexpr bool isMultikey = false;
-    constexpr bool isSparse = true;
-    addIndex(BSON("a" << 1), isMultikey, isSparse);
+    constexpr bool isSetSparseByUser = true;
+    addIndex(BSON("a" << 1), isMultikey, isSetSparseByUser);
     runQueryAsCommand(fromjson("{find: 'testns', projection: {_id: 0, a: 1, b: 1}}"));
     assertNumSolutions(1);
     assertSolutionExists(

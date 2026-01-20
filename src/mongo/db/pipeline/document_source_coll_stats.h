@@ -48,6 +48,7 @@
 #include "mongo/idl/idl_parser.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/str.h"
 
 #include <memory>
@@ -149,7 +150,8 @@ public:
         return constraints;
     }
 
-    boost::optional<DistributedPlanLogic> distributedPlanLogic() final {
+    boost::optional<DistributedPlanLogic> distributedPlanLogic(
+        const DistributedPlanContext* ctx) final {
         return boost::none;
     }
 

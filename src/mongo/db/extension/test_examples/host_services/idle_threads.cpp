@@ -90,11 +90,17 @@ public:
         sleep(1);
     }
 
-    std::unique_ptr<sdk::LogicalAggStage> bind() const override {
+    std::unique_ptr<sdk::LogicalAggStage> bind(
+        const ::MongoExtensionCatalogContext& catalogContext) const override {
         std::thread idleThread(threadFunction);
         idleThread.join();
 
-        return sdk::TestAstNode<sdk::shared_test_stages::TransformLogicalAggStage>::bind();
+        return sdk::TestAstNode<sdk::shared_test_stages::TransformLogicalAggStage>::bind(
+            catalogContext);
+    }
+
+    std::unique_ptr<sdk::AggStageAstNode> clone() const override {
+        return std::make_unique<IdleThreadsAstNode>(getName(), _arguments);
     }
 };
 

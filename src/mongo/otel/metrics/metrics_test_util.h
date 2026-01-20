@@ -104,22 +104,8 @@ public:
     HistogramData(opentelemetry::sdk::metrics::HistogramPointData data);
 #endif  // MONGO_CONFIG_OTEL
 
-    /**
-     * These values denote the upper and lower bounds for the histogram buckets.
-     *
-     * Bucket upper-bounds are inclusive (except when the upper-bound is +inf), and bucket
-     * lower-bounds are exclusive. The implicit first boundary is -inf and the implicit last
-     * boundary is +inf. Given a list of n boundaries, there are n + 1 buckets. For example,
-     *
-     * boundaries = {2, 4}
-     * buckets = (-inf, 2], (2, 4], (4, +inf)
-     *
-     * If, for example, the value 2 is recorded, the corresponding `counts` vector is as follows:
-     * {1, 0, 0}.
-     *
-     * See https://opentelemetry.io/docs/specs/otel/metrics/data-model/#histogram for more
-     * information.
-     */
+    // See the documentation for MetricsService::createInt64Histogram in metrics_service.h for an
+    // explanation of this boundaries member variable.
     std::vector<double> boundaries;
     T sum;
     T min;
@@ -151,16 +137,35 @@ HistogramData<T>::HistogramData(opentelemetry::sdk::metrics::HistogramPointData 
 #endif  // MONGO_CONFIG_OTEL
 
 /**
- * Sets up a MetricProvider with an in-memory exporter so tests can create and inspect metrics.
- * This must be constructed before creating any metrics in order to capture them.
+ * Sets up a MetricProvider with an in-memory exporter so tests can create and inspect metrics. This
+ * must be constructed before creating any metrics in order to capture them.
  *
- * Note that not all environments support exporting otel metrics (e.g., Windows) so in those
- * environments it's not possible to read the metrics in tests. `canReadMetrics` can be used in
- * tests to condition making expectations based on whether the environment supports otel metrics.
+ * NOTE: Not all platforms support exporting OpenTelemetry metrics (e.g., Windows), and on those
+ * platforms it is not possible to read the metrics in tests via readInt64Counter(),
+ * readDoubleCounter(), etc. You can use canReadMetrics() in tests to check whether the platform
+ * supports OpenTelemetry metrics.
+ *
+ * WARNING: On platforms that do not support OpenTelemetry metrics, the OtelMetricsCapturer does not
+ * call MetricsService::initialize(), so metric values recorded before initialization are not reset
+ * when creating the OtelMetricsCapturer. Do not record metrics before creating the
+ * OtelMetricsCapturer, otherwise the values will vary depending on the platform. On
+ * non-OpenTelemetry platforms, it is only possible to read metrics via serverStatus.
  */
 class MONGO_MOD_PUBLIC OtelMetricsCapturer {
 public:
+    /**
+     * Default constructor which uses the static MetricsService object.
+     */
     OtelMetricsCapturer();
+
+    /**
+     * Constructor that allows specifying the MetricsService object to initialize.
+     *
+     * This constructor should be used directly in limited circumstances. Specifically, this
+     * constructor allows unit testing the MetricsService, but tests in server code should use the
+     * static instance.
+     */
+    MONGO_MOD_PRIVATE OtelMetricsCapturer(MetricsService& metricsService);
 #if MONGO_CONFIG_OTEL
     ~OtelMetricsCapturer() {
         opentelemetry::metrics::Provider::SetMeterProvider(
@@ -174,14 +179,19 @@ public:
     int64_t readInt64Counter(MetricName name);
 
     /**
-     * Gets the value of an double counter and throws an exception if it is not found.
+     * Gets the value of a double counter and throws an exception if it is not found.
      */
     double readDoubleCounter(MetricName name);
 
     /**
-     * Gets the value of an Int64 gauge and throws an exception if it is not found.
+     * Gets the value of an int64_t gauge and throws an exception if it is not found.
      */
     int64_t readInt64Gauge(MetricName name);
+
+    /**
+     * Gets the value of a double gauge and throws an exception if it is not found.
+     */
+    double readDoubleGauge(MetricName name);
 
     /**
      * Gets the data of an int64_t histogram and throws an exception if it is not found.
@@ -189,7 +199,7 @@ public:
     HistogramData<int64_t> readInt64Histogram(MetricName name);
 
     /**
-     * Gets the data of an double histogram and throws an exception if it is not found.
+     * Gets the data of a double histogram and throws an exception if it is not found.
      */
     HistogramData<double> readDoubleHistogram(MetricName name);
 
@@ -224,8 +234,6 @@ private:
                 std::holds_alternative<DataType>(it->second));
         return std::get<DataType>(it->second);
     }
-
-    RAIIServerParameterControllerForTest _featureFlagController{"featureFlagOtelMetrics", true};
 
     // Stash the reader so that callers can trigger on-demand metric collection.
     test_util_detail::OnDemandMetricReader* _reader;

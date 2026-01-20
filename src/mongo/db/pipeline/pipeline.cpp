@@ -53,6 +53,7 @@
 #include "mongo/db/pipeline/document_source_single_document_transformation.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
+#include "mongo/db/pipeline/process_interface/stub_mongo_process_interface.h"
 #include "mongo/db/pipeline/resume_token.h"
 #include "mongo/db/pipeline/search/search_helper.h"
 #include "mongo/db/pipeline/stage_constraints.h"
@@ -60,13 +61,16 @@
 #include "mongo/db/query/compiler/rewrites/matcher/expression_parameterization.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/plan_summary_stats_visitor.h"
-#include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/query_execution_knobs_gen.h"
+#include "mongo/db/query/query_integration_knobs_gen.h"
+#include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/db/query/timeseries/timeseries_translation.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
 
 #include <algorithm>
@@ -111,11 +115,13 @@ void validateTopLevelPipeline(const Pipeline& pipeline) {
                 !(nss.isCollectionlessAggregateNS() &&
                   !firstStageConstraints.isIndependentOfAnyCollection));
 
-        uassert(ErrorCodes::InvalidNamespace,
-                str::stream() << "'" << sources.front()->getSourceName()
-                              << "' can only be run with {aggregate: 1}",
-                !(!nss.isCollectionlessAggregateNS() &&
-                  firstStageConstraints.isIndependentOfAnyCollection));
+        uassert(
+            ErrorCodes::InvalidNamespace,
+            str::stream()
+                << "'" << sources.front()->getSourceName()
+                << "' can only be run with database or cluster-level aggregation {aggregate: 1}",
+            !(!nss.isCollectionlessAggregateNS() &&
+              firstStageConstraints.isIndependentOfAnyCollection));
 
         // If the first stage is a $changeStream stage, then all stages in the pipeline must be
         // either $changeStream stages or allowlisted as being able to run in a change stream.
@@ -202,7 +208,17 @@ std::unique_ptr<Pipeline> Pipeline::parseFromLiteParsed(
     const LiteParsedPipeline& liteParsedPipeline,
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     PipelineValidatorCallback validator,
-    bool isFacetPipeline) {
+    bool isFacetPipeline,
+    bool useStubInterface) {
+    boost::optional<ScopeGuard<std::function<void()>>> restore;
+
+    if (useStubInterface) {
+        auto originalInterface = expCtx->getMongoProcessInterface();
+        expCtx->setMongoProcessInterface(std::make_shared<StubMongoProcessInterface>());
+        restore.emplace(
+            [expCtx, originalInterface] { expCtx->setMongoProcessInterface(originalInterface); });
+    }
+
     const auto& rawPipeline = liteParsedPipeline.getStages();
 
     // Before parsing the pipeline, make sure it's not so long that it will make us run out of

@@ -29,89 +29,21 @@
 
 #include "mongo/s/change_streams/collection_change_stream_shard_targeter_impl.h"
 
-#include "mongo/db/pipeline/change_stream.h"
-#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/s/change_streams/collection_change_stream_db_absent_state_event_handler.h"
 #include "mongo/s/change_streams/collection_change_stream_db_present_state_event_handler.h"
-#include "mongo/stdx/unordered_set.h"
-#include "mongo/util/assert_util.h"
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
-
-// Prefix that will be added to all log messages emitted by this stage.
-#define STAGE_LOG_PREFIX "CollectionChangeStreamShardTargeterImpl: "
+#include <memory>
 
 namespace mongo {
 
-ShardTargeterDecision CollectionChangeStreamShardTargeterImpl::initialize(
-    OperationContext* opCtx, Timestamp atClusterTime, ChangeStreamReaderContext& readerCtx) {
-    auto placement = _fetcher->fetch(opCtx,
-                                     readerCtx.getChangeStream().getNamespace(),
-                                     atClusterTime,
-                                     false /* checkIfPointInTimeIsInFuture */,
-                                     false /* ignoreRemovedShards */);
-    if (placement.getStatus() == HistoricalPlacementStatus::NotAvailable) {
-        return ShardTargeterDecision::kSwitchToV1;
-    }
-    tassert(10720100,
-            "HistoricalPlacementStatus can not be in the future",
-            placement.getStatus() != HistoricalPlacementStatus::FutureClusterTime);
-
-    if (placement.getShards().empty()) {
-        readerCtx.openCursorOnConfigServer(atClusterTime);
-        setEventHandler(
-            std::make_unique<CollectionChangeStreamShardTargeterDbAbsentStateEventHandler>());
-    } else {
-        stdx::unordered_set<ShardId> activeShardSet(placement.getShards().begin(),
-                                                    placement.getShards().end());
-        readerCtx.openCursorsOnDataShards(atClusterTime, activeShardSet);
-        setEventHandler(
-            std::make_unique<CollectionChangeStreamShardTargeterDbPresentStateEventHandler>());
-    }
-
-    return ShardTargeterDecision::kContinue;
+std::unique_ptr<ChangeStreamShardTargeterStateEventHandler>
+CollectionChangeStreamShardTargeterImpl::createDbAbsentHandler() const {
+    return std::make_unique<CollectionChangeStreamShardTargeterDbAbsentStateEventHandler>();
 }
 
-ShardTargeterDecision CollectionChangeStreamShardTargeterImpl::handleEvent(
-    OperationContext* opCtx, const Document& event, ChangeStreamReaderContext& readerContext) {
-    tassert(10720101,
-            "CollectionChangeStreamShardTargeterImpl::_eventHandler must be present for handling "
-            "control events",
-            _eventHandler);
-    LOGV2_DEBUG(
-        11132500, 3, STAGE_LOG_PREFIX "Handling event", "controlEvent"_attr = event.toString());
-
-    auto controlEvent = parseControlEvent(event);
-    return readerContext.inDegradedMode()
-        ? _eventHandler->handleEventInDegradedMode(opCtx, controlEvent, *this, readerContext)
-        : _eventHandler->handleEvent(opCtx, controlEvent, *this, readerContext);
-}
-
-std::pair<ShardTargeterDecision, boost::optional<Timestamp>>
-CollectionChangeStreamShardTargeterImpl::startChangeStreamSegment(
-    OperationContext* opCtx, Timestamp atClusterTime, ChangeStreamReaderContext& context) {
-    MONGO_UNIMPLEMENTED_TASSERT(10783902);
-}
-
-HistoricalPlacementFetcher& CollectionChangeStreamShardTargeterImpl::getHistoricalPlacementFetcher()
-    const {
-    return *_fetcher;
-}
-
-ChangeStreamShardTargeterStateEventHandler*
-CollectionChangeStreamShardTargeterImpl::getEventHandler() const {
-    return _eventHandler.get();
-}
-
-void CollectionChangeStreamShardTargeterImpl::setEventHandler(
-    std::unique_ptr<ChangeStreamShardTargeterStateEventHandler> eventHandler) {
-    tassert(11132501, "ChangeStreamShardTargeterStateEventHandler must be provided", eventHandler);
-    LOGV2_DEBUG(11132502,
-                3,
-                STAGE_LOG_PREFIX "Setting event handler",
-                "previousEventHandler"_attr = _eventHandler ? _eventHandler->toString() : "none",
-                "newEventHandler"_attr = eventHandler->toString());
-    _eventHandler = std::move(eventHandler);
+std::unique_ptr<ChangeStreamShardTargeterStateEventHandler>
+CollectionChangeStreamShardTargeterImpl::createDbPresentHandler() const {
+    return std::make_unique<CollectionChangeStreamShardTargeterDbPresentStateEventHandler>();
 }
 
 }  // namespace mongo

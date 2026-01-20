@@ -107,9 +107,6 @@ struct SortOptions {
     // allowing external sorting.
     boost::optional<boost::filesystem::path> tempDir;
 
-    // If set, allows us to observe Sorter file handle usage.
-    SorterFileStats* sorterFileStats;
-
     // If set, allows us to observe aggregate Sorter behaviors. The lifetime of this object must
     // exceed that of the Sorter instance; otherwise, it will lead to a user-after-free error.
     SorterTracker* sorterTracker;
@@ -130,7 +127,6 @@ struct SortOptions {
         : limit(0),
           maxMemoryUsageBytes(DefaultMaxMemoryUsageBytes),
           tempDir(boost::none),
-          sorterFileStats(nullptr),
           sorterTracker(nullptr),
           useMemPool(false),
           moveSortedDataIntoIterator(false) {}
@@ -154,11 +150,6 @@ struct SortOptions {
 
     SortOptions& DBName(DatabaseName newDbName) {
         dbName = std::move(newDbName);
-        return *this;
-    }
-
-    SortOptions& FileStats(SorterFileStats* newSorterFileStats) {
-        sorterFileStats = newSorterFileStats;
         return *this;
     }
 
@@ -259,6 +250,23 @@ public:
         const SortOptions& opts, const typename Sorter<Key, Value>::Settings& settings) = 0;
 };
 
+template <typename Key, typename Value>
+class IteratorBase : public Iterator<Key, Value> {
+public:
+    SorterRange getRange() const override {
+        MONGO_UNREACHABLE_TASSERT(11617000);
+    }
+
+    bool spillable() const override {
+        return false;
+    }
+
+    [[nodiscard]] std::unique_ptr<Iterator<Key, Value>> spill(
+        const SortOptions& opts, const typename Sorter<Key, Value>::Settings& settings) override {
+        MONGO_UNREACHABLE_TASSERT(9917200);
+    }
+};
+
 /**
  * Returns an iterator that merges the passed-in iterators.
  */
@@ -327,10 +335,8 @@ public:
 
 protected:
     const Settings _settings;
-    BufBuilder _buffer;
-
-    // Keeps track of the hash of all data objects spilled to disk. Passed to the FileIterator
-    // to ensure data has not been corrupted after reading from disk.
+    // Keeps track of the hash of all data objects spilled to disk. Passed to the corresponding
+    // storage's iterator to ensure data has not been corrupted after reading from disk.
     SorterChecksumCalculator _checksumCalculator;
 
     SortOptions _opts;
@@ -373,6 +379,11 @@ public:
      * Returns the current offset of the end of the storage. Cannot be called after reading.
      */
     std::streamoff currentOffset();
+
+    /**
+     * Returns the fileStats ptr for the current file.
+     */
+    SorterFileStats* getFileStats();
 
 private:
     void _open();
@@ -449,8 +460,14 @@ public:
      */
     virtual void keep() = 0;
 
+    /**
+     * Gets the dbName. Relevant for encryption during index builds.
+     */
     virtual boost::optional<DatabaseName> getDbName() = 0;
 
+    /**
+     * Gets the checksum version used for serialization/deserialization.
+     */
     virtual SorterChecksumVersion getChecksumVersion() = 0;
 };
 
@@ -471,49 +488,6 @@ public:
 private:
     boost::optional<DatabaseName> _dbName;
     SorterChecksumVersion _checksumVersion;
-};
-
-/**
- * A class where we declare making a writer or iterator for when the sorter is using a
- * file as its underlying storage.
- */
-template <typename Key, typename Value>
-class FileBasedSorterStorage : public SorterStorageBase<Key, Value> {
-public:
-    typedef std::pair<typename Key::SorterDeserializeSettings,
-                      typename Value::SorterDeserializeSettings>
-        Settings;
-    using Comparator = std::function<int(const Key&, const Key&)>;
-
-    explicit FileBasedSorterStorage(
-        std::shared_ptr<SorterFile> file,
-        boost::filesystem::path pathToSpillDir,
-        boost::optional<DatabaseName> dbName = boost::none,
-        SorterChecksumVersion checksumVersion = SorterChecksumVersion::v2);
-
-    std::unique_ptr<SortedStorageWriter<Key, Value>> makeWriter(
-        const SortOptions& opts, const Settings& settings = Settings()) override;
-
-    std::shared_ptr<sorter::Iterator<Key, Value>> makeIterator(
-        std::unique_ptr<SortedStorageWriter<Key, Value>> writer) override;
-
-    std::unique_ptr<sorter::Iterator<Key, Value>> makeIteratorUnique(
-        std::unique_ptr<SortedStorageWriter<Key, Value>> writer) override;
-
-    size_t getIteratorSize() override;
-
-    std::shared_ptr<sorter::Iterator<Key, Value>> getSortedIterator(
-        const SorterRange& range, const Settings& settings) override;
-
-    std::string getStorageIdentifier() override;
-
-    void keep() override;
-
-    boost::optional<boost::filesystem::path> getSpillDirPath() override;
-
-private:
-    std::shared_ptr<SorterFile> _file;
-    boost::optional<boost::filesystem::path> _pathToSpillDir;
 };
 
 /**
@@ -579,6 +553,7 @@ public:
     typedef std::pair<typename Key::SorterDeserializeSettings,
                       typename Value::SorterDeserializeSettings>
         Settings;
+    using Comparator = std::function<int(const Key&, const Key&)>;
 
     virtual std::shared_ptr<Iterator> spill(const SortOptions& opts,
                                             const Settings& settings,
@@ -589,6 +564,15 @@ public:
                                                   const Settings& settings,
                                                   std::span<std::pair<Key, Value>> data,
                                                   uint32_t idx) = 0;
+
+    virtual std::unique_ptr<SorterStorage<Key, Value>> mergeSpills(
+        const SortOptions& opts,
+        const Settings& settings,
+        SorterStats& stats,
+        std::vector<std::shared_ptr<sorter::Iterator<Key, Value>>>& iters,
+        Comparator comp,
+        std::size_t numTargetedSpills,
+        std::size_t numParallelSpills) = 0;
 
     virtual void setStorage(std::unique_ptr<SorterStorage<Key, Value>> newStorage) = 0;
 
@@ -613,7 +597,7 @@ public:
     std::shared_ptr<Iterator> spill(const SortOptions& opts,
                                     const Settings& settings,
                                     std::span<std::pair<Key, Value>> data,
-                                    uint32_t idx = 0) override {
+                                    uint32_t idx) override {
         std::unique_ptr<SortedStorageWriter<Key, Value>> writer = _spill(opts, settings, data, idx);
         return _storage->makeIterator(std::move(writer));
     }
@@ -621,7 +605,7 @@ public:
     std::unique_ptr<Iterator> spillUnique(const SortOptions& opts,
                                           const Settings& settings,
                                           std::span<std::pair<Key, Value>> data,
-                                          uint32_t idx = 0) override {
+                                          uint32_t idx) override {
         std::unique_ptr<SortedStorageWriter<Key, Value>> writer = _spill(opts, settings, data, idx);
         return _storage->makeIteratorUnique(std::move(writer));
     }
@@ -637,15 +621,6 @@ public:
         return _storage->makeIterator(std::move(writer));
     }
 
-    virtual std::unique_ptr<SorterStorage<Key, Value>> mergeSpills(
-        const SortOptions& opts,
-        const Settings& settings,
-        SorterStats& stats,
-        std::vector<std::shared_ptr<sorter::Iterator<Key, Value>>>& iters,
-        Comparator comp,
-        std::size_t numTargetedSpills,
-        std::size_t numParallelSpills) = 0;
-
     void setStorage(std::unique_ptr<SorterStorage<Key, Value>> newStorage) override {
         _storage = std::move(newStorage);
     }
@@ -658,61 +633,13 @@ protected:
     std::unique_ptr<SorterStorage<Key, Value>> _storage;
 
 private:
-    std::unique_ptr<SortedStorageWriter<Key, Value>> _spill(const SortOptions& opts,
-                                                            const Settings& settings,
-                                                            std::span<std::pair<Key, Value>> data,
-                                                            uint32_t idx = 0) {
-        std::unique_ptr<SortedStorageWriter<Key, Value>> writer =
-            _storage->makeWriter(opts, settings);
-
-        for (size_t i = idx; i < data.size(); ++i) {
-            writer->addAlreadySorted(data[i].first, data[i].second);
-        }
-        return std::move(writer);
-    }
-};
-
-/**
- * How we merge spills when we use a file as the underlying storage for the sorter.
- */
-template <typename Key, typename Value>
-class FileBasedSorterSpiller : public SorterSpillerBase<Key, Value> {
-public:
-    typedef sorter::Iterator<Key, Value> Iterator;
-    typedef std::pair<typename Key::SorterDeserializeSettings,
-                      typename Value::SorterDeserializeSettings>
-        Settings;
-    using Comparator = std::function<int(const Key&, const Key&)>;
-
-    explicit FileBasedSorterSpiller(std::unique_ptr<FileBasedSorterStorage<Key, Value>> storage)
-        : SorterSpillerBase<Key, Value>(std::move(storage)) {}
-
-    FileBasedSorterSpiller(boost::filesystem::path tempDir,
-                           SorterFileStats* fileStats,
-                           boost::optional<DatabaseName> dbName = boost::none,
-                           SorterChecksumVersion checksumVersion = SorterChecksumVersion::v2)
-        : SorterSpillerBase<Key, Value>(std::make_unique<FileBasedSorterStorage<Key, Value>>(
-              std::make_shared<SorterFile>(sorter::nextFileName(tempDir), fileStats),
-              tempDir,
-              dbName,
-              checksumVersion)) {}
-
-    FileBasedSorterSpiller(std::shared_ptr<SorterFile> file,
-                           boost::filesystem::path tempDir,
-                           boost::optional<DatabaseName> dbName = boost::none,
-                           SorterChecksumVersion checksumVersion = SorterChecksumVersion::v2)
-        : SorterSpillerBase<Key, Value>(std::make_unique<FileBasedSorterStorage<Key, Value>>(
-              file, tempDir, dbName, checksumVersion)) {}
-
-    std::unique_ptr<SorterStorage<Key, Value>> mergeSpills(
+    virtual std::unique_ptr<SortedStorageWriter<Key, Value>> _spill(
         const SortOptions& opts,
         const Settings& settings,
-        SorterStats& stats,
-        std::vector<std::shared_ptr<sorter::Iterator<Key, Value>>>& iters,
-        Comparator comp,
-        std::size_t numTargetedSpills,
-        std::size_t numParallelSpills) override;
+        std::span<std::pair<Key, Value>> data,
+        uint32_t idx) = 0;
 };
+
 
 /**
  * This is the way to input data to the sorting framework.
@@ -750,10 +677,9 @@ public:
      */
     Sorter(const SortOptions& opts, std::string storageIdentifier);
 
-    // TODO(SERVER-116114): Change to SorterSpiller after removing templating on Comparator.
     static std::unique_ptr<Sorter> make(const SortOptions& opts,
                                         const Comparator& comp,
-                                        std::unique_ptr<SorterSpillerBase<Key, Value>> spiller,
+                                        std::shared_ptr<SorterSpiller<Key, Value>> spiller,
                                         const Settings& settings = Settings());
 
     static std::unique_ptr<Sorter> makeFromExistingRanges(
@@ -761,7 +687,7 @@ public:
         const std::vector<SorterRange>& ranges,
         const SortOptions& opts,
         const Comparator& comp,
-        std::unique_ptr<SorterSpillerBase<Key, Value>> spiller,
+        std::shared_ptr<SorterSpiller<Key, Value>> spiller,
         const Settings& settings = Settings());
 
     virtual void add(const Key&, const Value&) = 0;
@@ -902,6 +828,7 @@ public:
     using Comparator = std::function<int(const Key&, const Key&)>;
 
     BoundedSorter(const SortOptions& opts,
+                  SorterFileStats* fileStats,
                   Comparator comp,
                   BoundMaker makeBound,
                   bool checkInput = true);
@@ -973,34 +900,5 @@ private:
 
     boost::optional<Key> _min;
     bool _done = false;
-};
-
-template <typename Key, typename Value>
-class SortedFileWriter final : public SortedStorageWriter<Key, Value> {
-public:
-    typedef sorter::Iterator<Key, Value> Iterator;
-    typedef std::pair<typename Key::SorterDeserializeSettings,
-                      typename Value::SorterDeserializeSettings>
-        Settings;
-
-    explicit SortedFileWriter(const SortOptions& opts,
-                              std::shared_ptr<SorterFile> file,
-                              const Settings& settings = Settings());
-
-    ~SortedFileWriter() override = default;
-
-    void addAlreadySorted(const Key&, const Value&) override;
-
-    std::shared_ptr<Iterator> done() override;
-    std::unique_ptr<Iterator> doneUnique() override;
-
-    void writeChunk() override;
-
-private:
-    std::shared_ptr<SorterFile> _file;
-
-    // Tracks where in the file we started writing the sorted data range so that the information can
-    // be given to the Iterator in done().
-    std::streamoff _fileStartOffset;
 };
 }  // namespace MONGO_MOD_PUB mongo

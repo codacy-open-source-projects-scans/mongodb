@@ -36,7 +36,7 @@ class ChangeStreamReader {
      *   - collName: Collection name (required for Collection type).
      *   - numberOfEventsToRead: Number of events to read before stopping.
      *   - readingMode: ChangeStreamReadingMode value. Default: Continuous.
-     *   - showExpandedEvents: Optional boolean to show expanded events (default: false).
+     *   - showExpandedEvents: Optional boolean to show expanded events (default: true).
      *   - batchSize: Optional cursor batch size for getMore operations (default: 1).
      */
     static run(conn, config) {
@@ -68,14 +68,13 @@ class ChangeStreamReader {
 
         const cst = new ChangeStreamTest(db);
 
-        const changeStreamSpec = {};
-        if (config.showExpandedEvents) {
-            changeStreamSpec.showExpandedEvents = true;
-        }
+        const changeStreamSpec = {
+            showExpandedEvents: config.showExpandedEvents ?? true,
+        };
         if (config.watchMode === ChangeStreamWatchMode.kCluster) {
             changeStreamSpec.allChangesForCluster = true;
         }
-        // Use startAfter for invalidate tokens, resumeAfter for normal tokens
+        // Use startAfter for invalidate tokens, resumeAfter for normal tokens.
         if (resumeToken) {
             if (useStartAfter) {
                 changeStreamSpec.startAfter = resumeToken;
@@ -89,6 +88,7 @@ class ChangeStreamReader {
         const pipeline = [{$changeStream: changeStreamSpec}];
 
         // For cluster-wide change streams, filter out events from control database.
+        // Database-level streams don't need this since they only watch the test database.
         if (config.watchMode === ChangeStreamWatchMode.kCluster) {
             pipeline.push({$match: {"ns.db": {$ne: Connector.controlDatabase}}});
         }
@@ -121,7 +121,7 @@ class ChangeStreamReader {
 
             const isInvalidate = isInvalidated(changeEvent);
 
-            // cursorClosed is true for invalidate events (server closes cursor after invalidate)
+            // cursorClosed is true for invalidate events (server closes cursor after invalidate).
             Connector.writeChangeEvent(conn, cfg.instanceName, {
                 changeEvent,
                 cursorClosed: isInvalidate,
@@ -159,10 +159,10 @@ class ChangeStreamReader {
             const isInvalidate = isInvalidated(changeEvent);
 
             resumeToken = changeEvent._id;
-            // Must use startAfter (not resumeAfter) when resuming from invalidate
+            // Must use startAfter (not resumeAfter) when resuming from invalidate.
             useStartAfter = isInvalidate;
 
-            // cursorClosed is true for invalidate events (server closes cursor after invalidate)
+            // cursorClosed is true for invalidate events (server closes cursor after invalidate).
             Connector.writeChangeEvent(conn, cfg.instanceName, {
                 changeEvent,
                 cursorClosed: isInvalidate,

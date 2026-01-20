@@ -293,6 +293,7 @@ export function getQueryStatsWithTransform(
 export function getQueryStatsAggCmd(
     db,
     options = {
+        collName: "",
         transformIdentifiers: false,
         hmacKey: kDefaultQueryStatsHmacKey,
     },
@@ -310,16 +311,20 @@ export function getQueryStatsAggCmd(
         };
     }
 
+    let matchExpr = {
+        "key.queryShape.command": "aggregate",
+        "key.queryShape.pipeline.0.$queryStats": {$exists: false},
+        "key.client.application.name": kShellApplicationName,
+    };
+
+    if (options.collName) {
+        matchExpr["key.queryShape.cmdNs.coll"] = options.collName;
+    }
+
     pipeline = [
         queryStatsStage,
         // Filter out find queries and $queryStats aggregations.
-        {
-            $match: {
-                "key.queryShape.command": "aggregate",
-                "key.queryShape.pipeline.0.$queryStats": {$exists: false},
-                "key.client.application.name": kShellApplicationName,
-            },
-        },
+        {$match: matchExpr},
         // Sort on key so entries are in a deterministic order.
         {$sort: {key: 1}},
     ];
@@ -484,12 +489,17 @@ export function getQueryPlannerMetrics(metrics) {
         return metrics[queryPlannerSectionName];
     }
 
-    return {
+    // Include planningTimeMicros if present (when CBR feature flag is on).
+    const result = {
         hasSortStage: metrics.hasSortStage,
         usedDisk: metrics.usedDisk,
         fromMultiPlanner: metrics.fromMultiPlanner,
         fromPlanCache: metrics.fromPlanCache,
     };
+    if (metrics.hasOwnProperty("planningTimeMicros")) {
+        result.planningTimeMicros = metrics.planningTimeMicros;
+    }
+    return result;
 }
 
 export function getWriteMetrics(metrics) {
@@ -610,12 +620,8 @@ export function getValueAtPath(object, dottedPath) {
  * @param {Function} callbackFn - The function to make the assertion on each connection.
  */
 export function withQueryStatsEnabled(collName, callbackFn) {
-    const options = {
-        setParameter: {internalQueryStatsRateLimit: -1},
-    };
-
     {
-        const conn = MongoRunner.runMongod(options);
+        const conn = MongoRunner.runMongod(getQueryStatsServerParameters());
         const testDB = conn.getDB("test");
         var coll = testDB[collName];
         coll.drop();
@@ -625,7 +631,11 @@ export function withQueryStatsEnabled(collName, callbackFn) {
     }
 
     {
-        const st = new ShardingTest({shards: 2, mongosOptions: options});
+        const st = new ShardingTest({
+            shards: 2,
+            mongosOptions: getQueryStatsServerParameters(),
+            rsOptions: getQueryStatsServerParameters(),
+        });
         const testDB = st.getDB("test");
         var coll = testDB[collName];
         st.shardColl(coll, {_id: 1}, {_id: 1});
@@ -1073,7 +1083,7 @@ export function runForEachDeployment(callbackFn) {
  */
 export function runOnReplsetAndShardedCluster(callbackFn) {
     {
-        const rst = new ReplSetTest({nodes: 3, nodeOptions: getQueryStatsServerParameters()});
+        const rst = new ReplSetTest({nodes: 2, nodeOptions: getQueryStatsServerParameters()});
         rst.startSet();
         rst.initiate();
 
@@ -1084,7 +1094,10 @@ export function runOnReplsetAndShardedCluster(callbackFn) {
 
     {
         const st = new ShardingTest(
-            Object.assign({shards: 2, other: {mongosOptions: getQueryStatsServerParameters()}}),
+            Object.assign({
+                shards: 2,
+                other: {mongosOptions: getQueryStatsServerParameters(), rsOptions: getQueryStatsServerParameters()},
+            }),
         );
 
         const testDB = st.s.getDB("test");

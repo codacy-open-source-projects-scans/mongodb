@@ -83,7 +83,7 @@ public:
         return _stageBson;
     }
 
-    std::unique_ptr<sdk::LogicalAggStage> clone() const {
+    std::unique_ptr<sdk::LogicalAggStage> clone() const override {
         return std::make_unique<LimitLogicalStage>(_name, _stageBson);
     }
 
@@ -109,7 +109,6 @@ protected:
     const mongo::BSONObj _stageBson;
 };
 
-// TODO (SERVER-115071): Update constraints from default (ex: lookUpAllowed, unionWithAllowed, ...).
 DEFAULT_AST_NODE(Limit);
 
 class LimitParseNode : public sdk::TestParseNode<LimitAstNode> {

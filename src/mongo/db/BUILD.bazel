@@ -926,7 +926,6 @@ mongo_cc_library(
         "//src/mongo/db/query/compiler/ce/sampling:sampling_math",
         "//src/mongo/db/query/compiler/optimizer/cost_based_ranker:estimates",
         "//src/mongo/db/query/compiler/optimizer/join:plan_enumerator",
-        "//src/mongo/db/query/compiler/optimizer/join:predicate_extractor",
         "//src/mongo/db/query/compiler/optimizer/join:reorder_joins",
         "//src/mongo/db/query/compiler/optimizer/join:solution_storage",
         "//src/mongo/db/query/plan_cache:query_plan_cache",
@@ -1756,6 +1755,7 @@ mongo_cc_library(
         "//src/mongo/db/pipeline:expression_function.cpp",
         "//src/mongo/db/pipeline:expression_js_emit.cpp",
         "//src/mongo/db/pipeline:expression_let.cpp",
+        "//src/mongo/db/pipeline:expression_map_reduce_filter.cpp",
         "//src/mongo/db/pipeline:expression_parser_gen",
         "//src/mongo/db/pipeline:expression_test_api_version.cpp",
         "//src/mongo/db/pipeline:expression_test_feature_flags.cpp",
@@ -2886,6 +2886,7 @@ mongo_cc_unit_test(
     ],
     deps = [
         ":service_context_d",
+        "//src/mongo/db/rss/attached_storage:attached_persistence_provider",
         "//src/mongo/transport:service_entry_point_test_fixture",
     ],
 )
@@ -3357,6 +3358,7 @@ mongo_cc_benchmark(
         "//src/mongo/db/op_observer",
         "//src/mongo/db/repl:replmocks",
         "//src/mongo/db/repl:storage_interface_impl",
+        "//src/mongo/db/rss/attached_storage:attached_persistence_provider",
         "//src/mongo/db/s:sharding_runtime_d",
         "//src/mongo/db/shard_role/shard_catalog:catalog_impl",
         "//src/mongo/db/storage:storage_control",

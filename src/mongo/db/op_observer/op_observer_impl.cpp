@@ -903,6 +903,7 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx,
         if (!args.updateArgs->replicatedRecordId.isNull()) {
             operation.setRecordId(args.updateArgs->replicatedRecordId);
         }
+        operation.setInitializedStatementIds(args.updateArgs->stmtIds);
         batchedWriteContext.addBatchedOperation(opCtx, operation);
     } else if (inMultiDocumentTransaction) {
         const bool inRetryableInternalTransaction =
@@ -1063,6 +1064,7 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
         if (!args.replicatedRecordId.isNull()) {
             operation.setRecordId(args.replicatedRecordId);
         }
+        operation.setInitializedStatementIds({stmtId});
 
         batchedWriteContext.addBatchedOperation(opCtx, operation);
     } else if (inMultiDocumentTransaction) {
@@ -2046,7 +2048,6 @@ void OpObserverImpl::onBatchedWriteCommit(OperationContext* opCtx,
         MutableOplogEntry oplogEntry;
         oplogEntry.setDurableReplOperation(batchedOps->getOperationsForOpObserver().front());
 
-        // TODO (SERVER-114338): Pull commonalities out of switch cases if possible.
         switch (oplogEntry.getOpType()) {
             case repl::OpTypeEnum::kUpdate:
             case repl::OpTypeEnum::kDelete:
@@ -2056,27 +2057,21 @@ void OpObserverImpl::onBatchedWriteCommit(OperationContext* opCtx,
                     _operationLogger->appendOplogEntryChainInfo(
                         opCtx, &oplogEntry, &oplogLink, oplogEntry.getStatementIds());
                 }
-
+                [[fallthrough]];
+            }
+            case repl::OpTypeEnum::kContainerDelete:
+            case repl::OpTypeEnum::kContainerInsert: {
                 auto opTime = logOperation(
                     opCtx, &oplogEntry, true /*assignCommonFields*/, _operationLogger.get());
-
-                std::vector<StmtId> stmtIdsWritten;
-                stmtIdsWritten.insert(stmtIdsWritten.end(),
-                                      oplogEntry.getStatementIds().begin(),
-                                      oplogEntry.getStatementIds().end());
 
                 SessionTxnRecord sessionTxnRecord;
                 sessionTxnRecord.setLastWriteOpTime(opTime);
                 sessionTxnRecord.setLastWriteDate(oplogEntry.getWallClockTime());
                 onWriteOpCompleted(
-                    opCtx, std::move(stmtIdsWritten), sessionTxnRecord, oplogEntry.getNss());
+                    opCtx, oplogEntry.getStatementIds(), sessionTxnRecord, oplogEntry.getNss());
 
                 return;
             }
-            // // TODO (SERVER-114446): Handle single container insert
-            // case repl::OpTypeEnum::kContainerInsert:
-            // // TODO (SERVER-114447): Handle single container delete
-            // case repl::OpTypeEnum::kContainerDelete:
             default:
                 break;
         }

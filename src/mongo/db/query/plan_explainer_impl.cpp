@@ -49,7 +49,9 @@
 #include "mongo/db/query/compiler/optimizer/cost_based_ranker/estimates_storage.h"
 #include "mongo/db/query/plan_ranking_decision.h"
 #include "mongo/db/query/plan_summary_stats_visitor.h"
-#include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/query_execution_knobs_gen.h"
+#include "mongo/db/query/query_integration_knobs_gen.h"
+#include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/db/query/record_id_bound.h"
 #include "mongo/db/query/stage_builder/classic_stage_builder.h"
 #include "mongo/platform/atomic_word.h"
@@ -379,7 +381,7 @@ void statsToBSON(const stage_builder::PlanStageToQsnMap& planStageQsnMap,
             appendMultikeyPaths(spec->keyPattern, spec->multiKeyPaths, bob);
         }
         bob->appendBool("isUnique", spec->isUnique);
-        bob->appendBool("isSparse", spec->isSparse);
+        bob->appendBool("isSparse", spec->isSetSparseByUser);
         bob->appendBool("isPartial", spec->isPartial);
         bob->append("indexVersion", spec->indexVersion);
 
@@ -407,7 +409,7 @@ void statsToBSON(const stage_builder::PlanStageToQsnMap& planStageQsnMap,
             appendMultikeyPaths(spec->keyPattern, spec->multiKeyPaths, bob);
         }
         bob->appendBool("isUnique", spec->isUnique);
-        bob->appendBool("isSparse", spec->isSparse);
+        bob->appendBool("isSparse", spec->isSetSparseByUser);
         bob->appendBool("isPartial", spec->isPartial);
         if (spec->isShardFilteringDistinctScanEnabled) {
             bob->appendBool("isShardFiltering", spec->isShardFiltering);
@@ -512,7 +514,7 @@ void statsToBSON(const stage_builder::PlanStageToQsnMap& planStageQsnMap,
             appendMultikeyPaths(spec->keyPattern, spec->multiKeyPaths, bob);
         }
         bob->appendBool("isUnique", spec->isUnique);
-        bob->appendBool("isSparse", spec->isSparse);
+        bob->appendBool("isSparse", spec->isSetSparseByUser);
         bob->appendBool("isPartial", spec->isPartial);
         bob->append("indexVersion", spec->indexVersion);
         bob->append("direction", spec->direction > 0 ? "forward" : "backward");

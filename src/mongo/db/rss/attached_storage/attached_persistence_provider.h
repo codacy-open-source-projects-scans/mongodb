@@ -30,6 +30,7 @@
 #pragma once
 
 #include "mongo/db/rss/persistence_provider.h"
+#include "mongo/db/write_concern_options.h"
 #include "mongo/util/modules.h"
 
 namespace mongo::rss {
@@ -116,6 +117,11 @@ public:
     bool supportsUnstableCheckpoints() const override;
 
     /**
+     * We do not support preserving prepared transactions in the precise checkpoints.
+     */
+    bool supportsPreservingPreparedTxnInPreciseCheckpoints() const override;
+
+    /**
      * We can support table logging.
      */
     bool supportsTableLogging() const override;
@@ -134,6 +140,10 @@ public:
      * We can support table verify.
      */
     bool supportsTableVerify() const override;
+
+    bool supportsWriteConcernOptions(const WriteConcernOptions& writeConcernOptions) const override;
+
+    bool supportsReadConcernLevel(const repl::ReadConcernLevel& readConcernLevel) const override;
 
     /**
      * We can enable it only for testing purposes.

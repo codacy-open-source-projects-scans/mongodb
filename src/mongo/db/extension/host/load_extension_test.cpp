@@ -29,7 +29,8 @@
 
 #include "mongo/db/extension/host/load_extension.h"
 
-#include "mongo/db/extension/host/document_source_extension.h"
+#include "mongo/db/extension/host/document_source_extension_for_query_shape.h"
+#include "mongo/db/extension/host/document_source_extension_optimizable.h"
 #include "mongo/db/extension/host/load_extension_test_util.h"
 #include "mongo/db/extension/host/load_stub_parsers.h"
 #include "mongo/db/pipeline/document_source.h"
@@ -40,6 +41,7 @@
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/pipeline/pipeline_factory.h"
+#include "mongo/db/query/search/mongot_options.h"
 #include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
@@ -66,6 +68,13 @@ protected:
         ExtensionLoader::unload_forTest("foo");
         LiteParsedDocumentSource::unregisterParser_forTest(kMatchTopNStageName);
         ExtensionLoader::unload_forTest("matchTopN");
+        LiteParsedDocumentSource::unregisterParser_forTest("$optionA");
+        ExtensionLoader::unload_forTest("test_options");
+        LiteParsedDocumentSource::unregisterParser_forTest("$checkNum");
+        ExtensionLoader::unload_forTest("parse_options");
+        // TODO SERVER-115137: Remove.
+        LiteParsedDocumentSource::unregisterParser_forTest("$mongotHostVerified");
+        ExtensionLoader::unload_forTest("mongotHostTest");
     }
 
     ExtensionConfig makeTestFooConfig() {
@@ -202,7 +211,8 @@ TEST_F(LoadExtensionsTest, LoadExtensionSucceeds) {
     auto sourceList = DocumentSource::parse(expCtx, stageSpec);
     ASSERT_EQUALS(sourceList.size(), 1U);
 
-    auto extensionStage = dynamic_cast<DocumentSourceExtension*>(sourceList.front().get());
+    auto extensionStage =
+        dynamic_cast<DocumentSourceExtensionForQueryShape*>(sourceList.front().get());
     ASSERT_TRUE(extensionStage != nullptr);
     ASSERT_EQUALS(std::string(extensionStage->getSourceName()), kTestFooStageName);
 
@@ -214,8 +224,8 @@ TEST_F(LoadExtensionsTest, LoadExtensionSucceeds) {
     ASSERT_TRUE(parsedPipeline != nullptr);
     ASSERT_EQUALS(parsedPipeline->getSources().size(), 2U);
 
-    auto firstStage =
-        dynamic_cast<DocumentSourceExtension*>(parsedPipeline->getSources().front().get());
+    auto firstStage = dynamic_cast<DocumentSourceExtensionForQueryShape*>(
+        parsedPipeline->getSources().front().get());
     ASSERT_TRUE(firstStage != nullptr);
     ASSERT_EQUALS(std::string(firstStage->getSourceName()), std::string(kTestFooStageName));
 }
@@ -234,7 +244,8 @@ TEST_F(LoadExtensionsTest, LoadMatchTopNDesugarExtensionSucceeds) {
     {
         auto liteParsed = LiteParsedDocumentSource::parse(nss, stageSpec);
         auto liteParsedExpandable =
-            dynamic_cast<DocumentSourceExtension::LiteParsedExpandable*>(liteParsed.get());
+            dynamic_cast<DocumentSourceExtensionOptimizable::LiteParsedExpandable*>(
+                liteParsed.get());
         ASSERT_TRUE(liteParsedExpandable != nullptr);
         const auto& expanded = liteParsedExpandable->getExpandedPipeline();
         ASSERT_EQ(expanded.size(), 3U);
@@ -255,7 +266,8 @@ TEST_F(LoadExtensionsTest, LoadMatchTopNDesugarExtensionSucceeds) {
     auto sourceList = DocumentSource::parse(expCtx, stageSpec);
     ASSERT_EQUALS(sourceList.size(), 1U);
 
-    auto extensionStage = dynamic_cast<DocumentSourceExtension*>(sourceList.front().get());
+    auto extensionStage =
+        dynamic_cast<DocumentSourceExtensionForQueryShape*>(sourceList.front().get());
     ASSERT(extensionStage);
     ASSERT_EQUALS(std::string(extensionStage->getSourceName()), kMatchTopNStageName);
 
@@ -267,14 +279,19 @@ TEST_F(LoadExtensionsTest, LoadMatchTopNDesugarExtensionSucceeds) {
     ASSERT(parsedPipeline);
     ASSERT_EQUALS(parsedPipeline->getSources().size(), 2U);
 
-    auto firstStage =
-        dynamic_cast<DocumentSourceExtension*>(parsedPipeline->getSources().front().get());
+    auto firstStage = dynamic_cast<DocumentSourceExtensionForQueryShape*>(
+        parsedPipeline->getSources().front().get());
     ASSERT(firstStage);
     ASSERT_EQUALS(std::string(firstStage->getSourceName()), kMatchTopNStageName);
 
     // Full Parse expansion
     {
-        Desugarer(parsedPipeline.get())();
+        auto parsedPipeline = pipeline_factory::makePipeline(pipeline,
+                                                             expCtx,
+                                                             {.optimize = false,
+                                                              .alreadyOptimized = false,
+                                                              .attachCursorSource = false,
+                                                              .desugar = true});
         ASSERT_EQ(parsedPipeline->size(), 4U);
 
         auto it = parsedPipeline->getSources().begin();
@@ -300,7 +317,8 @@ TEST_F(LoadExtensionsTest, InitializationFunctionPopulatesParserMap) {
     auto sourceList = DocumentSource::parse(expCtx, stageSpec);
     ASSERT_EQUALS(sourceList.size(), 1U);
 
-    auto extensionStage = dynamic_cast<DocumentSourceExtension*>(sourceList.front().get());
+    auto extensionStage =
+        dynamic_cast<DocumentSourceExtensionForQueryShape*>(sourceList.front().get());
     ASSERT_TRUE(extensionStage != nullptr);
     ASSERT_EQUALS(std::string(extensionStage->getSourceName()), std::string(kTestFooStageName));
 }
@@ -344,10 +362,10 @@ TEST_F(LoadExtensionsTest, LoadExtensionTwoStagesSucceeds) {
     ASSERT_TRUE(parsedPipeline != nullptr);
     ASSERT_EQUALS(parsedPipeline->getSources().size(), 2U);
 
-    auto fooStage =
-        dynamic_cast<DocumentSourceExtension*>(parsedPipeline->getSources().front().get());
-    auto barStage =
-        dynamic_cast<DocumentSourceExtension*>(parsedPipeline->getSources().back().get());
+    auto fooStage = dynamic_cast<DocumentSourceExtensionForQueryShape*>(
+        parsedPipeline->getSources().front().get());
+    auto barStage = dynamic_cast<DocumentSourceExtensionForQueryShape*>(
+        parsedPipeline->getSources().back().get());
 
     ASSERT_TRUE(fooStage != nullptr && barStage != nullptr);
     ASSERT_EQUALS(std::string(fooStage->getSourceName()), "$foo");
@@ -366,8 +384,8 @@ TEST_F(LoadExtensionsTest, LoadHighestCompatibleVersionSucceeds) {
     ASSERT_TRUE(parsedPipeline != nullptr);
     ASSERT_EQUALS(parsedPipeline->getSources().size(), 1U);
 
-    auto extensionStage =
-        dynamic_cast<DocumentSourceExtension*>(parsedPipeline->getSources().front().get());
+    auto extensionStage = dynamic_cast<DocumentSourceExtensionForQueryShape*>(
+        parsedPipeline->getSources().front().get());
 
     ASSERT_TRUE(extensionStage != nullptr);
     ASSERT_EQUALS(std::string(extensionStage->getSourceName()), "$extensionV1");
@@ -399,7 +417,8 @@ TEST_F(LoadExtensionsTest, LoadExtensionBothOptionsSucceed) {
     ASSERT_TRUE(parsedPipeline != nullptr);
     ASSERT_EQUALS(parsedPipeline->getSources().size(), 1U);
 
-    auto stage = dynamic_cast<DocumentSourceExtension*>(parsedPipeline->getSources().front().get());
+    auto stage = dynamic_cast<DocumentSourceExtensionForQueryShape*>(
+        parsedPipeline->getSources().front().get());
     ASSERT_TRUE(stage != nullptr);
     ASSERT_EQUALS(std::string(stage->getSourceName()), "$optionA");
 
@@ -425,7 +444,8 @@ TEST_F(LoadExtensionsTest, LoadExtensionParseWithExtensionOptions) {
     ASSERT_TRUE(parsedPipeline != nullptr);
     ASSERT_EQUALS(parsedPipeline->getSources().size(), 1U);
 
-    auto stage = dynamic_cast<DocumentSourceExtension*>(parsedPipeline->getSources().front().get());
+    auto stage = dynamic_cast<DocumentSourceExtensionForQueryShape*>(
+        parsedPipeline->getSources().front().get());
     ASSERT_TRUE(stage != nullptr);
     ASSERT_EQUALS(std::string(stage->getSourceName()), "$checkNum");
 
@@ -525,4 +545,51 @@ DEATH_TEST_REGEX_F(ExtensionErrorsTestDeathTest, ExtensionTasserts, "98765.*anot
     [[maybe_unused]] auto parsedPipeline =
         pipeline_factory::makePipeline(pipeline, expCtx, pipeline_factory::kOptionsMinimal);
 }
+
+// TODO SERVER-115137: Remove these tests.
+class MongotHostInjectionTest : public LoadExtensionsTest {
+protected:
+    static inline const std::string kTestMongotHost = "localhost:27027";
+
+    void setUp() override {
+        globalMongotParams.host = kTestMongotHost;
+    }
+
+    ExtensionConfig makeMongotHostTestConfig(const std::string& extOptions) {
+        return {.sharedLibraryPath =
+                    test_util::getExtensionPath("libmongothost_extension.so").string(),
+                .extOptions = YAML::Load(extOptions)};
+    }
+};
+
+TEST_F(MongotHostInjectionTest, ExtensionLoadsMongotHostValue) {
+    auto config = makeMongotHostTestConfig("expectedMongotHost: " + kTestMongotHost);
+    ASSERT_DOES_NOT_THROW(ExtensionLoader::load("mongotHostTest", config));
+    ASSERT_TRUE(ExtensionLoader::isLoaded("mongotHostTest"));
+
+    // Verify mongotHost was injected by checking $mongotHostVerified is registered.
+    std::vector<BSONObj> pipeline = {BSON("$mongotHostVerified" << BSONObj())};
+    auto parsedPipeline =
+        pipeline_factory::makePipeline(pipeline, expCtx, pipeline_factory::kOptionsMinimal);
+    ASSERT_TRUE(parsedPipeline != nullptr);
+    ASSERT_EQUALS(parsedPipeline->getSources().size(), 1U);
+}
+
+TEST_F(MongotHostInjectionTest, ExtensionOverridesMongotHostValue) {
+    auto config = makeMongotHostTestConfig(
+        "mongotHost: some-invalid-value\n"
+        "expectedMongotHost: " +
+        kTestMongotHost);
+    ASSERT_DOES_NOT_THROW(ExtensionLoader::load("mongotHostTest", config));
+    ASSERT_TRUE(ExtensionLoader::isLoaded("mongotHostTest"));
+
+    // Verify the server's value was used (not the config's value) by checking that
+    // $mongotHostVerified is registered.
+    std::vector<BSONObj> pipeline = {BSON("$mongotHostVerified" << BSONObj())};
+    auto parsedPipeline =
+        pipeline_factory::makePipeline(pipeline, expCtx, pipeline_factory::kOptionsMinimal);
+    ASSERT_TRUE(parsedPipeline != nullptr);
+    ASSERT_EQUALS(parsedPipeline->getSources().size(), 1U);
+}
+
 }  // namespace mongo::extension::host

@@ -729,7 +729,7 @@ public:
             1034131,
             "'phase' field must be present on shards",
             !feature_flags::gUseTopologyChangeCoordinators.isEnabledOnVersion(requestedVersion) ||
-                request.getPhase() || (!role || !role->hasExclusively(ClusterRole::ShardServer)));
+                isDryRun || request.getPhase() || (!role || !role->isShardOnly()));
 
         if (isDryRun) {
             processDryRun(opCtx, request, requestedVersion, actualVersion);
@@ -1223,6 +1223,11 @@ private:
             getTransitionFCVInfo(
                 serverGlobalParams.featureCompatibility.acquireFCVSnapshot().getVersion())
                 .from;
+
+        // TODO SERVER-116437: Remove once 9.0 becomes last lts.
+        if (role && role->has(ClusterRole::ConfigServer)) {
+            _removeShardStateFromConfigCollection(opCtx);
+        }
 
         // TODO SERVER-103046: Remove once 9.0 becomes last lts.
         if (role && role->has(ClusterRole::ShardServer) &&
@@ -1921,6 +1926,37 @@ private:
         }
     }
 
+    // TODO SERVER-116437 Remove once 9.0 becomes last lts.
+    void _removeShardStateFromConfigCollection(OperationContext* opCtx) {
+        // Prevent concurrent add/remove shard operations.
+        Lock::ExclusiveLock shardMembershipLock =
+            ShardingCatalogManager::get(opCtx)->acquireShardMembershipLockForTopologyChange(opCtx);
+
+        LOGV2(11354300, "Updating 'config.shards' entries to remove 'state' field");
+
+        write_ops::UpdateCommandRequest updateOp(NamespaceString::kConfigsvrShardsNamespace);
+        updateOp.setUpdates({[&] {
+            const auto filter = BSON(ShardType::state << BSON("$exists" << true));
+            const auto update = BSON("$unset" << BSON(ShardType::state << ""));
+            write_ops::UpdateOpEntry entry;
+            entry.setQ(filter);
+            entry.setU(write_ops::UpdateModification::parseFromClassicUpdate(update));
+            entry.setUpsert(false);
+            // We want to remove the 'state' field from all entries.
+            entry.setMulti(true);
+            return entry;
+        }()});
+        updateOp.setWriteConcern(defaultMajorityWriteConcern());
+
+        DBDirectClient client(opCtx);
+        const auto result = client.update(updateOp);
+        write_ops::checkWriteErrors(result);
+
+        LOGV2(11354301,
+              "Update of 'config.shards' entries succeeded",
+              "updateResponse"_attr = result.toBSON());
+    }
+
     // _finalizeUpgrade is only for any tasks that must be done to fully complete the FCV upgrade
     // AFTER the FCV document has already been updated to the UPGRADED FCV.
     // This is because during _runUpgrade, the FCV is still in the transitional state (which behaves
@@ -2002,21 +2038,10 @@ private:
         if ((isReplSet || isConfigsvr) &&
             feature_flags::gFeatureFlagPQSBackfill.isEnabledOnVersion(requestedVersion)) {
             auto& service = query_settings::QuerySettingsService::get(opCtx);
-            try {
-                service.createQueryShapeRepresentativeQueriesCollection(opCtx);
-                service
-                    .migrateRepresentativeQueriesFromQuerySettingsClusterParameterToDedicatedCollection(
-                        opCtx);
-            } catch (const ExceptionFor<ErrorCodes::Interrupted>&) {
-                throw;
-            } catch (const ExceptionFor<ErrorCodes::InterruptedDueToOverload>&) {
-                throw;
-            } catch (const DBException& ex) {
-                uasserted(ErrorCodes::TemporarilyUnavailable,
-                          str::stream()
-                              << "Cannot upgrade to the new FCV due to QuerySettingsService issue: "
-                              << ex.reason());
-            }
+            service.createQueryShapeRepresentativeQueriesCollection(opCtx);
+            service
+                .migrateRepresentativeQueriesFromQuerySettingsClusterParameterToDedicatedCollection(
+                    opCtx);
         }
     }
 
@@ -2062,20 +2087,10 @@ private:
         if ((isReplSet || isConfigsvr) &&
             !feature_flags::gFeatureFlagPQSBackfill.isEnabledOnVersion(requestedVersion)) {
             auto& service = query_settings::QuerySettingsService::get(opCtx);
-            try {
-                service
-                    .migrateRepresentativeQueriesFromDedicatedCollectionToQuerySettingsClusterParameter(
-                        opCtx);
-                service.dropQueryShapeRepresentativeQueriesCollection(opCtx);
-            } catch (const ExceptionFor<ErrorCodes::Interrupted>&) {
-                throw;
-            } catch (const DBException& ex) {
-                uasserted(
-                    ErrorCodes::TemporarilyUnavailable,
-                    str::stream()
-                        << "Cannot downgrade to the old FCV due to QuerySettingsService issue: "
-                        << ex.reason());
-            }
+            service
+                .migrateRepresentativeQueriesFromDedicatedCollectionToQuerySettingsClusterParameter(
+                    opCtx);
+            service.dropQueryShapeRepresentativeQueriesCollection(opCtx);
         }
     }
     void _forwardDryRunRequestToShards(OperationContext* opCtx,

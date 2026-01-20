@@ -30,6 +30,7 @@
 #include "mongo/db/exec/sbe/expressions/compile_ctx.h"
 #include "mongo/db/exec/sbe/stages/sort.h"
 #include "mongo/db/exec/sbe/values/row.h"
+#include "mongo/db/sorter/file_based_spiller.h"
 #include "mongo/db/sorter/sorter.h"
 #include "mongo/db/sorter/sorter_template_defs.h"  // IWYU pragma: keep
 #include "mongo/util/assert_util.h"
@@ -226,7 +227,6 @@ private:
             if (!_sorterFileStats) {
                 _sorterFileStats = std::make_unique<SorterFileStats>(nullptr);
             }
-            opts.FileStats(_sorterFileStats.get());
         }
         return opts;
     }
@@ -253,9 +253,10 @@ private:
         _sorter = Sorter<KeyRow, ValueRow>::make(
             opts,
             comparator,
-            (opts.tempDir) ? std::make_unique<FileBasedSorterSpiller<KeyRow, ValueRow>>(
-                                 *opts.tempDir, opts.sorterFileStats)
-                           : nullptr,
+            (opts.tempDir)
+                ? std::make_shared<mongo::sorter::FileBasedSorterSpiller<KeyRow, ValueRow>>(
+                      *opts.tempDir, _sorterFileStats.get())
+                : nullptr,
             {});
         _outputIt.reset();
     }

@@ -271,6 +271,7 @@ std::string gtestFilterForSelection(const std::vector<SelectedTest>& selection) 
 }
 
 void MainProgress::initialize() {
+    setDefaultMockBehavior(MockBehavior::nice);
     callInitGoogleTest(_argVec);
 
     // Colorize when explicitly asked to. If no position is taken, colorize when we are writing
@@ -338,9 +339,11 @@ boost::optional<ExitCode> MainProgress::parseAndAcceptOptions() {
     if (auto&& o = _options.fileNameFilter)
         uto.fileNameFilter = *o;
 
-    applyTestFilters(uto.suites.value_or(std::vector<std::string>{}),
-                     uto.filter.value_or(""),
-                     uto.fileNameFilter.value_or(""));
+    if (uto.suites || uto.filter || uto.fileNameFilter) {
+        applyTestFilters(uto.suites.value_or(std::vector<std::string>{}),
+                         uto.filter.value_or(""),
+                         uto.fileNameFilter.value_or(""));
+    }
 
     if (uto.tempPath)
         TempDir::setTempPath(*uto.tempPath);

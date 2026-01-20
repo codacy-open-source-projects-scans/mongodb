@@ -1318,6 +1318,15 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind
         }
     }
 
+    // Initialize path arrayness in ExpressionContext from the CollectionQueryInfo.
+    // Do not invoke if it has been already initialized.
+    const auto& collection = collections.getMainCollection();
+    if (feature_flags::gFeatureFlagPathArrayness.isEnabled() &&
+        !canonicalQuery->getExpCtx()->hasMainCollPathArrayness() && collection) {
+        canonicalQuery->getExpCtx()->setPathArrayness(
+            CollectionQueryInfo::get(collection).getPathArrayness());
+    }
+
     const bool useSbeEngine = [&] {
         const bool forceClassic =
             canonicalQuery->getExpCtx()->getQueryKnobConfiguration().isForceClassicEngineEnabled();
@@ -1328,7 +1337,13 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind
         // Add the stages that are candidates for SBE lowering from the 'pipeline' into the
         // 'canonicalQuery'. This must be done _before_ checking shouldUseRegularSbe() or
         // creating the planner.
-        auto plannerParams = makeQueryPlannerParams(plannerOptions);
+        auto plannerParams =
+            std::make_unique<QueryPlannerParams>(QueryPlannerParams::ArgsForPushDownStagesDecision{
+                .opCtx = opCtx,
+                .canonicalQuery = *canonicalQuery,
+                .collections = collections,
+                .plannerOptions = plannerOptions,
+            });
         attachPipelineStages(
             collections, pipeline, needsMerge, canonicalQuery.get(), std::move(plannerParams));
 

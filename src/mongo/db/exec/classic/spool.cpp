@@ -32,7 +32,9 @@
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/db/memory_tracking/operation_memory_usage_tracker.h"
-#include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/query_execution_knobs_gen.h"
+#include "mongo/db/query/query_integration_knobs_gen.h"
+#include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/sorter/sorter.h"
@@ -104,9 +106,9 @@ void SpoolStage::spill() {
     }
 
     auto opts = SortOptions().TempDir(expCtx()->getTempDir());
-    opts.FileStats(_spillStats.get());
 
-    FileBasedSorterStorage<RecordId, NullValue> sorterStorage(_file, expCtx()->getTempDir());
+    sorter::FileBasedSorterStorage<RecordId, NullValue> sorterStorage(_file,
+                                                                      expCtx()->getTempDir());
     std::unique_ptr<SortedStorageWriter<RecordId, NullValue>> writer =
         sorterStorage.makeWriter(opts);
     // Do not spill the records that have been already consumed.

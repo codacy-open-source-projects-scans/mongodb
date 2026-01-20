@@ -83,8 +83,40 @@ export function assertInvalidateOp({cursor, opType}) {
     return null;
 }
 
+/**
+ * Checks whether an object has a nested property at the given dot-separated path.
+ * For example, hasAttributeAtPath(obj, 'foo.bar.baz') returns true if obj.foo.bar.baz exists.
+ */
+function hasAttributeAtPath(obj, path) {
+    const parts = path.split(".");
+    let curr = obj;
+    for (const part of parts) {
+        if (!curr || !curr.hasOwnProperty(part)) {
+            return false;
+        }
+        curr = curr[part];
+    }
+    return true;
+}
+
+/**
+ * Deletes a property from an object at a specified dot-separated path.
+ * For example, deleteAttributeAtPath(obj, 'foo.bar.baz') removes obj.foo.bar.baz if it exists.
+ */
+function deleteAttributeAtPath(obj, path) {
+    const parts = path.split(".");
+    let curr = obj;
+    for (let i = 0; i < parts.length - 1; i++) {
+        if (!curr || !curr.hasOwnProperty(parts[i])) {
+            return;
+        }
+        curr = curr[parts[i]];
+    }
+    delete curr[parts[parts.length - 1]];
+}
+
 export function canonicalizeEventForTesting(event, expected) {
-    for (let fieldName of [
+    for (let fieldPath of [
         "_id",
         "clusterTime",
         "txnNumber",
@@ -95,24 +127,20 @@ export function canonicalizeEventForTesting(event, expected) {
         "updateDescription",
         "commitTimestamp",
         "nsType",
+        // Exclude "recordIdsReplicated" if not explicitly specified in the expected event. This allows
+        // standard change-stream tests to work with 'replicatedRecordIds'.
+        "operationDescription.recordIdsReplicated",
+        "stateBeforeChange.collectionOptions.recordIdsReplicated",
+        // Exclude "updateDescription.disambiguatedPaths" if not explicitly specified in the expected
+        // event. This is necessary because in v8.2.0, we expose this field unconditionally, but in
+        // versions before or after v8.2.0 the field is only exposed if the change stream is opened with
+        // '{showExpandedEvents: true}'.
+        "updateDescription.disambiguatedPaths",
     ]) {
-        if (!expected.hasOwnProperty(fieldName)) {
-            delete event[fieldName];
+        if (!hasAttributeAtPath(expected, fieldPath)) {
+            deleteAttributeAtPath(event, fieldPath);
         }
     }
-
-    // Exclude "updateDescription.disambiguatedPaths" if not explicitly specified in the expected
-    // event. This is necessary because in v8.2.0, we expose this field unconditionally, but in
-    // versions before or after v8.2.0 the field is only exposed if the change stream is opened with
-    // '{showExpandedEvents: true}'.
-    if (
-        expected.hasOwnProperty("updateDescription") &&
-        !expected.updateDescription.hasOwnProperty("disambiguatedPaths") &&
-        event.hasOwnProperty("updateDescription")
-    ) {
-        delete event.updateDescription.disambiguatedPaths;
-    }
-
     return event;
 }
 
@@ -837,4 +865,42 @@ export function assertPreImagesCollectionExists(db) {
     assert(preImagesCollectionDescription.options.hasOwnProperty("clusteredIndex"), preImagesCollectionDescription);
     const clusteredIndexDescription = preImagesCollectionDescription.options.clusteredIndex;
     assert(clusteredIndexDescription, preImagesCollectionDescription);
+}
+
+/**
+ * Returns the current cluster time by issuing a 'hello' command to the server and extracting
+ * the cluster time from it.
+ */
+export function getClusterTime(db) {
+    return db.hello().$clusterTime.clusterTime;
+}
+
+/**
+ * Distributes collection data across multiple shards by splitting and moving chunks.
+ *
+ * @param {Object} db - The database object to execute admin commands on
+ * @param {Object} collection - The collection to distribute data for
+ * @param {Object} distributionConfig - Configuration object for data distribution
+ * @param {*} distributionConfig.middle - The split point for creating initial chunks
+ * @param {Array<Object>} distributionConfig.chunks - Array of chunk configurations to move
+ * @param {*} distributionConfig.chunks[].find - Query to identify the chunk to move
+ * @param {string} distributionConfig.chunks[].to - Target shard name to move the chunk to
+ */
+export function distributeCollectionDataOverShards(db, collection, distributionConfig) {
+    assert.commandWorked(
+        db.adminCommand({
+            split: collection.getFullName(),
+            middle: distributionConfig.middle,
+        }),
+    );
+    for (const chunkConfig of distributionConfig.chunks) {
+        assert.commandWorked(
+            db.adminCommand({
+                moveChunk: collection.getFullName(),
+                find: chunkConfig.find,
+                to: chunkConfig.to,
+                _waitForDelete: true,
+            }),
+        );
+    }
 }

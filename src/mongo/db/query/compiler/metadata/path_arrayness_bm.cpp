@@ -29,7 +29,9 @@
 
 #include "mongo/db/query/compiler/metadata/path_arrayness.h"
 
+#include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/compiler/metadata/path_arrayness_test_helpers.h"
+#include "mongo/db/query/query_fcv_environment_for_test.h"
 
 #include <benchmark/benchmark.h>
 
@@ -95,12 +97,15 @@ void BM_PathArraynessBuild(benchmark::State& state) {
     for (auto _ : state) {
         PathArrayness pathArrayness;
         for (size_t i = 0; i < pathsToInsert.size(); i++) {
-            pathArrayness.addPath(pathsToInsert[i].first, pathsToInsert[i].second);
+            pathArrayness.addPath(pathsToInsert[i].first, pathsToInsert[i].second, true);
         }
     }
 }
 
 void BM_PathArraynessLookup(benchmark::State& state) {
+    QueryFCVEnvironmentForTest::setUp();
+    ExpressionContextForTest expCtx = ExpressionContextForTest();
+
     size_t seed = 1354754;
     size_t seed2 = 3421354754;
 
@@ -112,7 +117,7 @@ void BM_PathArraynessLookup(benchmark::State& state) {
     // Build the path arrayness data structure.
     PathArrayness pathArrayness;
     for (size_t i = 0; i < pathsToInsert.size(); i++) {
-        pathArrayness.addPath(pathsToInsert[i].first, pathsToInsert[i].second);
+        pathArrayness.addPath(pathsToInsert[i].first, pathsToInsert[i].second, true);
     }
 
     // Number of paths to query.
@@ -146,10 +151,14 @@ void BM_PathArraynessLookup(benchmark::State& state) {
             // numberOfPathsQuery could be larger than the number of paths we have, so we take the
             // modulo of the index in order to wrap back around to the start of the array if that's
             // the case.
-            pathArrayness.isPathArray(pathsToQuery[i % pathsToQuery.size()]);
+            pathArrayness.canPathBeArray(pathsToQuery[i % pathsToQuery.size()], &expCtx);
         }
     }
 }
+
+// Set to true for local runs that need to collect more data points.
+// We want to run a smaller matrix of test cases on evergreen.
+#define LOCAL_TEST false
 
 BENCHMARK(BM_PathArraynessBuild)
     ->ArgNames({
@@ -160,6 +169,7 @@ BENCHMARK(BM_PathArraynessBuild)
         "trieDepth",
     })
     ->ArgsProduct({
+#if LOCAL_TEST
         /*numberOfPaths*/
         {64, 512, 1024, 2048},
         /*maxLength*/
@@ -170,6 +180,18 @@ BENCHMARK(BM_PathArraynessBuild)
         {TrieWidth::kNarrow, TrieWidth::kMediumWidth, TrieWidth::kWide},
         /*trieDepth*/
         {TrieDepth::kShallow, TrieDepth::kMediumDepth, TrieDepth::kDeep},
+#else
+        /*numberOfPaths*/
+        {64, 2048},
+        /*maxLength*/
+        {10, 100},
+        /*maxFieldNameLength: */
+        {5, 250},
+        /*trieWidth*/
+        {TrieWidth::kNarrow, TrieWidth::kWide},
+        /*trieDepth*/
+        {TrieDepth::kShallow, TrieDepth::kDeep},
+#endif
     })
     ->Unit(benchmark::kMillisecond)
     ->Iterations(1);  // Restrict number of iterations to avoid time out.
@@ -185,6 +207,7 @@ BENCHMARK(BM_PathArraynessLookup)
         "maxLengthQuery",
     })
     ->ArgsProduct({
+#if LOCAL_TEST
         /*numberOfPaths*/
         {64, 512, 1024, 2048},
         /*maxLength*/
@@ -199,6 +222,22 @@ BENCHMARK(BM_PathArraynessLookup)
         {50, 100, 200},
         /*maxLengthQuery*/
         {10, 50, 100},
+#else
+        /*numberOfPaths*/
+        {64},
+        /*maxLength*/
+        {10},
+        /*maxFieldNameLength: */
+        {5},
+        /*trieWidth*/
+        {TrieWidth::kNarrow},
+        /*trieDepth*/
+        {TrieDepth::kShallow},
+        /*numberOfPathsQuery*/
+        {50},
+        /*maxLengthQuery*/
+        {10}
+#endif
     })
     ->Unit(benchmark::kMillisecond)
     ->Iterations(1);  // Restrict number of iterations to avoid time out.

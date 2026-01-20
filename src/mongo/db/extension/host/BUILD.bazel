@@ -3,9 +3,8 @@ load("//bazel:mongo_src_rules.bzl", "mongo_cc_library", "mongo_cc_unit_test")
 package(default_visibility = ["//visibility:public"])
 
 exports_files([
-    "document_source_extension_test.cpp",
     "document_source_extension_optimizable_test.cpp",
-    "document_source_extension_expandable_test.cpp",
+    "document_source_extension_for_query_shape_test.cpp",
 ])
 
 exports_files(
@@ -25,21 +24,36 @@ mongo_cc_library(
     ],
     deps = [
         "//src/mongo:base",
-        "//src/mongo/db/extension/shared/handle/aggregation_stage",
+        "//src/mongo/db/extension/shared/handle/aggregation_stage:aggregation_stage_handles",
+    ],
+)
+
+# Standalone library for vector search metrics to avoid circular dependencies.
+# Both pipeline and extension_host can depend on this.
+mongo_cc_library(
+    name = "extension_vector_search_server_status",
+    srcs = [
+        "extension_vector_search_server_status.cpp",
+    ],
+    hdrs = [
+        "extension_vector_search_server_status.h",
+    ],
+    deps = [
+        "//src/mongo:base",
+        "//src/mongo/db/commands/server_status:server_status_core",
     ],
 )
 
 mongo_cc_library(
     name = "extension_host",
     srcs = [
-        "document_source_extension.cpp",
-        "document_source_extension_expandable.cpp",
+        "document_source_extension_for_query_shape.cpp",
         "document_source_extension_optimizable.cpp",
         "extension_stage.cpp",
-        "extension_vector_search_server_status.cpp",
     ],
     deps = [
         ":extension_operation_metrics_registry",
+        ":extension_vector_search_server_status",
         "//src/mongo:base",
         "//src/mongo/db:commands",
         "//src/mongo/db/commands/server_status:server_status_core",
@@ -47,9 +61,9 @@ mongo_cc_library(
         "//src/mongo/db/extension/host_connector/adapter:host_adapters",
         "//src/mongo/db/extension/host_connector/adapter:host_services_adapter",
         "//src/mongo/db/extension/host_connector/handle:host_handles",
-        "//src/mongo/db/extension/shared/handle/aggregation_stage",
+        "//src/mongo/db/extension/shared/handle/aggregation_stage:aggregation_stage_handles",
         "//src/mongo/db/pipeline",
-        "//src/mongo/db/pipeline:desugarer",
+        "//src/mongo/db/pipeline:lite_parsed_desugarer",
     ],
 )
 
@@ -94,6 +108,7 @@ mongo_cc_unit_test(
         "//src/mongo/db/extension/test_examples:major_version_too_low_bad_extension",
         "//src/mongo/db/extension/test_examples:match_topN_mongo_extension",
         "//src/mongo/db/extension/test_examples:minor_version_too_high_bad_extension",
+        "//src/mongo/db/extension/test_examples:mongothost_extension",
         "//src/mongo/db/extension/test_examples:native_vector_search_mongo_extension",
         "//src/mongo/db/extension/test_examples:no_compatible_version_bad_extension",
         "//src/mongo/db/extension/test_examples:no_symbol_bad_extension",

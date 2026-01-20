@@ -42,7 +42,9 @@
 #include "mongo/db/pipeline/accumulator_multi.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/window_function/window_function_expression.h"
-#include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/query_execution_knobs_gen.h"
+#include "mongo/db/query/query_integration_knobs_gen.h"
+#include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/db/query/stage_builder/sbe/builder.h"
 #include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
 #include "mongo/db/query/stage_builder/sbe/sbexpr.h"
@@ -2097,6 +2099,9 @@ SbHashAggAccumulator AccumOp::buildSinglePurposeAccumulatorForMerge(StageBuilder
                                                                     std::string fieldName,
                                                                     SbSlot outSlot,
                                                                     SbSlot spillSlot) const {
+    uassert(11618700,
+            str::stream() << "Unsupported Accumulator in SBE accumulator builder: " << _opName,
+            _opInfo != nullptr);
     auto& builderFunction = _opInfo->buildSinglePurposeAccumForMerge
         ? _opInfo->buildSinglePurposeAccumForMerge
         : _opInfo->buildSinglePurposeAccum;

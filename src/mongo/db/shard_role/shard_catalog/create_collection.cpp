@@ -48,7 +48,9 @@
 #include "mongo/db/pipeline/change_stream_pre_and_post_images_options_gen.h"
 #include "mongo/db/profile_settings.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
-#include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/query_execution_knobs_gen.h"
+#include "mongo/db/query/query_integration_knobs_gen.h"
+#include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/db/query/write_ops/insert.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_feature_flags_gen.h"
@@ -412,6 +414,12 @@ Status _performCollectionCreationChecks(OperationContext* opCtx,
             str::stream() << "Cannot create system collection " << ns.toStringForErrorMsg()
                           << " within a transaction.",
             !opCtx->inMultiDocumentTransaction() || !ns.isSystem());
+
+    uassert(ErrorCodes::BadValue,
+            "The 'timeField' or 'metaField' cannot start with '$'",
+            !options.timeseries.has_value() ||
+                (!options.timeseries->getTimeField().starts_with('$') &&
+                 !options.timeseries->getMetaField().value_or("").starts_with('$')));
 
     return Status::OK();
 }

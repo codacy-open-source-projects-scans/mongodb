@@ -52,9 +52,11 @@
 #include "mongo/db/query/compiler/metadata/path_arrayness.h"
 #include "mongo/db/query/datetime/date_time_support.h"
 #include "mongo/db/query/explain_options.h"
+#include "mongo/db/query/query_execution_knobs_gen.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
+#include "mongo/db/query/query_integration_knobs_gen.h"
 #include "mongo/db/query/query_knob_configuration.h"
-#include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/db/query/query_settings/query_settings_gen.h"
 #include "mongo/db/query/tailable_mode_gen.h"
 #include "mongo/db/query/util/deferred.h"
@@ -183,6 +185,12 @@ public:
         bool accumulator = false;
         bool function = false;
         bool where = false;
+    };
+
+    enum class PlanCacheOptions {
+        kDisablePlanCache,  // Query is not being cached
+        kEnablePlanCache,   // Query is being cached if it has alternative plans
+        kForcePlanCache,    // Query is being cached even if it has a single plan
     };
 
     // TODO: variables are heavily used everywhere, move these inside ExpressionContextParams at
@@ -743,11 +751,15 @@ public:
     }
 
     bool getForcePlanCache() const {
-        return _params.forcePlanCache;
+        return _params.planCache == PlanCacheOptions::kForcePlanCache;
     }
 
-    void setForcePlanCache(bool forcePlanCache) {
-        _params.forcePlanCache = forcePlanCache;
+    PlanCacheOptions getPlanCache() const {
+        return _params.planCache;
+    }
+
+    void setPlanCache(PlanCacheOptions planCache) {
+        _params.planCache = planCache;
     }
 
     bool getAllowGenericForeignDbLookup() const {
@@ -1009,6 +1021,14 @@ public:
         return _featureFlagMqlJsEngineGap.get(VersionContext::getDecoration(getOperationContext()));
     }
 
+    void setPathArrayness(const std::shared_ptr<const PathArrayness> pathArrayness) {
+        this->_params.mainCollPathArrayness = pathArrayness;
+    }
+
+    bool hasMainCollPathArrayness() {
+        return (this->_params.mainCollPathArrayness != nullptr);
+    }
+
     const PathArrayness& getMainCollPathArrayness() const {
         // mainCollPathArrayness will be unset in cases where we do not do a collection acquisition,
         // e.g. if running on a 'mongos'. In this case, we return an empty instance of
@@ -1147,9 +1167,9 @@ protected:
         // False if another context is created for the same pipeline. Used to disable duplicate
         // expression counting.
         bool enabledCounters = true;
-        // Forces the plan cache to be used even if there's only one solution available. Queries
-        // that are ineligible will still not be cached.
-        bool forcePlanCache = false;
+        // Indicates if the plan cache will be used. Queries that are ineligible will still not be
+        // cached.
+        PlanCacheOptions planCache = PlanCacheOptions::kEnablePlanCache;
 
         // Indicates if query is IDHACK query.
         bool isIdHackQuery = false;

@@ -218,8 +218,9 @@ ExpressionContextBuilder& ExpressionContextBuilder::enabledCounters(bool enabled
     return *this;
 }
 
-ExpressionContextBuilder& ExpressionContextBuilder::forcePlanCache(bool forcePlanCache) {
-    params.forcePlanCache = forcePlanCache;
+ExpressionContextBuilder& ExpressionContextBuilder::planCache(
+    ExpressionContext::PlanCacheOptions planCache) {
+    params.planCache = planCache;
     return *this;
 }
 
@@ -626,7 +627,8 @@ boost::intrusive_ptr<ExpressionContext> makeCopyFromExpressionContext(
         .initialPostBatchResumeToken(other->getInitialPostBatchResumeToken().getOwned())
         .view(std::move(clonedView))
         .requiresTimeseriesExtendedRangeSupport(other->getRequiresTimeseriesExtendedRangeSupport())
-        .isHybridSearch(other->isHybridSearch());
+        .isHybridSearch(other->isHybridSearch())
+        .enabledCounters(other->getEnabledCounters());
 
     // TODO: SERVER-111384: When removing feature flag, we can collapse the builder into one
     // chained call.

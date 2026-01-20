@@ -269,17 +269,19 @@ Status AsyncResultsMerger::setAwaitDataTimeout(Milliseconds awaitDataTimeout) {
     }
 
     stdx::lock_guard<stdx::mutex> lk(_mutex);
-
-    // For sorted tailable awaitData cursors on multiple shards, cap the getMore timeout at 1000ms.
-    // This is to ensure that we get a continuous stream of updates from each shard with their most
-    // recent optimes, which allows us to return sorted $changeStream results even if some shards
-    // are yet to provide a batch of data. If the timeout specified by the client is greater than
-    // 1000ms, then it will be enforced elsewhere.
-    _awaitDataTimeout =
-        (_params.getSort() && _remotes.size() > 1u ? std::min(awaitDataTimeout, Milliseconds{1000})
-                                                   : awaitDataTimeout);
+    _awaitDataTimeout = awaitDataTimeout;
 
     return Status::OK();
+}
+
+boost::optional<Milliseconds> AsyncResultsMerger::getAwaitDataTimeout_forTest() const {
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    return _awaitDataTimeout;
+}
+
+boost::optional<Milliseconds> AsyncResultsMerger::getEffectiveAwaitDataTimeout_forTest() const {
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    return _calculateEffectiveAwaitDataTimeout(lk);
 }
 
 bool AsyncResultsMerger::ready() {
@@ -353,7 +355,6 @@ void AsyncResultsMerger::addNewShardCursors(std::vector<RemoteCursor>&& newCurso
                     "remoteHost"_attr = remote->getTargetHost(),
                     "shardId"_attr = remote->shardId.toString(),
                     "tag"_attr = remote->tag);
-
         _remotes.push_back(std::move(remote));
     }
 }
@@ -444,33 +445,42 @@ void AsyncResultsMerger::disableUndoNextReadyMode() {
     _stateForNextReadyCallUndo.reset();
 }
 
-void AsyncResultsMerger::undoNextReady() {
+void AsyncResultsMerger::undoNextReady(BSONObj highWaterMark) {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     tassert(11057500,
             "expecting undo mode to be enabled when calling 'undoNextReady()'",
             _undoModeEnabled);
-    tassert(11057501,
-            "expecting undo state to be present when calling 'undoNextReady()'",
-            _stateForNextReadyCallUndo.has_value());
 
-    ClusterQueryResult& result = std::get<ClusterQueryResult>(*_stateForNextReadyCallUndo);
-    RemoteCursorPtr& remote = std::get<RemoteCursorPtr>(*_stateForNextReadyCallUndo);
+    // Check if buffered undo information is available.
+    if (_stateForNextReadyCallUndo.has_value()) {
+        // Buffered undo information is available. This is the case if the previous 'nextReady()'
+        // call returned a document while the undo mode was enabled.
+        ClusterQueryResult& result = std::get<ClusterQueryResult>(*_stateForNextReadyCallUndo);
+        RemoteCursorPtr& remote = std::get<RemoteCursorPtr>(*_stateForNextReadyCallUndo);
 
-    tassert(11057502,
-            "expecting remote cursor for undone result to be still open",
-            std::find(_remotes.begin(), _remotes.end(), remote) != _remotes.end());
+        tassert(11057502,
+                "expecting remote cursor for undone result to be still open",
+                std::find(_remotes.begin(), _remotes.end(), remote) != _remotes.end());
 
-    // Push document back to the beginning of the remote's document queue, so it will be popped off
-    // next.
-    remote->docBuffer.push_front(*result.getResult());
+        // Push document back to the beginning of the remote's document queue, so it will be popped
+        // off next.
+        remote->docBuffer.push_front(*result.getResult());
 
-    if (_params.getSort()) {
-        // Rebuild merge queue from the remaining remotes. A full rebuild is necessary here because
-        // the remote may have a different document in the merge queue already.
-        _rebuildMergeQueueFromRemainingRemotes(lk);
-        if (_tailableMode == TailableModeEnum::kTailableAndAwaitData) {
-            // Restore previous high water mark.
-            _highWaterMark = std::move(std::get<BSONObj>(*_stateForNextReadyCallUndo));
+        if (_params.getSort()) {
+            // Rebuild merge queue from the remaining remotes. A full rebuild is necessary here
+            // because the remote may have a different document in the merge queue already.
+            _rebuildMergeQueueFromRemainingRemotes(lk);
+            if (_tailableMode == TailableModeEnum::kTailableAndAwaitData) {
+                // Restore previous high water mark.
+                _highWaterMark = std::move(std::get<BSONObj>(*_stateForNextReadyCallUndo));
+            }
+        }
+    } else {
+        // No buffered undo information is available. This is the case if the previous 'nextReady()'
+        // call returned no document but EOF, or the BlockingResultsMerger did not even call
+        // 'nextReady()' in the first place.
+        if (_params.getSort() && _tailableMode == TailableModeEnum::kTailableAndAwaitData) {
+            _highWaterMark = std::move(highWaterMark);
         }
     }
 
@@ -529,11 +539,10 @@ std::size_t AsyncResultsMerger::numberOfBufferedRemoteResponses_forTest() const 
 BSONObj AsyncResultsMerger::getHighWaterMark() {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
 
-    // At this point, the high water mark may be the resume token of the last document we
-    // returned. If no further results are eligible for return, we advance to the minimum
-    // promised sort key. If the remote associated with the minimum promised sort key is not
-    // currently eligible to provide a high water mark, then we do not advance even if no
-    // further results are ready.
+    // At this point, the high water mark may be the resume token of the last document we returned.
+    // If no further results are eligible for return, we advance to the minimum promised sort key.
+    // If the remote associated with the minimum promised sort key is not currently eligible to
+    // provide a high water mark, then we do not advance even if no further results are ready.
     if (auto minPromisedSortKey = _getMinPromisedSortKey(lk); minPromisedSortKey && !_ready(lk)) {
         const auto& minRemote = minPromisedSortKey->second;
         if (minRemote->eligibleForHighWaterMark) {
@@ -541,7 +550,7 @@ BSONObj AsyncResultsMerger::getHighWaterMark() {
             // execute it in debug mode.
             dassert(checkHighWaterMarkIsMonotonicallyIncreasing(
                 _highWaterMark, minPromisedSortKey->first, *_params.getSort()));
-            _highWaterMark = minPromisedSortKey->first;
+            _highWaterMark = std::move(minPromisedSortKey->first);
         }
     }
 
@@ -896,23 +905,36 @@ void AsyncResultsMerger::_updateHighWaterMark(const BSONObj& value) {
                 "next"_attr = nextHighWaterMark,
                 "sort"_attr = *_params.getSort());
 
-    // The following check is potentially very costly on large resume tokens, so we only
-    // execute it in debug mode.
+    // The following check is potentially very costly on large resume tokens, so we only execute it
+    // in debug mode.
     dassert(checkHighWaterMarkIsMonotonicallyIncreasing(
         _highWaterMark, nextHighWaterMark, *_params.getSort()));
     _highWaterMark = std::move(nextHighWaterMark);
 }
 
-BSONObj AsyncResultsMerger::_makeRequest(WithLock,
+boost::optional<Milliseconds> AsyncResultsMerger::_calculateEffectiveAwaitDataTimeout(
+    WithLock lk) const {
+    // For sorted tailable awaitData cursors on multiple shards, cap the getMore timeout at
+    // 1000ms. This is to ensure that we get a continuous stream of updates from each shard
+    // with their most recent optimes, which allows us to return sorted $changeStream
+    // results even if some shards are yet to provide a batch of data. If the timeout
+    // specified by the client is greater than 1000ms, then it will be enforced elsewhere.
+    return (_awaitDataTimeout && _params.getSort() && _remotes.size() > 1u
+                ? std::min(*_awaitDataTimeout, Milliseconds{1000})
+                : _awaitDataTimeout);
+}
+
+BSONObj AsyncResultsMerger::_makeRequest(WithLock lk,
                                          const RemoteCursorData& remote,
                                          const ServerGlobalParams::FCVSnapshot& fcvSnapshot) const {
     tassert(11052306, "Expected to not have outstanding requests", !remote.outstandingRequest);
 
     GetMoreCommandRequest getMoreRequest(remote.cursorId, std::string{remote.cursorNss.coll()});
     getMoreRequest.setBatchSize(_params.getBatchSize());
-    if (_awaitDataTimeout) {
+
+    if (auto effectiveAwaitDataTimeout = _calculateEffectiveAwaitDataTimeout(lk)) {
         getMoreRequest.setMaxTimeMS(
-            static_cast<std::int64_t>(durationCount<Milliseconds>(*_awaitDataTimeout)));
+            static_cast<std::int64_t>(durationCount<Milliseconds>(*effectiveAwaitDataTimeout)));
     }
 
     if (_params.getRequestQueryStatsFromRemotes()) {
@@ -1235,8 +1257,7 @@ void AsyncResultsMerger::_updateRemoteMetadata(WithLock lk,
         // in a sort key so that it can compare correctly with sort keys from other streams.
         auto newMinSortKey = BSON("" << *postBatchResumeToken);
 
-        // Determine whether the new batch is eligible to provide a high water mark resume
-        // token.
+        // Determine whether the new batch is eligible to provide a high water mark resume token.
         remote->eligibleForHighWaterMark =
             _checkHighWaterMarkEligibility(lk, newMinSortKey, *remote, response);
 

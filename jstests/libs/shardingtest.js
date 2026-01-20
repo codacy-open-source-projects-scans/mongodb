@@ -1052,7 +1052,8 @@ export class ShardingTest {
         let numMongos = otherParams.hasOwnProperty("mongos") ? otherParams.mongos : 1;
         const usedDefaultNumConfigs =
             !otherParams.hasOwnProperty("config") || otherParams.config === undefined;
-        let numConfigs = otherParams.hasOwnProperty("config") ? otherParams.config : 3;
+        const defaultNumConfigs = TestData.defaultReplSetNumNodes ? TestData.defaultReplSetNumNodes : 3;
+        let numConfigs = otherParams.hasOwnProperty("config") ? otherParams.config : defaultNumConfigs;
 
         let useAutoBootstrapProcedure = otherParams.hasOwnProperty("useAutoBootstrapProcedure")
             ? otherParams.useAutoBootstrapProcedure
@@ -1374,7 +1375,7 @@ export class ShardingTest {
                 if (rsDefaults.nodes) {
                     numReplicas = rsDefaults.nodes;
                 } else if (otherParams.rs || otherParams["rs" + i]) {
-                    numReplicas = 3;
+                    numReplicas = TestData.defaultReplSetNumNodes ? TestData.defaultReplSetNumNodes : 3;
                 }
 
                 // Unless explicitly given a number of config servers, a config shard uses the
@@ -1888,10 +1889,15 @@ export class ShardingTest {
             // TODO (SERVER-112863) Remove this once the maintenance port is supported on lastLTS.
             this._rs.forEach((rs) => {
                 if (skipInitiatingWithMaintenancePort) {
-                    rs.test.reInitiate();
+                    if (this.keyFile) {
+                        authutil.asCluster(rs.test.nodes, this.keyFile, () => {
+                            rs.test.reInitiate();
+                        });
+                    } else {
+                        rs.test.reInitiate();
+                    }
                 }
             });
-
 
             // Ensure that the sessions collection exists so jstests can run things with
             // logical sessions and test them. We do this by forcing an immediate cache refresh

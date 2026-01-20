@@ -2618,6 +2618,8 @@ TEST_F(AsyncResultsMergerTest, GetMoreCommandRequestIncludesMaxTimeMS) {
     readyEvent = unittest::assertGet(arm->nextEvent());
 
     ASSERT_OK(arm->setAwaitDataTimeout(Milliseconds(789)));
+    ASSERT_EQ(Milliseconds(789), arm->getAwaitDataTimeout_forTest());
+    ASSERT_EQ(Milliseconds(789), arm->getEffectiveAwaitDataTimeout_forTest());
 
     // Pending getMore request should already have been scheduled without the maxTimeMS.
     BSONObj expectedCmdObj = BSON("getMore" << CursorId(123) << "collection"
@@ -2650,6 +2652,117 @@ TEST_F(AsyncResultsMergerTest, GetMoreCommandRequestIncludesMaxTimeMS) {
     std::vector<BSONObj> batch3 = {fromjson("{_id: 3}")};
     responses.emplace_back(kTestNss, CursorId(0), batch3);
     scheduleNetworkResponses(std::move(responses));
+}
+
+TEST_F(AsyncResultsMergerTest, NoMaxTimeMSSetByDefault) {
+    std::vector<RemoteCursor> cursors;
+    cursors.push_back(
+        makeRemoteCursor(kTestShardIds[0], kTestShardHosts[0], CursorResponse(kTestNss, 123, {})));
+    cursors.push_back(
+        makeRemoteCursor(kTestShardIds[1], kTestShardHosts[1], CursorResponse(kTestNss, 456, {})));
+
+    AsyncResultsMergerParams params;
+    params.setNss(kTestNss);
+    params.setRemotes(std::move(cursors));
+    params.setTailableMode(TailableModeEnum::kTailableAndAwaitData);
+    params.setSort(change_stream_constants::kSortSpec);
+    auto arm = buildARM(std::move(params), false /* recognizeControlEvents */);
+
+    ASSERT_EQ(boost::none, arm->getAwaitDataTimeout_forTest());
+    ASSERT_EQ(boost::none, arm->getEffectiveAwaitDataTimeout_forTest());
+}
+
+TEST_F(AsyncResultsMergerTest, MaxTimeMSIsNotCappedAt1000ForSingleRemote) {
+    std::vector<RemoteCursor> cursors;
+    cursors.push_back(
+        makeRemoteCursor(kTestShardIds[0], kTestShardHosts[0], CursorResponse(kTestNss, 123, {})));
+
+    AsyncResultsMergerParams params;
+    params.setNss(kTestNss);
+    params.setRemotes(std::move(cursors));
+    params.setTailableMode(TailableModeEnum::kTailableAndAwaitData);
+    params.setSort(change_stream_constants::kSortSpec);
+
+    auto arm = buildARM(std::move(params), false /* recognizeControlEvents */);
+
+    ASSERT_OK(arm->setAwaitDataTimeout(Milliseconds(5000)));
+    ASSERT_EQ(Milliseconds(5000), arm->getAwaitDataTimeout_forTest());
+    ASSERT_EQ(Milliseconds(5000), arm->getEffectiveAwaitDataTimeout_forTest());
+}
+
+TEST_F(AsyncResultsMergerTest, MaxTimeMSIsCappedAt1000ForMultipleRemotes) {
+    std::vector<RemoteCursor> cursors;
+    cursors.push_back(
+        makeRemoteCursor(kTestShardIds[0], kTestShardHosts[0], CursorResponse(kTestNss, 123, {})));
+    cursors.push_back(
+        makeRemoteCursor(kTestShardIds[1], kTestShardHosts[1], CursorResponse(kTestNss, 456, {})));
+
+    AsyncResultsMergerParams params;
+    params.setNss(kTestNss);
+    params.setRemotes(std::move(cursors));
+    params.setTailableMode(TailableModeEnum::kTailableAndAwaitData);
+    params.setSort(change_stream_constants::kSortSpec);
+
+    auto arm = buildARM(std::move(params), false /* recognizeControlEvents */);
+
+    ASSERT_OK(arm->setAwaitDataTimeout(Milliseconds(5000)));
+    ASSERT_EQ(Milliseconds(5000), arm->getAwaitDataTimeout_forTest());
+    ASSERT_EQ(Milliseconds(1000), arm->getEffectiveAwaitDataTimeout_forTest());
+}
+
+TEST_F(AsyncResultsMergerTest, MaxTimeMSGetsCappedIfRemoteGetsAdded) {
+    std::vector<RemoteCursor> cursors;
+    cursors.push_back(
+        makeRemoteCursor(kTestShardIds[0], kTestShardHosts[0], CursorResponse(kTestNss, 123, {})));
+
+    AsyncResultsMergerParams params;
+    params.setNss(kTestNss);
+    params.setRemotes(std::move(cursors));
+    params.setTailableMode(TailableModeEnum::kTailableAndAwaitData);
+    params.setSort(change_stream_constants::kSortSpec);
+
+    auto arm = buildARM(std::move(params), false /* recognizeControlEvents */);
+
+    ASSERT_EQ(boost::none, arm->getAwaitDataTimeout_forTest());
+
+    ASSERT_OK(arm->setAwaitDataTimeout(Milliseconds(5000)));
+    ASSERT_EQ(Milliseconds(5000), arm->getAwaitDataTimeout_forTest());
+    ASSERT_EQ(Milliseconds(5000), arm->getEffectiveAwaitDataTimeout_forTest());
+
+    std::vector<RemoteCursor> newCursors;
+    newCursors.push_back(
+        makeRemoteCursor(kTestShardIds[1], kTestShardHosts[1], CursorResponse(kTestNss, 456, {})));
+    arm->addNewShardCursors(std::move(newCursors), ShardTag::kDefault);
+
+    ASSERT_EQ(Milliseconds(5000), arm->getAwaitDataTimeout_forTest());
+    ASSERT_EQ(Milliseconds(1000), arm->getEffectiveAwaitDataTimeout_forTest());
+}
+
+TEST_F(AsyncResultsMergerTest, MaxTimeMSGetsUncappedIfRemoteGetsClosed) {
+    std::vector<RemoteCursor> cursors;
+    cursors.push_back(
+        makeRemoteCursor(kTestShardIds[0], kTestShardHosts[0], CursorResponse(kTestNss, 123, {})));
+    cursors.push_back(
+        makeRemoteCursor(kTestShardIds[0], kTestShardHosts[0], CursorResponse(kTestNss, 456, {})));
+
+    AsyncResultsMergerParams params;
+    params.setNss(kTestNss);
+    params.setRemotes(std::move(cursors));
+    params.setTailableMode(TailableModeEnum::kTailableAndAwaitData);
+    params.setSort(change_stream_constants::kSortSpec);
+
+    auto arm = buildARM(std::move(params), false /* recognizeControlEvents */);
+
+    ASSERT_EQ(boost::none, arm->getAwaitDataTimeout_forTest());
+
+    ASSERT_OK(arm->setAwaitDataTimeout(Milliseconds(5000)));
+    ASSERT_EQ(Milliseconds(5000), arm->getAwaitDataTimeout_forTest());
+    ASSERT_EQ(Milliseconds(1000), arm->getEffectiveAwaitDataTimeout_forTest());
+
+    arm->closeShardCursors({kTestShardIds[0]}, ShardTag::kDefault);
+
+    ASSERT_EQ(Milliseconds(5000), arm->getAwaitDataTimeout_forTest());
+    ASSERT_EQ(Milliseconds(5000), arm->getEffectiveAwaitDataTimeout_forTest());
 }
 
 DEATH_TEST_REGEX_F(AsyncResultsMergerTestDeathTest,
@@ -3130,6 +3243,7 @@ TEST_F(AsyncResultsMergerTest, GetMoreCommandRequestWithoutTailableCantHaveMaxTi
     auto arm = makeARMFromExistingCursors(std::move(cursors), findCmd);
 
     ASSERT_NOT_OK(arm->setAwaitDataTimeout(Milliseconds(789)));
+    ASSERT_EQ(boost::none, arm->getAwaitDataTimeout_forTest());
     arm->kill(operationContext()).wait();
 }
 
@@ -3141,6 +3255,7 @@ TEST_F(AsyncResultsMergerTest, GetMoreCommandRequestWithoutAwaitDataCantHaveMaxT
     auto arm = makeARMFromExistingCursors(std::move(cursors), findCmd);
 
     ASSERT_NOT_OK(arm->setAwaitDataTimeout(Milliseconds(789)));
+    ASSERT_EQ(boost::none, arm->getAwaitDataTimeout_forTest());
     arm->kill(operationContext()).wait();
 }
 
@@ -3578,6 +3693,7 @@ TEST_F(AsyncResultsMergerTest, RemoteMetricsAggregatedLocally) {
                               true /* usedDisk */,
                               true /* fromMultiPlanner */,
                               true /* fromPlanCache */,
+                              100 /* planningTimeMicros */,
                               37 /*cpuNanos */,
                               3 /* numInterruptChecks */,
                               1 /* nMatched */,
@@ -3629,6 +3745,7 @@ TEST_F(AsyncResultsMergerTest, RemoteMetricsAggregatedLocally) {
         ASSERT_EQ(remoteMetrics.nModified, 1);
         ASSERT_EQ(remoteMetrics.nDeleted, 0);
         ASSERT_EQ(remoteMetrics.nInserted, 0);
+        ASSERT_EQ(remoteMetrics.planningTime, Microseconds(100));
     }
 
     // Schedule a second response.
@@ -3642,6 +3759,7 @@ TEST_F(AsyncResultsMergerTest, RemoteMetricsAggregatedLocally) {
                               true /* usedDisk */,
                               true /* fromMultiPlanner */,
                               false /* fromPlanCache */,
+                              150 /* planningTimeMicros */,
                               121 /*cpuNanos */,
                               2 /* numInterruptChecks */,
                               2 /* nMatched */,
@@ -3691,6 +3809,7 @@ TEST_F(AsyncResultsMergerTest, RemoteMetricsAggregatedLocally) {
         ASSERT_EQ(remoteMetrics.nModified, 3);
         ASSERT_EQ(remoteMetrics.nDeleted, 1);
         ASSERT_EQ(remoteMetrics.nInserted, 1);
+        ASSERT_EQ(remoteMetrics.planningTime, Microseconds(250));
     }
 
     {
@@ -3718,6 +3837,7 @@ TEST_F(AsyncResultsMergerTest, RemoteMetricsAggregatedLocally) {
         ASSERT_EQ(remoteMetrics.nModified, 0);
         ASSERT_EQ(remoteMetrics.nDeleted, 0);
         ASSERT_EQ(remoteMetrics.nInserted, 0);
+        ASSERT_EQ(remoteMetrics.planningTime, Microseconds(0));
     }
 
     // Read the EOF
@@ -3756,21 +3876,10 @@ DEATH_TEST_REGEX_F(AsyncResultsMergerTestDeathTest,
     auto arm = makeARMFromExistingCursors(std::move(cursors));
     arm->disableUndoNextReadyMode();
 
-    ASSERT_THROWS_CODE(arm->undoNextReady(), AssertionException, 11057500);
+    ASSERT_THROWS_CODE(arm->undoNextReady(BSONObj()), AssertionException, 11057500);
 }
 
-// Test that calling 'undoNextReady()' fails if no undo result is buffered.
-DEATH_TEST_REGEX_F(AsyncResultsMergerTestDeathTest,
-                   UndoNextReadyFailsIfNoResultBuffered,
-                   "Tripwire assertion.*11057501") {
-    std::vector<RemoteCursor> cursors;
-    auto arm = makeARMFromExistingCursors(std::move(cursors));
-    arm->enableUndoNextReadyMode();
-
-    ASSERT_THROWS_CODE(arm->undoNextReady(), AssertionException, 11057501);
-}
-
-// Test that calling 'undoNextReady()' fails if the ARM has a non-OK status code.
+// Test that calling 'undoNextReady()' does not return results if the ARM has a non-OK status code.
 TEST_F(AsyncResultsMergerTest, UndoNextReadyFetchingUndoneFailsIfStatusContainsAnError) {
     std::vector<RemoteCursor> cursors;
     cursors.push_back(
@@ -3803,7 +3912,7 @@ TEST_F(AsyncResultsMergerTest, UndoNextReadyFetchingUndoneFailsIfStatusContainsA
         Status(ErrorCodes::BadValue, "bad thing happened")));
     ASSERT_TRUE(executor()->waitForEvent(operationContext(), readyEvent).isOK());
 
-    arm->undoNextReady();
+    arm->undoNextReady(BSONObj());
 
     ASSERT_EQ(ErrorCodes::BadValue, arm->nextReady().getStatus().code());
 }
@@ -3840,9 +3949,10 @@ TEST_F(AsyncResultsMergerTest, UndoNextReadyUnsorted) {
         ASSERT_BSONOBJ_EQ(BSON("_id" << expectedValue),
                           *unittest::assertGet(arm->nextReady()).getResult());
 
-        // Undo last 'nextReady()' call. This won't reset the high water mark.
+        // Undo last 'nextReady()' call. This won't reset the high water mark as the
+        // AsyncResultsMerger does not run in sorted-tailable mode.
         BSONObj hwm = arm->getHighWaterMark();
-        arm->undoNextReady();
+        arm->undoNextReady(BSONObj());
         ASSERT_BSONOBJ_EQ(hwm, arm->getHighWaterMark());
 
         // Refetch result that was previously "undone".
@@ -3887,7 +3997,7 @@ DEATH_TEST_REGEX_F(AsyncResultsMergerTestDeathTest,
     arm->closeShardCursors({kTestShardIds[0]}, ShardTag::kDefault);
 
     // ARM throws because undo was done for a closed cursor.
-    ASSERT_THROWS_CODE(arm->undoNextReady(), AssertionException, 11057502);
+    ASSERT_THROWS_CODE(arm->undoNextReady(BSONObj()), AssertionException, 11057502);
 }
 
 // Test 'undoNextReady()' for sorted results merging.
@@ -3925,9 +4035,10 @@ TEST_F(AsyncResultsMergerTest, UndoNextReadySorted) {
         ASSERT_BSONOBJ_EQ(BSON("$sortKey" << BSON_ARRAY(i)),
                           *unittest::assertGet(arm->nextReady()).getResult());
 
-        // Undo last 'nextReady()' call. This won't reset the high water mark.
+        // Undo last 'nextReady()' call. This won't reset the high water mark as the
+        // AsyncResultsMerger does not run in sorted-tailable mode.
         BSONObj hwm = arm->getHighWaterMark();
-        arm->undoNextReady();
+        arm->undoNextReady(BSONObj());
         ASSERT_BSONOBJ_EQ(hwm, arm->getHighWaterMark());
 
         // Refetch result that was previously "undone".
@@ -3938,6 +4049,84 @@ TEST_F(AsyncResultsMergerTest, UndoNextReadySorted) {
 
     // No more data to fetch, and the remotes are exhausted because the cursors are closed.
     ASSERT_TRUE(arm->ready());
+    ASSERT_TRUE(arm->remotesExhausted());
+}
+
+// Test 'undoNextReady()' for sorted, tailable results merging.
+TEST_F(AsyncResultsMergerTest, UndoNextReadySortedTailable) {
+    AsyncResultsMergerParams params;
+    params.setNss(kTestNss);
+
+    auto pbrt0 = makePostBatchResumeToken(Timestamp(1, 1));
+
+    std::vector<RemoteCursor> cursors;
+    std::vector<BSONObj> batch = {};
+    cursors.push_back(makeRemoteCursor(kTestShardIds[0],
+                                       kTestShardHosts[0],
+                                       CursorResponse(kTestNss, 1, batch, boost::none, pbrt0)));
+    cursors.push_back(makeRemoteCursor(kTestShardIds[1],
+                                       kTestShardHosts[1],
+                                       CursorResponse(kTestNss, 2, batch, boost::none, pbrt0)));
+    params.setRemotes(std::move(cursors));
+    params.setTailableMode(TailableModeEnum::kTailableAndAwaitData);
+    params.setSort(change_stream_constants::kSortSpec);
+
+    auto arm = buildARM(std::move(params), false /* recognizeControlEvents */);
+    arm->setInitialHighWaterMark(pbrt0);
+    arm->enableUndoNextReadyMode();
+
+    // Schedule requests.
+    auto readyEvent = unittest::assertGet(arm->nextEvent());
+
+    std::vector<CursorResponse> responses;
+    std::vector<BSONObj> batch1, batch2;
+
+    auto buildPBRT = [](int i) {
+        return makePostBatchResumeToken(Timestamp(42, i));
+    };
+    auto buildDocument = [&](int i) {
+        auto pbrt = buildPBRT(i);
+        return BSON("_id" << pbrt << "$sortKey" << BSON_ARRAY(pbrt) << "value" << i);
+    };
+
+    constexpr int n = 9;
+    for (int i = 0; i <= n; ++i) {
+        // The order in which documents are pulled from the shards here is shard0, shard1, shard0,
+        // shard1 etc.
+        batch1.push_back(buildDocument(i * 2));
+        batch2.push_back(buildDocument(i * 2 + 1));
+    }
+
+    auto pbrtEnd = makePostBatchResumeToken(Timestamp(99, 0));
+    responses.emplace_back(kTestNss, CursorId(0), batch1, boost::none, pbrtEnd);
+    responses.emplace_back(kTestNss, CursorId(0), batch2, boost::none, pbrtEnd);
+    scheduleNetworkResponses(std::move(responses));
+
+    // ARM returns all results in sorted order.
+    ASSERT_TRUE(executor()->waitForEvent(operationContext(), readyEvent).isOK());
+
+    for (int i = 0; i <= n * 2 + 1; ++i) {
+        ASSERT_TRUE(arm->ready());
+
+        const auto originalHWM = arm->getHighWaterMark();
+
+        const BSONObj doc = buildDocument(i);
+
+        ASSERT_BSONOBJ_EQ(doc, *unittest::assertGet(arm->nextReady()).getResult());
+        const auto hwm = arm->getHighWaterMark();
+
+        // Undo last 'nextReady()' call. This resets the high water mark.
+        arm->undoNextReady(originalHWM);
+        ASSERT_BSONOBJ_EQ(originalHWM, arm->getHighWaterMark());
+
+        // Refetch result that was previously "undone". This also moves the high water mark forward.
+        ASSERT_TRUE(arm->ready());
+        ASSERT_BSONOBJ_EQ(doc, *unittest::assertGet(arm->nextReady()).getResult());
+        ASSERT_BSONOBJ_EQ(hwm, arm->getHighWaterMark());
+    }
+
+    // No more data to fetch, and the remotes are exhausted because the cursors are closed.
+    ASSERT_FALSE(arm->ready());
     ASSERT_TRUE(arm->remotesExhausted());
 }
 
@@ -4001,8 +4190,9 @@ TEST_F(AsyncResultsMergerTest, UndoNextReadySortedWithMoreResultsArriving) {
 
     // Push back first result and fetch it again.
     ASSERT_BSONOBJ_EQ(pbrt1, arm->getHighWaterMark());
-    arm->undoNextReady();
-    arm->setHighWaterMark(pbrt0);
+    arm->undoNextReady(pbrt0);
+    ASSERT_BSONOBJ_EQ(pbrt0, arm->getHighWaterMark());
+
     ASSERT_TRUE(arm->ready());
     ASSERT_BSONOBJ_EQ(doc1, *unittest::assertGet(arm->nextReady()).getResult());
 
@@ -4013,8 +4203,8 @@ TEST_F(AsyncResultsMergerTest, UndoNextReadySortedWithMoreResultsArriving) {
 
     // Push back second result and fetch it again.
     ASSERT_BSONOBJ_EQ(pbrt2, arm->getHighWaterMark());
-    arm->undoNextReady();
-    arm->setHighWaterMark(pbrt1);
+    arm->undoNextReady(pbrt1);
+    ASSERT_BSONOBJ_EQ(pbrt1, arm->getHighWaterMark());
     ASSERT_TRUE(arm->ready());
     ASSERT_BSONOBJ_EQ(doc2, *unittest::assertGet(arm->nextReady()).getResult());
 
@@ -4025,8 +4215,8 @@ TEST_F(AsyncResultsMergerTest, UndoNextReadySortedWithMoreResultsArriving) {
 
     // Push back third result and fetch it again.
     ASSERT_BSONOBJ_EQ(pbrt3, arm->getHighWaterMark());
-    arm->undoNextReady();
-    arm->setHighWaterMark(pbrt2);
+    arm->undoNextReady(pbrt2);
+    ASSERT_BSONOBJ_EQ(pbrt2, arm->getHighWaterMark());
     ASSERT_TRUE(arm->ready());
     ASSERT_BSONOBJ_EQ(doc3, *unittest::assertGet(arm->nextReady()).getResult());
 
@@ -4037,8 +4227,8 @@ TEST_F(AsyncResultsMergerTest, UndoNextReadySortedWithMoreResultsArriving) {
 
     // Push back fourth result and fetch it again.
     ASSERT_BSONOBJ_EQ(pbrt4, arm->getHighWaterMark());
-    arm->undoNextReady();
-    arm->setHighWaterMark(pbrt3);
+    arm->undoNextReady(pbrt3);
+    ASSERT_BSONOBJ_EQ(pbrt3, arm->getHighWaterMark());
     ASSERT_TRUE(arm->ready());
     ASSERT_BSONOBJ_EQ(doc4, *unittest::assertGet(arm->nextReady()).getResult());
 
@@ -4056,8 +4246,8 @@ TEST_F(AsyncResultsMergerTest, UndoNextReadySortedWithMoreResultsArriving) {
 
     // Push back fourth result again and fetch it one more time.
     ASSERT_BSONOBJ_EQ(pbrt4, arm->getHighWaterMark());
-    arm->undoNextReady();
-    arm->setHighWaterMark(pbrt3);
+    arm->undoNextReady(pbrt3);
+    ASSERT_BSONOBJ_EQ(pbrt3, arm->getHighWaterMark());
     ASSERT_TRUE(arm->ready());
     ASSERT_BSONOBJ_EQ(doc4, *unittest::assertGet(arm->nextReady()).getResult());
 
@@ -4080,8 +4270,8 @@ TEST_F(AsyncResultsMergerTest, UndoNextReadySortedWithMoreResultsArriving) {
 
     // Push back fifth result again and fetch it one more time.
     ASSERT_BSONOBJ_EQ(pbrt5, arm->getHighWaterMark());
-    arm->undoNextReady();
-    arm->setHighWaterMark(pbrt4);
+    arm->undoNextReady(pbrt4);
+    ASSERT_BSONOBJ_EQ(pbrt4, arm->getHighWaterMark());
     ASSERT_TRUE(arm->ready());
     ASSERT_BSONOBJ_EQ(doc5, *unittest::assertGet(arm->nextReady()).getResult());
 
@@ -4116,12 +4306,12 @@ TEST_F(AsyncResultsMergerTest, UndoNextReadyMultipleUndos) {
     ASSERT_BSONOBJ_EQ(BSON("_id" << 1), *unittest::assertGet(arm->nextReady()).getResult());
 
     // Refetch first value.
-    arm->undoNextReady();
+    arm->undoNextReady(BSONObj());
     ASSERT_TRUE(arm->ready());
     ASSERT_BSONOBJ_EQ(BSON("_id" << 1), *unittest::assertGet(arm->nextReady()).getResult());
 
     // Refetch first value again.
-    arm->undoNextReady();
+    arm->undoNextReady(BSONObj());
     ASSERT_TRUE(arm->ready());
     ASSERT_BSONOBJ_EQ(BSON("_id" << 1), *unittest::assertGet(arm->nextReady()).getResult());
 
@@ -4130,12 +4320,12 @@ TEST_F(AsyncResultsMergerTest, UndoNextReadyMultipleUndos) {
     ASSERT_BSONOBJ_EQ(BSON("_id" << 2), *unittest::assertGet(arm->nextReady()).getResult());
 
     // Refetch second value.
-    arm->undoNextReady();
+    arm->undoNextReady(BSONObj());
     ASSERT_TRUE(arm->ready());
     ASSERT_BSONOBJ_EQ(BSON("_id" << 2), *unittest::assertGet(arm->nextReady()).getResult());
 
     // Refetch second value again.
-    arm->undoNextReady();
+    arm->undoNextReady(BSONObj());
     ASSERT_TRUE(arm->ready());
     ASSERT_BSONOBJ_EQ(BSON("_id" << 2), *unittest::assertGet(arm->nextReady()).getResult());
 
@@ -4143,9 +4333,7 @@ TEST_F(AsyncResultsMergerTest, UndoNextReadyMultipleUndos) {
 }
 
 // Test multiple undoNextReady calls for the same result.
-DEATH_TEST_REGEX_F(AsyncResultsMergerTestDeathTest,
-                   UndoNextReadyMultipleUndosForSameResult,
-                   "Tripwire assertion.*11057501") {
+TEST_F(AsyncResultsMergerTest, UndoNextReadyMultipleUndosForSameResult) {
     std::vector<RemoteCursor> cursors;
     cursors.push_back(
         makeRemoteCursor(kTestShardIds[0], kTestShardHosts[0], CursorResponse(kTestNss, 1, {})));
@@ -4167,14 +4355,20 @@ DEATH_TEST_REGEX_F(AsyncResultsMergerTestDeathTest,
     ASSERT_BSONOBJ_EQ(BSON("_id" << 1), *unittest::assertGet(arm->nextReady()).getResult());
 
     // Undo the same value twice.
-    arm->undoNextReady();
-    ASSERT_THROWS_CODE(arm->undoNextReady(), AssertionException, 11057501);
+    arm->undoNextReady(BSONObj());
+    arm->undoNextReady(BSONObj());
+
+    ASSERT_TRUE(arm->ready());
+    ASSERT_BSONOBJ_EQ(BSON("_id" << 1), *unittest::assertGet(arm->nextReady()).getResult());
+
+    ASSERT_TRUE(arm->ready());
+    ASSERT_BSONOBJ_EQ(BSON("_id" << 2), *unittest::assertGet(arm->nextReady()).getResult());
+
+    ASSERT_FALSE(arm->ready());
 }
 
 // Test calling 'undoNextReady()' after an EOF was returned.
-DEATH_TEST_REGEX_F(AsyncResultsMergerTestDeathTest,
-                   UndoNextReadyWithEOF,
-                   "Tripwire assertion.*11057501") {
+TEST_F(AsyncResultsMergerTest, UndoNextReadyWithEOF) {
     BSONObj findCmd = fromjson("{find: 'testcoll', tailable: true}");
     std::vector<BSONObj> batch = {BSON("_id" << 1), BSON("_id" << 2)};
     std::vector<RemoteCursor> cursors;
@@ -4195,12 +4389,13 @@ DEATH_TEST_REGEX_F(AsyncResultsMergerTestDeathTest,
     ASSERT_TRUE(arm->ready());
     ASSERT_FALSE(unittest::assertGet(arm->nextReady()).getResult().has_value());
 
-    // Cannot undo an EOF.
-    ASSERT_THROWS_CODE(arm->undoNextReady(), AssertionException, 11057501);
+    ASSERT_FALSE(arm->ready());
 
-    // ARM is still ready and we can still call 'nextReady()'.
-    ASSERT_TRUE(arm->ready());
-    ASSERT_FALSE(unittest::assertGet(arm->nextReady()).getResult().has_value());
+    // Undo the EOF.
+    arm->undoNextReady(BSONObj());
+
+    // ARM is still not ready.
+    ASSERT_FALSE(arm->ready());
 }
 
 TEST(SimpleAsyncResultsMergerTest, CheckHighWaterMarkTokensAreMonotonicallyIncreasing) {

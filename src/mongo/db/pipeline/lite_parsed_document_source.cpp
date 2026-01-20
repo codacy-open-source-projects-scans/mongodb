@@ -99,11 +99,10 @@ void LiteParsedDocumentSource::LiteParserRegistration::setPrimaryParser(LitePars
 }
 
 void LiteParsedDocumentSource::LiteParserRegistration::setFallbackParser(
-    LiteParserInfo&& lpi, IncrementalRolloutFeatureFlag* ff, bool isStub) {
+    LiteParserInfo&& lpi, IncrementalRolloutFeatureFlag* ff) {
     _fallbackParser = std::move(lpi);
     _primaryParserFeatureFlag = ff;
     _fallbackIsSet = true;
-    _isStub = isStub;
 }
 
 bool LiteParsedDocumentSource::LiteParserRegistration::isPrimarySet() const {
@@ -114,10 +113,7 @@ bool LiteParsedDocumentSource::LiteParserRegistration::isFallbackSet() const {
     return _fallbackIsSet;
 }
 
-void LiteParsedDocumentSource::registerParser(const std::string& name,
-                                              Parser parser,
-                                              AllowedWithApiStrict allowedWithApiStrict,
-                                              AllowedWithClientType allowedWithClientType) {
+void LiteParsedDocumentSource::registerParser(const std::string& name, LiteParserInfo parserInfo) {
     // It's possible an extension stage is being registered to override an existing server stage
     // (like $vectorSearch), so we should skip re-initializing a counter. We do not assert that
     // this is legal since we do that validation in DocumentSource::registerParser().
@@ -135,15 +131,12 @@ void LiteParsedDocumentSource::registerParser(const std::string& name,
                     "Cannot override primary parser on aggregation stage.",
                     "stageName"_attr = name);
     }
-    registration.setPrimaryParser({parser, allowedWithApiStrict, allowedWithClientType});
+    registration.setPrimaryParser(std::move(parserInfo));
 }
 
 void LiteParsedDocumentSource::registerFallbackParser(const std::string& name,
-                                                      Parser parser,
                                                       FeatureFlag* parserFeatureFlag,
-                                                      AllowedWithApiStrict allowedWithApiStrict,
-                                                      AllowedWithClientType allowedWithClientType,
-                                                      bool isStub) {
+                                                      LiteParserInfo parserInfo) {
     if (parserMap.contains(name)) {
         const auto& registration = parserMap.at(name);
 
@@ -178,8 +171,7 @@ void LiteParsedDocumentSource::registerFallbackParser(const std::string& name,
                 ifrFeatureFlag != nullptr);
     }
 
-    registration.setFallbackParser(
-        {parser, allowedWithApiStrict, allowedWithClientType}, ifrFeatureFlag, isStub);
+    registration.setFallbackParser(std::move(parserInfo), ifrFeatureFlag);
 }
 
 void LiteParsedDocumentSource::unregisterParser_forTest(const std::string& name) {
@@ -220,6 +212,10 @@ const ParserMap& LiteParsedDocumentSource::getParserMap() {
     return parserMap;
 }
 
+ViewInfo::~ViewInfo() = default;
+ViewInfo::ViewInfo(ViewInfo&&) noexcept = default;
+ViewInfo& ViewInfo::operator=(ViewInfo&&) noexcept = default;
+
 ViewInfo::ViewInfo(NamespaceString pViewName,
                    NamespaceString pResolvedNss,
                    std::vector<BSONObj> pViewPipeBson,
@@ -227,18 +223,41 @@ ViewInfo::ViewInfo(NamespaceString pViewName,
     : viewName(std::move(pViewName)),
       resolvedNss(std::move(pResolvedNss)),
       _ownedOriginalBsonPipeline(std::move(pViewPipeBson)) {
-    viewPipeline.reserve(_ownedOriginalBsonPipeline.size());
-    for (const auto& stage : _ownedOriginalBsonPipeline) {
-        viewPipeline.push_back(LiteParsedDocumentSource::parse(viewName, stage, pOptions));
+    // Ensure all BSONObj objects in _ownedOriginalBsonPipeline are owned.
+    // This is a no-op if they're already owned, but ensures ownership if they're not.
+    for (auto& bson : _ownedOriginalBsonPipeline) {
+        bson = bson.getOwned();
     }
+
+    viewPipeline = std::make_unique<LiteParsedPipeline>(
+        resolvedNss, _ownedOriginalBsonPipeline, false, pOptions);
+
+    // Ensure all stages in the view pipeline own their backing BSON.
+    viewPipeline->makeOwned();
 }
 
 std::vector<BSONObj> ViewInfo::getOriginalBson() const {
     return _ownedOriginalBsonPipeline;
 }
 
+LiteParsedPipeline ViewInfo::getViewPipeline() const {
+    tassert(11506600, "A ViewInfo being cloned must have a view pipeline.", viewPipeline);
+
+    // Ownership should be preserved because the original stages own their BSON, and the default
+    // copy constructor copies _ownedBson, which uses BSONObj's shared ownership. Still, we call
+    // makeOwned() defensively here. This is a no-op if the stages already own their BSON.
+    auto out = viewPipeline->clone();
+    out.makeOwned();
+    return out;
+}
+
 ViewInfo ViewInfo::clone() const {
-    return ViewInfo{viewName, resolvedNss, getOriginalBson()};
+    ViewInfo out;
+    out.viewName = viewName;
+    out.resolvedNss = resolvedNss;
+    out._ownedOriginalBsonPipeline = _ownedOriginalBsonPipeline;
+    out.viewPipeline = std::make_unique<LiteParsedPipeline>(getViewPipeline());
+    return out;
 }
 
 DisallowViewsPolicy::DisallowViewsPolicy()

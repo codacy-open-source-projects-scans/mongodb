@@ -165,11 +165,26 @@ public:
     /**
      * Sets the maxTimeMS value that the ARM should forward with any internally issued getMore
      * requests.
+     * The effectively used value of maxTimeMS is capped to 1000ms for tailable, awaitData queries
+     * in case there is more than one remote cursor.
      *
      * Returns a non-OK status if this cursor type does not support maxTimeMS on getMore (i.e. if
      * the cursor is not tailable + awaitData).
      */
     Status setAwaitDataTimeout(Milliseconds awaitDataTimeout);
+
+    /**
+     * Returns the user-specified maxTimeMS value that is sent along with requests to remote shards,
+     * if set.
+     */
+    boost::optional<Milliseconds> getAwaitDataTimeout_forTest() const;
+
+    /**
+     * Returns the effective maxTimeMS value that is sent along with requests to remote shards, if
+     * set. This value can differ from the value the user specified, based on the number of remotes
+     * that are managed by the ARM.
+     */
+    boost::optional<Milliseconds> getEffectiveAwaitDataTimeout_forTest() const;
 
     /**
      * Signals to the AsyncResultsMerger that the caller is finished using it in the current
@@ -361,27 +376,41 @@ public:
     void disableUndoNextReadyMode();
 
     /**
-     * Partially "undoes" the effects of the last 'nextReady()' call, by putting the last returned
-     * result back into the 'AsyncResultMerger's document buffer for the shard it was originally
-     * pulled from. For sorted mergers, it will also put back the result back into the merge queue
-     * and restore the high water mark.
+     * Partially "undoes" the effects of the last 'nextReady()' call, by putting the last result
+     * returned by 'nextReady()' into the 'AsyncResultMerger's document buffer for the shard it was
+     * originally pulled from. For sorted mergers, it will also put back the result back into the
+     * merge queue and restore the high water mark.
      *
-     * This method can only be called if a result was previously returned via 'nextReady()' while
-     * the undo mode was enabled. Calling it otherwise will tassert. As the 'AsyncResultsMerger'
-     * only buffers the single last returned result in 'nextReady()', it is forbidden to call
-     * 'undoNextReady()' repeatedly unless another call to 'nextReady()' has been made. If this
-     * assumption is violated, this method will tassert.
+     * The exact behavior of this method is as follows:
+     * - If a previous call to 'nextReady()' produced a document, this document will be put back
+     *   into the document buffer the original shard it came from, and the high watermark will be
+     *   updated to the original buffered high watermark value. The 'highWaterMark' parameter will
+     *   be ignored in this case.
+     * - If a previous call to 'nextReady()' produced EOF, then no document will be put back into
+     *   any document buffer, and for sorted mergers the high watermark will be reset to the value
+     *   of the 'highWaterMark' parameter.
+     * - If no previous call to 'nextReady()' was made, then also no document will be put back into
+     *   any document buffer, and for sorted mergers the high watermark will be reset to the value
+     *   of the 'highWaterMark' parameter. This scenario is possible if the 'BlockingResultsMerger'
+     *   did not even call 'nextReady()' in undo mode, but returned an empty 'ClusterQueryResult'
+     *   right away.
      *
      * Calling this method will not restore the following properties of the 'AsyncResultsMerger' to
      * their state during the last call to 'nextReady()':
      * - the set of open remote cursors
      * - the list of transaction participants
      *
+     * As the 'AsyncResultsMerger' only buffers the single last returned result in 'nextReady()', it
+     * is forbidden to call 'undoNextReady()' repeatedly unless another call to 'nextReady()' has
+     * been made. If this assumption is violated, this method will tassert.
+     *
      * It is forbidden to call this method if the undo is performed for a result that was produced
      * by a remote cursor that has been closed since the last call to 'nextReady()'. If this
      * assumption is violated, this method will tassert.
+     *
+     * This method can only be called if the undo mode is enabled.
      */
-    void undoNextReady();
+    void undoNextReady(BSONObj highWaterMark);
 
     /**
      * Returns if this 'AsyncResultsMerger' compares the whole sort key, based on the initial setup
@@ -638,10 +667,20 @@ private:
     static StatusWith<CursorResponse> _parseCursorResponse(const BSONObj& responseObj,
                                                            CursorId expectedCursorId);
 
+
+    /**
+     * Calculates the effective value for maxTimeMS to be used for getMore requests to the shards,
+     * without clobbering the value set in '_awaitDataTimeout'.
+     * The effective value is based on the value of '_awaitDataTimeout' and the number of shards.
+     *
+     * This method must only be called in tailable, awaitData mode.
+     */
+    boost::optional<Milliseconds> _calculateEffectiveAwaitDataTimeout(WithLock lk) const;
+
     /**
      * Helper to create the getMore command asking the remote node for another batch of results.
      */
-    BSONObj _makeRequest(WithLock,
+    BSONObj _makeRequest(WithLock lk,
                          const RemoteCursorData& remote,
                          const ServerGlobalParams::FCVSnapshot& fcvSnapshot) const;
 

@@ -77,7 +77,6 @@ private:
 
 typedef std::pair<IntWrapper, IntWrapper> IWPair;
 typedef sorter::Iterator<IntWrapper, IntWrapper> IWIterator;
-typedef sorter::IteratorBase<IntWrapper, IntWrapper> IWIteratorBase;
 typedef Sorter<IntWrapper, IntWrapper> IWSorter;
 
 enum Direction { ASC = 1, DESC = -1 };
@@ -96,7 +95,7 @@ private:
     Direction _dir;
 };
 
-class IntIterator : public IWIteratorBase {
+class IntIterator : public IWIterator {
 public:
     IntIterator(int start = 0, int stop = INT_MAX, int increment = 1)
         : _current(start), _increment(increment), _stop(stop) {}
@@ -121,6 +120,17 @@ public:
     const IntWrapper& peek() override {
         MONGO_UNREACHABLE;
     }
+    SorterRange getRange() const override {
+        MONGO_UNREACHABLE;
+    }
+    bool spillable() const override {
+        return false;
+    }
+    [[nodiscard]] std::unique_ptr<Iterator<IntWrapper, IntWrapper>> spill(
+        const SortOptions& opts,
+        const typename Sorter<IntWrapper, IntWrapper>::Settings& settings) override {
+        MONGO_UNREACHABLE;
+    }
 
 private:
     int _current;
@@ -128,7 +138,7 @@ private:
     int _stop;
 };
 
-class EmptyIterator : public IWIteratorBase {
+class EmptyIterator : public IWIterator {
 public:
     bool more() override {
         return false;
@@ -145,9 +155,20 @@ public:
     const IntWrapper& peek() override {
         MONGO_UNREACHABLE;
     }
+    SorterRange getRange() const override {
+        MONGO_UNREACHABLE;
+    }
+    bool spillable() const override {
+        return false;
+    }
+    [[nodiscard]] std::unique_ptr<Iterator<IntWrapper, IntWrapper>> spill(
+        const SortOptions& opts,
+        const typename Sorter<IntWrapper, IntWrapper>::Settings& settings) override {
+        MONGO_UNREACHABLE;
+    }
 };
 
-class LimitIterator : public IWIteratorBase {
+class LimitIterator : public IWIterator {
 public:
     LimitIterator(long long limit, std::shared_ptr<IWIterator> source)
         : _remaining(limit), _source(source) {
@@ -169,6 +190,17 @@ public:
         MONGO_UNREACHABLE;
     }
     const IntWrapper& peek() override {
+        MONGO_UNREACHABLE;
+    }
+    SorterRange getRange() const override {
+        MONGO_UNREACHABLE;
+    }
+    bool spillable() const override {
+        return false;
+    }
+    [[nodiscard]] std::unique_ptr<Iterator<IntWrapper, IntWrapper>> spill(
+        const SortOptions& opts,
+        const typename Sorter<IntWrapper, IntWrapper>::Settings& settings) override {
         MONGO_UNREACHABLE;
     }
 
@@ -233,14 +265,17 @@ void _assertIteratorsEquivalentForNSteps(It1& it1, It2& it2, int maxSteps, int l
     _assertIteratorsEquivalentForNSteps(it1, it2, n, __LINE__)
 
 template <int N>
-std::shared_ptr<IWIterator> makeInMemIterator(const int (&array)[N]);
+std::shared_ptr<IWIterator> makeInMemIterator(
+    const int (&array)[N],
+    std::shared_ptr<SorterSpillerBase<IntWrapper, IntWrapper>> spiller = nullptr);
 
 template <int N>
-std::shared_ptr<IWIterator> makeInMemIterator(const int (&array)[N]) {
+std::shared_ptr<IWIterator> makeInMemIterator(
+    const int (&array)[N], std::shared_ptr<SorterSpillerBase<IntWrapper, IntWrapper>> spiller) {
     std::vector<IWPair> vec;
     for (int i = 0; i < N; i++)
         vec.push_back(IWPair(array[i], -array[i]));
-    return std::make_shared<InMemIterator<IntWrapper, IntWrapper>>(vec);
+    return std::make_shared<InMemIterator<IntWrapper, IntWrapper>>(vec, spiller);
 }
 
 /**
@@ -249,13 +284,14 @@ std::shared_ptr<IWIterator> makeInMemIterator(const int (&array)[N]) {
  * sorted spill file segments (as opposed to any other kind of iterator).
  */
 template <typename IteratorPtr>
-std::shared_ptr<IWIterator> spillToFile(IteratorPtr inputIter, const unittest::TempDir& tempDir) {
+std::shared_ptr<IWIterator> spillToFile(IteratorPtr inputIter,
+                                        SorterFileStats* fileStats,
+                                        const unittest::TempDir& tempDir) {
     if (!inputIter->more()) {
         return std::make_shared<EmptyIterator>();
     }
     const SortOptions opts = SortOptions().TempDir(tempDir.path());
-    auto spillFile =
-        std::make_shared<SorterFile>(sorter::nextFileName(*(opts.tempDir)), opts.sorterFileStats);
+    auto spillFile = std::make_shared<SorterFile>(sorter::nextFileName(*(opts.tempDir)), fileStats);
     // TODO(SERVER-114080): Ensure testing of non-file-based sorter storage is comprehensive.
     FileBasedSorterStorage<IntWrapper, IntWrapper> sorterStorage(spillFile, *opts.tempDir);
     std::unique_ptr<SortedStorageWriter<IntWrapper, IntWrapper>> writer =
@@ -276,7 +312,7 @@ std::shared_ptr<IWIterator> mergeIterators(IteratorPtr (&array)[N],
     std::vector<std::shared_ptr<IWIterator>> vec;
     for (auto& it : array) {
         // Spill iterator outputs to a file and obtain a new iterator for it.
-        vec.push_back(spillToFile(std::move(it), tempDir));
+        vec.push_back(spillToFile(std::move(it), /*fileStats=*/nullptr, tempDir));
     }
     return sorter::merge<IntWrapper, IntWrapper>(vec, opts, IWComparator(Dir));
 }
