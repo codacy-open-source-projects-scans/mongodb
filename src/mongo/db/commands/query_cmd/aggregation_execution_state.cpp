@@ -31,7 +31,6 @@
 
 #include "mongo/db/exec/disk_use_options_gen.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
-#include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/pipeline/search/search_helper.h"
 #include "mongo/db/profile_settings.h"
 #include "mongo/db/query/collection_query_info.h"
@@ -48,6 +47,8 @@
 #include "mongo/db/topology/sharding_state.h"
 #include "mongo/db/version_context.h"
 #include "mongo/db/views/view_catalog_helpers.h"
+
+#include <fmt/format.h>
 
 namespace mongo {
 namespace {
@@ -276,20 +277,34 @@ public:
     void validate() const override {
         AggCatalogState::validate();
 
-        // Raise an error if original nss is a view. We do not need to check this if we are opening
-        // a stream on an entire db or across the cluster.
+        // Raise an error if original nss is a view or timeseries collection. We do not need to
+        // check this if we are opening a stream on an entire db or across the cluster.
         if (!_aggExState.getOriginalNss().isCollectionlessAggregateNS()) {
-            auto view = _catalog->lookupView(_aggExState.getOpCtx(), _aggExState.getOriginalNss());
-            uassert(ErrorCodes::CommandNotSupportedOnView,
-                    str::stream() << "Cannot run aggregation on timeseries with namespace "
-                                  << _aggExState.getOriginalNss().toStringForErrorMsg(),
-                    !view || !view->timeseries());
+            // Only allow change streams over timeseries collections when 'rawData' set to true.
+            // This will result in change streams emitting events in the internal bucket format.
+            if (!isRawDataOperation(_aggExState.getOpCtx())) {
+                uassert(ErrorCodes::CommandNotSupported,
+                        fmt::format("Cannot run aggregation on timeseries with namespace {}",
+                                    _aggExState.getOriginalNss().toStringForErrorMsg()),
+                        !isTimeseries());
+            }
             uassert(ErrorCodes::CommandNotSupportedOnView,
                     str::stream() << "Namespace "
                                   << _aggExState.getOriginalNss().toStringForErrorMsg()
                                   << " is a view, not a collection",
-                    !view);
+                    !_catalog->lookupView(_aggExState.getOpCtx(), _aggExState.getOriginalNss()));
         }
+    }
+
+    /**
+     * Returns true if the collection is a timeseries collection (backed by view or viewless).
+     */
+    bool isTimeseries() const override {
+        if (auto collPtr = _catalog->lookupCollectionByNamespace(_aggExState.getOpCtx(),
+                                                                 _aggExState.getOriginalNss())) {
+            return collPtr->isTimeseriesCollection();
+        }
+        return false;
     }
 
     std::pair<std::unique_ptr<CollatorInterface>, ExpressionContextCollationMatchesDefault>
@@ -658,38 +673,6 @@ StatusWith<std::unique_ptr<ResolvedViewAggExState>> ResolvedViewAggExState::crea
     // initialization.
     return std::make_unique<ResolvedViewAggExState>(
         std::move(*aggExState), aggCatalogState, viewDefinition);
-}
-
-std::unique_ptr<Pipeline> ResolvedViewAggExState::applyViewToPipeline(
-    boost::intrusive_ptr<ExpressionContext> expCtx,
-    std::unique_ptr<Pipeline> pipeline,
-    boost::optional<UUID> uuid) const {
-    if (getResolvedView().timeseries()) {
-        // For timeseries, there may have been rewrites done on the raw BSON pipeline
-        // during view resolution. We must parse the request's full resolved pipeline
-        // which will account for those rewrites.
-        // TODO SERVER-101599 remove this code once 9.0 becomes last LTS. By then only viewless
-        // timeseries collections will exist.
-        return pipeline_factory::makePipeline(
-            getRequest().getPipeline(), expCtx, pipeline_factory::kOptionsMinimal);
-    } else if (search_helpers::isMongotPipeline(pipeline.get())) {
-        // For search queries on views don't do any of the pipeline stitching that is done for
-        // normal views.
-        return pipeline;
-    }
-
-    // Parse and desugar the view pipeline, then stitch the user pipeline and full-parsed view
-    // pipeline together to build the total aggregation pipeline.
-    auto userPipeline = std::move(pipeline);
-    pipeline = pipeline_factory::makePipeline(getResolvedView().getPipeline(),
-                                              expCtx,
-                                              {.optimize = false,
-                                               .alreadyOptimized = false,
-                                               .attachCursorSource = false,
-                                               .desugar = true});
-
-    pipeline->appendPipeline(std::move(userPipeline));
-    return pipeline;
 }
 
 ScopedSetShardRole ResolvedViewAggExState::setShardRole(const CollectionRoutingInfo& cri) {

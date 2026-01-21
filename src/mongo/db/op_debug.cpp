@@ -198,10 +198,9 @@ void OpDebug::report(OperationContext* opCtx,
     }
 
     pAttrs->add("isFromUserConnection", client && client->isFromUserConnection());
-    if (gFeatureFlagDedicatedPortForMaintenanceOperations.isEnabled()) {
-        pAttrs->add("isFromMaintenancePortConnection",
-                    client && client->session() &&
-                        client->session()->isConnectedToMaintenancePort());
+    if (gFeatureFlagDedicatedPortForPriorityOperations.isEnabled()) {
+        pAttrs->add("isFromPriorityPortConnection",
+                    client && client->session() && client->session()->isConnectedToPriorityPort());
     }
     pAttrs->addDeepCopy("ns", toStringForLogging(curop.getNSS()));
     pAttrs->addDeepCopy("collectionType", getCollectionType(opCtx, curop.getNSS()));
@@ -567,10 +566,10 @@ void OpDebug::append(OperationContext* opCtx,
 
     b.append("ns", curop.getNS());
 
-    if (gFeatureFlagDedicatedPortForMaintenanceOperations.isEnabled()) {
-        b.append("isFromMaintenancePortConnection",
+    if (gFeatureFlagDedicatedPortForPriorityOperations.isEnabled()) {
+        b.append("isFromPriorityPortConnection",
                  opCtx->getClient() && opCtx->getClient()->session() &&
-                     opCtx->getClient()->session()->isConnectedToMaintenancePort());
+                     opCtx->getClient()->session()->isConnectedToPriorityPort());
     }
 
     if (!omitCommand) {
@@ -897,11 +896,11 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(OperationConte
     });
     addIfNeeded("ns", [](auto field, auto args, auto& b) { b.append(field, args.curop.getNS()); });
 
-    addIfNeeded("isFromMaintenancePortConnection", [](auto field, auto args, auto& b) {
-        bool isFromMaintenanceConnection = args.opCtx->getClient() &&
+    addIfNeeded("isFromPriorityPortConnection", [](auto field, auto args, auto& b) {
+        bool isFromPriorityConnection = args.opCtx->getClient() &&
             args.opCtx->getClient()->session() &&
-            args.opCtx->getClient()->session()->isConnectedToMaintenancePort();
-        b.append(field, isFromMaintenanceConnection);
+            args.opCtx->getClient()->session()->isConnectedToPriorityPort();
+        b.append(field, isFromPriorityConnection);
     });
 
     addIfNeeded("command", [](auto field, auto args, auto& b) {
@@ -1380,6 +1379,7 @@ CursorMetrics OpDebug::getCursorMetrics() const {
     metrics.setNUpserted(additiveMetrics.nUpserted.value_or(0));
 
     metrics.setPlanningTimeMicros(additiveMetrics.planningTime.value_or(Microseconds(0)).count());
+    metrics.setNDocsSampled(additiveMetrics.nDocsSampled.value_or(0));
     return metrics;
 }
 
@@ -1529,6 +1529,7 @@ void OpDebug::AdditiveMetrics::add(const AdditiveMetrics& otherMetrics) {
     *fromPlanCache = *fromPlanCache && otherMetrics.fromPlanCache.value_or(true);
 
     planningTime = addOptionals(planningTime, otherMetrics.planningTime);
+    nDocsSampled = addOptionals(nDocsSampled, otherMetrics.nDocsSampled);
 }
 
 void OpDebug::AdditiveMetrics::aggregateDataBearingNodeMetrics(
@@ -1573,6 +1574,7 @@ void OpDebug::AdditiveMetrics::aggregateDataBearingNodeMetrics(
     *fromPlanCache = *fromPlanCache && metrics.fromPlanCache;
 
     planningTime = planningTime.value_or(Microseconds(0)) + metrics.planningTime;
+    nDocsSampled = nDocsSampled.value_or(0) + metrics.nDocsSampled;
 }
 
 void OpDebug::AdditiveMetrics::aggregateDataBearingNodeMetrics(
@@ -1608,7 +1610,8 @@ void OpDebug::AdditiveMetrics::aggregateCursorMetrics(const CursorMetrics& metri
         static_cast<uint64_t>(metrics.getTotalAdmissions()),
         metrics.getWasLoadShed(),
         metrics.getWasDeprioritized(),
-        Microseconds(metrics.getPlanningTimeMicros())});
+        Microseconds(metrics.getPlanningTimeMicros()),
+        static_cast<uint64_t>(metrics.getNDocsSampled())});
 }
 
 void OpDebug::AdditiveMetrics::aggregateStorageStats(const StorageStats& stats) {
