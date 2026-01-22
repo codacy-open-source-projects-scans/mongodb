@@ -33,6 +33,7 @@
 #include "mongo/db/extension/sdk/distributed_plan_logic.h"
 #include "mongo/db/extension/sdk/operation_metrics_adapter.h"
 #include "mongo/db/extension/sdk/query_execution_context_handle.h"
+#include "mongo/db/extension/sdk/query_shape_opts_handle.h"
 #include "mongo/db/extension/sdk/raii_vector_to_abi_array.h"
 #include "mongo/db/extension/shared/byte_buf.h"
 #include "mongo/db/extension/shared/extension_status.h"
@@ -75,6 +76,11 @@ public:
     virtual std::unique_ptr<ExecAggStageBase> compile() const = 0;
     virtual boost::optional<DistributedPlanLogic> getDistributedPlanLogic() const = 0;
     virtual std::unique_ptr<LogicalAggStage> clone() const = 0;
+    // Extension stages (like $vectorSearch) that do sort by vector search score should override
+    // this and return true.
+    virtual bool isSortedByVectorSearchScore() const {
+        return false;
+    }
 
 protected:
     LogicalAggStage() = delete;  // No default constructor.
@@ -181,6 +187,16 @@ private:
         });
     }
 
+    static ::MongoExtensionStatus* _extIsStageSortedByVectorSearchScore(
+        const ::MongoExtensionLogicalAggStage* extLogicalStage,
+        bool* outIsSortedByVectorSearchScore) {
+        return wrapCXXAndConvertExceptionToStatus([&]() {
+            const auto& impl =
+                static_cast<const ExtensionLogicalAggStage*>(extLogicalStage)->getImpl();
+            *outIsSortedByVectorSearchScore = impl.isSortedByVectorSearchScore();
+        });
+    }
+
     static constexpr ::MongoExtensionLogicalAggStageVTable VTABLE = {
         .destroy = &_extDestroy,
         .get_name = &_extGetName,
@@ -188,7 +204,8 @@ private:
         .explain = &_extExplain,
         .compile = &_extCompile,
         .get_distributed_plan_logic = &_extGetDistributedPlanLogic,
-        .clone = &_extClone};
+        .clone = &_extClone,
+        .is_stage_sorted_by_vector_search_score = &_extIsStageSortedByVectorSearchScore};
     std::unique_ptr<LogicalAggStage> _stage;
 };
 
@@ -364,7 +381,7 @@ public:
         return _name;
     }
 
-    virtual BSONObj getQueryShape(const ::MongoExtensionHostQueryShapeOpts* ctx) const = 0;
+    virtual BSONObj getQueryShape(const QueryShapeOptsHandle& ctx) const = 0;
 
     virtual size_t getExpandedSize() const = 0;
 

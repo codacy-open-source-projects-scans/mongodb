@@ -39,6 +39,7 @@
 #include "mongo/db/extension/host_connector/adapter/host_services_adapter.h"
 #include "mongo/db/extension/sdk/aggregation_stage.h"
 #include "mongo/db/extension/sdk/host_services.h"
+#include "mongo/db/extension/sdk/query_shape_opts_handle.h"
 #include "mongo/db/extension/sdk/tests/fruits_test_stage.h"
 #include "mongo/db/extension/sdk/tests/shared_test_stages.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
@@ -267,7 +268,7 @@ public:
         return out;
     }
 
-    BSONObj getQueryShape(const ::MongoExtensionHostQueryShapeOpts*) const override {
+    BSONObj getQueryShape(const sdk::QueryShapeOptsHandle&) const override {
         return BSONObj();
     }
 
@@ -396,7 +397,7 @@ public:
         return out;
     }
 
-    BSONObj getQueryShape(const ::MongoExtensionHostQueryShapeOpts*) const override {
+    BSONObj getQueryShape(const sdk::QueryShapeOptsHandle&) const override {
         return {};
     }
 
@@ -425,7 +426,7 @@ public:
         return out;
     }
 
-    BSONObj getQueryShape(const ::MongoExtensionHostQueryShapeOpts*) const override {
+    BSONObj getQueryShape(const sdk::QueryShapeOptsHandle&) const override {
         return {};
     }
 
@@ -445,7 +446,7 @@ public:
 
     std::vector<VariantNodeHandle> expand() const override;
 
-    BSONObj getQueryShape(const ::MongoExtensionHostQueryShapeOpts*) const override {
+    BSONObj getQueryShape(const sdk::QueryShapeOptsHandle&) const override {
         return {};
     }
 
@@ -464,7 +465,7 @@ public:
 
     std::vector<VariantNodeHandle> expand() const override;
 
-    BSONObj getQueryShape(const ::MongoExtensionHostQueryShapeOpts*) const override {
+    BSONObj getQueryShape(const sdk::QueryShapeOptsHandle&) const override {
         return {};
     }
 
@@ -507,7 +508,7 @@ public:
         return out;
     }
 
-    BSONObj getQueryShape(const ::MongoExtensionHostQueryShapeOpts*) const override {
+    BSONObj getQueryShape(const sdk::QueryShapeOptsHandle&) const override {
         return {};
     }
 
@@ -647,7 +648,7 @@ public:
         return expanded;
     }
 
-    BSONObj getQueryShape(const ::MongoExtensionHostQueryShapeOpts* ctx) const override {
+    BSONObj getQueryShape(const sdk::QueryShapeOptsHandle& ctx) const override {
         return BSONObj();
     }
 
@@ -681,7 +682,7 @@ public:
         return expanded;
     }
 
-    BSONObj getQueryShape(const ::MongoExtensionHostQueryShapeOpts* ctx) const override {
+    BSONObj getQueryShape(const sdk::QueryShapeOptsHandle& ctx) const override {
         return BSONObj();
     }
 
@@ -712,7 +713,7 @@ public:
         return expanded;
     }
 
-    BSONObj getQueryShape(const ::MongoExtensionHostQueryShapeOpts* ctx) const override {
+    BSONObj getQueryShape(const sdk::QueryShapeOptsHandle& ctx) const override {
         return BSONObj();
     }
 
@@ -839,7 +840,7 @@ public:
         return expanded;
     }
 
-    BSONObj getQueryShape(const ::MongoExtensionHostQueryShapeOpts* ctx) const override {
+    BSONObj getQueryShape(const sdk::QueryShapeOptsHandle& ctx) const override {
         return BSONObj();
     }
 
@@ -2008,6 +2009,10 @@ TEST_F(DocumentSourceExtensionOptimizableTest, StageWithDefaultStaticProperties)
     ASSERT_FALSE(staticProperties.getRequiredMetadataFields().has_value());
     ASSERT_FALSE(staticProperties.getProvidedMetadataFields().has_value());
     ASSERT_TRUE(staticProperties.getAllowedInUnionWith());
+    // MongoExtensionStaticProperties has these as 'default: true' in the IDL even though we're
+    // disabling them by default in constraints(). This is because we don't want to be making
+    // changes to the API regarding enabling/disabling these subpipeline stages, rather we handle it
+    // on the host side.
     ASSERT_TRUE(staticProperties.getAllowedInLookup());
     ASSERT_TRUE(staticProperties.getAllowedInFacet());
 
@@ -2018,8 +2023,8 @@ TEST_F(DocumentSourceExtensionOptimizableTest, StageWithDefaultStaticProperties)
     ASSERT_TRUE(constraints.requiresInputDocSource);
     ASSERT_TRUE(constraints.consumesLogicalCollectionData);
     ASSERT_EQ(constraints.unionRequirement, StageConstraints::UnionRequirement::kAllowed);
-    ASSERT_EQ(constraints.lookupRequirement, StageConstraints::LookupRequirement::kAllowed);
-    ASSERT_EQ(constraints.facetRequirement, StageConstraints::FacetRequirement::kAllowed);
+    ASSERT_EQ(constraints.lookupRequirement, StageConstraints::LookupRequirement::kNotAllowed);
+    ASSERT_EQ(constraints.facetRequirement, StageConstraints::FacetRequirement::kNotAllowed);
 }
 
 TEST_F(DocumentSourceExtensionOptimizableTest, SearchLikeStageWithSourceStageStaticProperties) {
@@ -2306,7 +2311,7 @@ public:
         return out;
     }
 
-    BSONObj getQueryShape(const ::MongoExtensionHostQueryShapeOpts*) const override {
+    BSONObj getQueryShape(const sdk::QueryShapeOptsHandle&) const override {
         return BSON(std::string(kStageName) << BSONObj());
     }
 

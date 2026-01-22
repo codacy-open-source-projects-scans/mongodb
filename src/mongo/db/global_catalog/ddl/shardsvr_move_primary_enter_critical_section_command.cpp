@@ -93,9 +93,8 @@ public:
                 // Using the original operation context, the two write operations to enter the
                 // critical section (acquire and promote) would use the same txnNumber, which would
                 // cause the failure of the second operation.
-                auto newClient = getGlobalServiceContext()
-                                     ->getService(ClusterRole::ShardServer)
-                                     ->makeClient("ShardsvrMovePrimaryEnterCriticalSection");
+                auto newClient = getGlobalServiceContext()->getService()->makeClient(
+                    "ShardsvrMovePrimaryEnterCriticalSection");
                 AlternativeClientRegion acr(newClient);
                 auto newOpCtx = CancelableOperationContext(
                     cc().makeOperationContext(),
@@ -157,7 +156,7 @@ public:
         void waitForCriticalSectionToComplete(OperationContext* opCtx,
                                               const DatabaseName& dbName,
                                               const BSONObj& movePrimaryReason) {
-            auto criticalSectionSignal = [&]() -> boost::optional<SharedSemiFuture<void>> {
+            auto criticalSectionSignal = [&]() -> boost::optional<CriticalSectionSignal> {
                 Lock::DBLock dbLock(opCtx, dbName, MODE_IS);
                 const auto scopedDsr =
                     DatabaseShardingRuntime::assertDbLockedAndAcquireShared(opCtx, dbName);

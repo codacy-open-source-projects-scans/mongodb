@@ -62,7 +62,7 @@ filters:
       - 10gen/query-execution-write-exec
   - "extensions*":
     approvers:
-      - 10gen/query-integration-features
+      - 10gen/query-integration-extensions-api
   - "fle*":
     approvers:
       - 10gen/query-integration-features
@@ -198,3 +198,9 @@ filters:
   - "secondary_reads_passthrough_with_replica_set_endpoint.yml":
     approvers:
       - 10gen/server-cluster-scalability
+  - "replica_sets_with_priority_ports.yml":
+    approvers:
+      - 10gen/server-catalog-and-routing
+  - "sharding_jscore_passthrough_priority_ports.yml":
+    approvers:
+      - 10gen/server-catalog-and-routing-routing-and-topology

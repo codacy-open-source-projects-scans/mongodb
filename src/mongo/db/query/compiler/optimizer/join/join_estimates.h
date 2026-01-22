@@ -71,6 +71,13 @@ public:
         return _totalCost;
     }
 
+    std::string toString() const;
+    BSONObj toBSON() const;
+
+    auto operator<=>(const JoinCostEstimate& other) const {
+        return _totalCost <=> other._totalCost;
+    }
+
 private:
     // Estimate of the number of documents this join operation will process.
     CardinalityEstimate _numDocsProcessed;
@@ -90,4 +97,9 @@ private:
     // in this class.
     CostEstimate _totalCost;
 };
+
+inline std::ostream& operator<<(std::ostream& os, const JoinCostEstimate& cost) {
+    return os << cost.toString();
+}
+
 }  // namespace mongo::join_ordering
