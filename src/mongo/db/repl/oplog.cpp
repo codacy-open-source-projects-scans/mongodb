@@ -456,7 +456,7 @@ void writeToImageCollection(OperationContext* opCtx,
     request.setFromOplogApplication(true);
     request.setYieldPolicy(PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY);
     // This code path can also be hit by things such as `applyOps.`
-    ::mongo::update(opCtx, collection, request);
+    ::mongo::doUpdate(opCtx, collection, request);
 }
 
 /* we write to local.oplog.rs:
@@ -1360,11 +1360,8 @@ void writeChangeStreamPreImage(OperationContext* opCtx,
                                const CollectionPtr& collection,
                                const mongo::repl::OplogEntry& oplogEntry,
                                const BSONObj& preImage) {
-    Timestamp timestamp;
-    int64_t applyOpsIndex;
-
-    timestamp = oplogEntry.getTimestampForPreImage();
-    applyOpsIndex = oplogEntry.getApplyOpsIndex();
+    Timestamp timestamp = oplogEntry.getTimestampForPreImage();
+    int64_t applyOpsIndex = oplogEntry.getApplyOpsIndex();
 
     ChangeStreamPreImageId preImageId{collection->uuid(), timestamp, applyOpsIndex};
     ChangeStreamPreImage preImageDocument{
@@ -1997,7 +1994,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
                                         timestamp));
                             }
 
-                            UpdateResult res = update(opCtx, collectionAcquisition, request);
+                            UpdateResult res = doUpdate(opCtx, collectionAcquisition, request);
                             if (res.numMatched == 0 && res.upsertedId.isEmpty()) {
                                 LOGV2_ERROR(
                                     21257,
@@ -2130,7 +2127,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
                         invariant(documentFound);
                     }
 
-                    UpdateResult ur = update(opCtx, collectionAcquisition, request);
+                    UpdateResult ur = doUpdate(opCtx, collectionAcquisition, request);
                     if (ur.numMatched == 0 && ur.upsertedId.isEmpty()) {
                         if (collection && collection->isCapped() &&
                             mode == OplogApplication::Mode::kSecondary) {
@@ -2425,7 +2422,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
 Status applyContainerOperation_inlock(OperationContext* opCtx,
                                       const ApplierOperation& op,
                                       OplogApplication::Mode mode) {
-    const auto nss = op->getNss();
+    const auto& nss = op->getNss();
     invariant(shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(nss, MODE_IX));
 
     auto ident = op->getContainer();
