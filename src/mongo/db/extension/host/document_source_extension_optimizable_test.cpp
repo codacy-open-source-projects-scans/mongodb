@@ -47,6 +47,7 @@
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/pipeline/search/document_source_internal_search_id_lookup.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/namespace_string_util.h"
@@ -553,49 +554,29 @@ DEATH_TEST_F(DocumentSourceExtensionOptimizableTestDeathTest,
         stageBson.firstElement(), std::move(rootHandle), _nss, LiteParserOptions{});
 }
 
-TEST_F(DocumentSourceExtensionOptimizableTest, ExpandAdjacentCycleFails) {
+DEATH_TEST_REGEX_F(DocumentSourceExtensionOptimizableTestDeathTest,
+                   ExpandAdjacentCycleFails,
+                   "10955801.*Cycle detected during stage expansion for "
+                   "stage.*\\$adjacentCycle.*\\$adjacentCycle -> \\$adjacentCycle") {
     auto* rootParseNode =
         new sdk::ExtensionAggStageParseNode(std::make_unique<AdjacentCycleParseNode>());
     AggStageParseNodeHandle rootHandle{rootParseNode};
     BSONObj stageBson = createDummySpecFromStageName(kAdjCycleName);
 
-    ASSERT_THROWS_WITH_CHECK(
-        [&] {
-            [[maybe_unused]] host::DocumentSourceExtensionOptimizable::LiteParsedExpandable lp(
-                stageBson.firstElement(), std::move(rootHandle), _nss, LiteParserOptions{});
-        }(),
-        AssertionException,
-        [](const AssertionException& ex) {
-            ASSERT_EQ(ex.code(), 10955801);
-            ASSERT_STRING_CONTAINS(ex.reason(),
-                                   str::stream()
-                                       << "Cycle detected during stage expansion for stage "
-                                       << std::string(kAdjCycleName));
-            ASSERT_STRING_CONTAINS(ex.reason(), "$adjacentCycle -> $adjacentCycle");
-            assertionCount.tripwire.subtractAndFetch(1);
-        });
+    [[maybe_unused]] host::DocumentSourceExtensionOptimizable::LiteParsedExpandable lp(
+        stageBson.firstElement(), std::move(rootHandle), _nss, LiteParserOptions{});
 }
 
-TEST_F(DocumentSourceExtensionOptimizableTest, ExpandNonAdjacentCycleFails) {
+DEATH_TEST_REGEX_F(DocumentSourceExtensionOptimizableTestDeathTest,
+                   ExpandNonAdjacentCycleFails,
+                   "10955801.*Cycle detected during stage expansion for "
+                   "stage.*\\$nodeB.*\\$nodeB -> \\$nodeA -> \\$nodeB") {
     auto* rootParseNode = new sdk::ExtensionAggStageParseNode(std::make_unique<NodeAParseNode>());
     AggStageParseNodeHandle rootHandle{rootParseNode};
     BSONObj stageBson = createDummySpecFromStageName(kNodeAName);
 
-    ASSERT_THROWS_WITH_CHECK(
-        [&] {
-            [[maybe_unused]] host::DocumentSourceExtensionOptimizable::LiteParsedExpandable lp(
-                stageBson.firstElement(), std::move(rootHandle), _nss, LiteParserOptions{});
-        }(),
-        AssertionException,
-        [](const AssertionException& ex) {
-            ASSERT_EQ(ex.code(), 10955801);
-            ASSERT_STRING_CONTAINS(ex.reason(),
-                                   str::stream()
-                                       << "Cycle detected during stage expansion for stage "
-                                       << std::string(kNodeBName));
-            ASSERT_STRING_CONTAINS(ex.reason(), "$nodeB -> $nodeA -> $nodeB");
-            assertionCount.tripwire.subtractAndFetch(1);
-        });
+    [[maybe_unused]] host::DocumentSourceExtensionOptimizable::LiteParsedExpandable lp(
+        stageBson.firstElement(), std::move(rootHandle), _nss, LiteParserOptions{});
 }
 
 TEST_F(DocumentSourceExtensionOptimizableTest, ExpandSameStageOnDifferentBranchesSucceeds) {
@@ -2456,6 +2437,8 @@ void testViewPolicyHelper(const NamespaceString& nss,
 
 TEST_F(DocumentSourceExtensionOptimizableTest,
        LiteParsedExpandedGetViewPolicyWithDefaultPrependAndCallback) {
+    RAIIServerParameterControllerForTest featureFlag{"featureFlagExtensionViewsAndUnionWith", true};
+
     const auto viewNss = NamespaceString::createNamespaceString_forTest("test.view"_sd);
     testViewPolicyHelper(
         _nss,
@@ -2466,6 +2449,8 @@ TEST_F(DocumentSourceExtensionOptimizableTest,
 
 TEST_F(DocumentSourceExtensionOptimizableTest,
        LiteParsedExpandedGetViewPolicyWithDoNothingAndCallback) {
+    RAIIServerParameterControllerForTest featureFlag{"featureFlagExtensionViewsAndUnionWith", true};
+
     const auto viewNss = NamespaceString::createNamespaceString_forTest("test.view"_sd);
     testViewPolicyHelper(
         _nss,
