@@ -2034,11 +2034,6 @@ void OpObserverImpl::onBatchedWriteStart(OperationContext* opCtx) {
 void OpObserverImpl::onBatchedWriteCommit(OperationContext* opCtx,
                                           WriteUnitOfWork::OplogEntryGroupType oplogGroupingFormat,
                                           OpStateAccumulator* opAccumulator) {
-    if (!repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet() ||
-        !opCtx->writesAreReplicated()) {
-        return;
-    }
-
     // A batched write with oplogGroupingFormat kGroupForTransaction is a one-shot non-retryable
     // transaction without a transaction number, which is forbidden in retryable writes and
     // multi-document transactions.
@@ -2352,11 +2347,6 @@ void OpObserverImpl::onTransactionPrepare(
                     _operationLogger.get());
     }
 }
-
-void OpObserverImpl::onTransactionPrepareNonPrimary(OperationContext* opCtx,
-                                                    const LogicalSessionId& lsid,
-                                                    const std::vector<repl::OplogEntry>& statements,
-                                                    const repl::OpTime& prepareOpTime) {}
 
 void OpObserverImpl::onTransactionAbort(OperationContext* opCtx,
                                         boost::optional<OplogSlot> abortOplogEntryOpTime) {

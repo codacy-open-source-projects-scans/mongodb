@@ -39,8 +39,6 @@ variables:
   # - etc/evergreen_yml_components/variants/sanitizer/test_dev.yml
   # ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
   - &linux_x86_generic_expansions
-    mciuploads_binary_permissions: public-read
-    mciuploads_binary_visibility: public
     multiversion_platform: rhel8
     multiversion_edition: enterprise
     repo_edition: enterprise
@@ -56,8 +54,6 @@ buildvariants:
     run_on:
       - rhel8.8-small
     expansions:
-      mciuploads_binary_permissions: public-read
-      mciuploads_binary_visibility: public
       additional_package_targets: >-
         archive-mongocryptd-stripped
         archive-mongocryptd-debug
@@ -160,7 +156,6 @@ buildvariants:
       - name: concurrency_replication_multi_stmt_txn_gen
       - name: concurrency_sharded_replication_gen
       - name: concurrency_sharded_replication_with_balancer_gen
-      - name: concurrency_sharded_clusterwide_ops_add_remove_shards_gen
       - name: concurrency_sharded_local_read_write_multi_stmt_txn_gen
       - name: concurrency_sharded_local_read_write_multi_stmt_txn_with_balancer_gen
       - name: concurrency_sharded_multi_stmt_txn_gen

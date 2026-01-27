@@ -579,13 +579,15 @@ public:
         }
     }
 
-    void onTransactionPrepareNonPrimary(OperationContext* opCtx,
-                                        const LogicalSessionId& lsid,
-                                        const std::vector<repl::OplogEntry>& statements,
-                                        const repl::OpTime& prepareOpTime) override {
+    void onTransactionPrepareNonPrimaryForChunkMigration(
+        OperationContext* opCtx,
+        const LogicalSessionId& lsid,
+        boost::optional<const std::vector<repl::OplogEntry>&> statements,
+        boost::optional<const repl::OpTime&> prepareOpTime) override {
         ReservedTimes times{opCtx};
         for (auto& observer : _observers) {
-            observer->onTransactionPrepareNonPrimary(opCtx, lsid, statements, prepareOpTime);
+            observer->onTransactionPrepareNonPrimaryForChunkMigration(
+                opCtx, lsid, statements, prepareOpTime);
         }
     }
 
@@ -606,6 +608,11 @@ public:
     void onBatchedWriteCommit(OperationContext* opCtx,
                               WriteUnitOfWork::OplogEntryGroupType oplogGroupingFormat,
                               OpStateAccumulator* opAccumulator = nullptr) override {
+        if (!repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet() ||
+            !opCtx->writesAreReplicated()) {
+            return;
+        }
+
         ReservedTimes times{opCtx};
         OpStateAccumulator opStateAccumulator;
 
