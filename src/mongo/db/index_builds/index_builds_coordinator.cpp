@@ -3040,23 +3040,6 @@ void IndexBuildsCoordinator::_cleanUpAfterFailure(OperationContext* opCtx,
         return;
     }
 
-    // In primary-driven index builds, when a primary steps down it loses the authority to abort the
-    // index build. Skip the cleanup here and wait for external abort signals (kOplogAbort or
-    // kRollbackAbort).
-    if (status.isA<ErrorCategory::NotPrimaryError>() &&
-        indexBuildOptions.indexBuildMethod == IndexBuildMethodEnum::kPrimaryDriven) {
-        LOGV2(11717000,
-              "Index build: skipping cleanup for primary-driven index build on step down",
-              "buildUUD"_attr = replState->buildUUID,
-              "error"_attr = status);
-        // We reached here after calling ReplIndexBuildState::setPostFailureState(). This state
-        // disallows concurrent aborts and blocks ReplIndexBuildState::tryAbort() from proceeding.
-        // Since we are exiting early without completing the self abort, change the state to allow
-        // external aborts.
-        replState->requestAbortFromPrimary();
-        return;
-    }
-
     if (!status.isA<ErrorCategory::ShutdownError>()) {
         try {
             // It is still possible to get a shutdown request while trying to clean-up. All shutdown
@@ -3152,6 +3135,23 @@ void IndexBuildsCoordinator::_cleanUpTwoPhaseAfterNonShutdownFailure(
                 const NamespaceStringOrUUID dbAndUUID(replState->dbName, replState->collectionUUID);
                 auto replCoord = repl::ReplicationCoordinator::get(abortCtx);
                 if (!replCoord->canAcceptWritesFor(abortCtx, dbAndUUID)) {
+                    if (indexBuildMethod == IndexBuildMethodEnum::kPrimaryDriven) {
+                        LOGV2(11785200,
+                              "Index build: skipping self-abort after stepdown for primary-driven "
+                              "index build",
+                              "buildUUID"_attr = replState->buildUUID,
+                              logAttrs(replState->dbName),
+                              "collectionUUID"_attr = replState->collectionUUID,
+                              "error"_attr = status);
+                        // We reached here after calling ReplIndexBuildState::setPostFailureState().
+                        // That state disallows concurrent aborts and blocks
+                        // ReplIndexBuildState::tryAbort() from proceeding. Since we are exiting
+                        // early without completing the self-abort, change the state to allow
+                        // external aborts.
+                        replState->requestAbortFromPrimary();
+                        return;
+                    }
+
                     // Index builds may not fail on secondaries. If a primary replicated an
                     // abortIndexBuild oplog entry, then this index build would have been externally
                     // aborted.
@@ -3543,17 +3543,13 @@ void IndexBuildsCoordinator::_insertSortedKeysIntoIndexForResume(
                     RecoveryUnit::ReadSource::kNoTimestamp);
         invariant(_indexBuildsManager.isBackgroundBuilding(replState->buildUUID));
 
-        // Primary-driven index builds need to replicate container writes.
-        auto operationType = isPrimaryDrivenIndexBuildEnabled(VersionContext::getDecoration(opCtx))
-            ? AcquisitionPrerequisites::kWrite
-            : AcquisitionPrerequisites::kUnreplicatedWrite;
         const auto collection = acquireCollection(
             opCtx,
             CollectionAcquisitionRequest(
                 NamespaceStringOrUUID{replState->dbName, replState->collectionUUID},
                 PlacementConcern::kPretendUnsharded,
                 repl::ReadConcernArgs::get(opCtx),
-                operationType),
+                AcquisitionPrerequisites::kUnreplicatedWrite),
             MODE_IX);
 
         tassert(7683105, "Expected collection to exist", collection.exists());
@@ -3580,12 +3576,9 @@ void IndexBuildsCoordinator::_insertKeysFromSideTablesWithoutBlockingWrites(
     // Perform the first drain while holding an intent lock.
     const NamespaceStringOrUUID dbAndUUID(replState->dbName, replState->collectionUUID);
     {
-        // Primary-driven index builds need to replicate container writes.
-        auto intent = isPrimaryDrivenIndexBuildEnabled(VersionContext::getDecoration(opCtx))
-            ? rss::consensus::IntentRegistry::Intent::Write
-            : rss::consensus::IntentRegistry::Intent::LocalWrite;
-        auto autoGetCollOptions = auto_get_collection::Options{}.globalLockOptions(
-            Lock::GlobalLockOptions{.explicitIntent = intent});
+        auto autoGetCollOptions =
+            auto_get_collection::Options{}.globalLockOptions(Lock::GlobalLockOptions{
+                .explicitIntent = rss::consensus::IntentRegistry::Intent::LocalWrite});
         AutoGetCollection autoGetColl(opCtx, dbAndUUID, MODE_IX, autoGetCollOptions);
 
         uassertStatusOK(_indexBuildsManager.drainBackgroundWrites(
