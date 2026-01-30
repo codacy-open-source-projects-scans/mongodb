@@ -122,9 +122,6 @@
       - uses_transactions
       # Exclude tests that require a specific fcv.
       # Once SERVER-81054 is complete this is no longer needed.
-      - requires_fcv_71
-      - requires_fcv_72
-      - requires_fcv_73
       - requires_fcv_80
       - requires_fcv_81
       - requires_fcv_82
@@ -137,3 +134,9 @@
   value:
     exclude_with_any_tags:
       - featureFlagCreateViewlessTimeseriesCollections
+
+- name: exclude_files
+  value:
+    exclude_files:
+      # TODO SERVER-117883 Remove this once the test is fixed.
+      - jstests/core/catalog/list_collections_correctness.js

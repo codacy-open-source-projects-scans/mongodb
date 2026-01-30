@@ -96,6 +96,7 @@
 #include "mongo/util/fail_point.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/namespace_string_util.h"
+#include "mongo/util/stacktrace.h"
 #include "mongo/util/str.h"
 #include "mongo/util/synchronized_value.h"
 #include "mongo/util/time_support.h"
@@ -1100,11 +1101,14 @@ Status DatabaseImpl::userCreateVirtualNS(OperationContext* opCtx,
 
 void DatabaseImpl::createSystemDotViewsIfNecessary(OperationContext* opCtx) const {
     dassert(shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(_viewsName, MODE_X));
-    dassert(!shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
 
     if (CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, _viewsName)) {
         return;
     }
+
+    tassert(11581100,
+            "system.views must be created in a non-nested write unit of work",
+            !shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
 
     WriteUnitOfWork wuow(opCtx);
     invariant(createCollection(opCtx, _viewsName));
