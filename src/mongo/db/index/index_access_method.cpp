@@ -56,8 +56,6 @@
 #include "mongo/db/shard_role/shard_catalog/index_catalog.h"
 #include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/db/shard_role/transaction_resources.h"
-#include "mongo/db/sorter/container_based_spiller.h"
-#include "mongo/db/sorter/file_based_spiller.h"
 #include "mongo/db/sorter/sorter.h"
 #include "mongo/db/sorter/sorter_template_defs.h"
 #include "mongo/db/storage/index_entry_comparison.h"
@@ -65,6 +63,7 @@
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_options.h"
+#include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/validate/validate_results.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
@@ -969,7 +968,8 @@ public:
                   int32_t yieldIterations,
                   const KeyHandlerFn& onDuplicateKeyInserted,
                   const RecordIdHandlerFn& onDuplicateRecord,
-                  const YieldFn& yieldFn) final;
+                  const YieldFn& yieldFn,
+                  size_t keyBatchSize) final;
 
 protected:
     const MultikeyPaths& getMultikeyPaths() const final;
@@ -1202,7 +1202,8 @@ Status BaseBulkBuilder::commit(OperationContext* opCtx,
                                int32_t yieldIterations,
                                const KeyHandlerFn& onDuplicateKeyInserted,
                                const RecordIdHandlerFn& onDuplicateRecord,
-                               const YieldFn& yieldFn) {
+                               const YieldFn& yieldFn,
+                               const size_t keyBatchSize) {
     Timer timer;
 
     _ns = entry->getNSSFromCatalog(opCtx);
@@ -1222,6 +1223,21 @@ Status BaseBulkBuilder::commit(OperationContext* opCtx,
         record_id_helpers::ReservationId::kWildcardMultikeyMetadataId, keyFormat);
 
     int64_t iterations = 0;
+
+    size_t numKeysInBatch = 0;
+    boost::optional<WriteUnitOfWork> wunit;
+    auto commitAndResetWunit = [&wunit, &numKeysInBatch]() {
+        wunit->commit();
+        wunit.reset();
+        numKeysInBatch = 0;
+    };
+    // Handles when we don't commit the wunit and exit the while-loop early. For example, if we
+    // encounter duplicate multikey metadata keys.
+    ScopeGuard commitAndResetWunitOuterGuard([&] {
+        if (wunit) {
+            commitAndResetWunit();
+        }
+    });
     while (it && it->more()) {
         opCtx->checkForInterrupt();
 
@@ -1284,12 +1300,29 @@ Status BaseBulkBuilder::commit(OperationContext* opCtx,
         _previousKey = data.first;
 
         try {
+            // TODO SERVER-118845: Move the writeConflictRetry to a higher level to correctly
+            // resolve batched write conflict failures.
             writeConflictRetry(opCtx, "addingKey", _ns, [&] {
-                WriteUnitOfWork wunit(opCtx);
+                ScopeGuard commitAndResetWunitInnerGuard([&] {
+                    invariant(wunit);
+                    commitAndResetWunit();
+                });
+                if (!wunit) {
+                    wunit.emplace(opCtx);
+                }
                 _addKeyForCommit(opCtx, ru, *collection, data.first);
-                wunit.commit();
+                numKeysInBatch++;
+                if (numKeysInBatch == keyBatchSize || !it->more()) {
+                    invariant(wunit);
+                    commitAndResetWunit();
+                }
+                commitAndResetWunitInnerGuard.dismiss();
             });
         } catch (DBException& e) {
+            if (wunit) {
+                wunit.reset();
+                numKeysInBatch = 0;
+            }
             Status status = e.toStatus();
             // Duplicates are checked before inserting.
             invariant(status.code() != ErrorCodes::DuplicateKey);
@@ -1303,6 +1336,9 @@ Status BaseBulkBuilder::commit(OperationContext* opCtx,
 
         // Yield locks every 'yieldIterations' key insertions.
         if (yieldIterations > 0 && (++iterations % yieldIterations == 0)) {
+            if (wunit) {
+                commitAndResetWunit();
+            }
             std::tie(collection, entry) = yieldFn(opCtx);
         }
 
@@ -1377,7 +1413,6 @@ private:
     Sorter::Settings _makeSorterSettings() const;
     std::unique_ptr<Sorter> _sorter;
     std::unique_ptr<SortedDataBuilderInterface> _builder;
-
     const IndexBuildMethodEnum& _method;
 };
 
@@ -1495,43 +1530,24 @@ std::unique_ptr<IndexAccessMethod::BulkBuilder> SortedDataIndexAccessMethod::ini
     OperationContext* opCtx,
     const CollectionPtr& collection,
     const IndexCatalogEntry* entry,
+    std::shared_ptr<SorterSpiller<key_string::Value, mongo::NullValue>> spiller,
     size_t maxMemoryUsageBytes,
     const boost::optional<IndexStateInfo>& stateInfo,
     const DatabaseName& dbName,
     const IndexBuildMethodEnum& method) {
     const SortOptions& opts = makeSortOptions(maxMemoryUsageBytes, dbName);
-    if (method == IndexBuildMethodEnum::kPrimaryDriven) {
-        invariant(!stateInfo);
-        return std::make_unique<HybridBulkBuilder>(
-            entry,
-            this,
-            std::make_shared<sorter::ContainerBasedSpiller<key_string::Value, mongo::NullValue>>(
-                *opCtx,
-                *shard_role_details::getRecoveryUnit(opCtx),
-                collection,
-                entry->indexBuildInterceptor()->getSorterContainer(),
-                indexBulkBuilderSSS.sorterContainerStats,
-                dbName,
-                opts.checksumVersion),
-            opts,
-            method);
-    }
-
-    using FileBasedSpiller = sorter::FileBasedSorterSpiller<key_string::Value, mongo::NullValue>;
-    auto& fileStats = indexBulkBuilderSSS.sorterFileStats;
-    boost::filesystem::path tmpPath = storageGlobalParams.dbpath + "/_tmp";
-
-    auto fileName = stateInfo ? (*stateInfo).getStorageIdentifier() : boost::none;
-    auto spiller = fileName
-        ? std::make_shared<FileBasedSpiller>(
-              std::make_shared<SorterFile>(tmpPath / std::string{*fileName}, &fileStats),
-              tmpPath,
-              dbName)
-        : std::make_shared<FileBasedSpiller>(tmpPath, &fileStats, dbName);
-
     return stateInfo
-        ? std::make_unique<HybridBulkBuilder>(entry, this, spiller, *stateInfo, opts, method)
-        : std::make_unique<HybridBulkBuilder>(entry, this, spiller, opts, method);
+        ? std::make_unique<HybridBulkBuilder>(
+              entry, this, std::move(spiller), *stateInfo, opts, method)
+        : std::make_unique<HybridBulkBuilder>(entry, this, std::move(spiller), opts, method);
+}
+
+SorterFileStats& SortedDataIndexAccessMethod::getSorterFileStats() {
+    return indexBulkBuilderSSS.sorterFileStats;
+}
+
+SorterContainerStats& SortedDataIndexAccessMethod::getSorterContainerStats() {
+    return indexBulkBuilderSSS.sorterContainerStats;
 }
 
 void SortedDataIndexAccessMethod::getKeys(

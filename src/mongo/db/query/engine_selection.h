@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2018-present MongoDB, Inc.
+ *    Copyright (C) 2026-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -27,39 +27,32 @@
  *    it in the license file.
  */
 
-#include "mongo/base/init.h"  // IWYU pragma: keep
-#include "mongo/base/initializer.h"
-#include "mongo/base/status.h"
-#include "mongo/dbtests/framework_options.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/exit_code.h"
-#include "mongo/util/options_parser/environment.h"
-#include "mongo/util/options_parser/startup_option_init.h"
-#include "mongo/util/options_parser/startup_options.h"
-#include "mongo/util/quick_exit.h"
+#pragma once
 
-#include <iostream>
-#include <string>
-#include <vector>
+#include "mongo/db/exec/classic/delete_stage.h"
+#include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
+#include "mongo/db/query/query_planner_params.h"
+#include "mongo/db/query/write_ops/canonical_update.h"
+#include "mongo/db/query/write_ops/parsed_delete.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
+#include "mongo/util/modules.h"
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
-MONGO_GENERAL_STARTUP_OPTIONS_REGISTER(FrameworkOptions)(InitializerContext* context) {
-    uassertStatusOK(addTestFrameworkOptions(&moe::startupOptions));
-}
 
-MONGO_STARTUP_OPTIONS_VALIDATE(FrameworkOptions)(InitializerContext* context) {
-    if (!handlePreValidationTestFrameworkOptions(moe::startupOptionsParsed, context->args())) {
-        quickExit(ExitCode::clean);
-    }
-    uassertStatusOK(moe::startupOptionsParsed.validate());
-}
+/*
+ * Returns true if SBE should be used given the query details. An optional query solution may be
+ * passed in, which will be analyzed for SBE eligibility depending on the plan shape.
+ */
+bool useSbe(OperationContext* opCtx,
+            const MultipleCollectionAccessor& collections,
+            CanonicalQuery* cq,
+            Pipeline* pipeline,
+            bool needsMerge,
+            std::unique_ptr<QueryPlannerParams> plannerParams);
 
-MONGO_STARTUP_OPTIONS_STORE(FrameworkOptions)(InitializerContext* context) {
-    Status ret = storeTestFrameworkOptions(moe::startupOptionsParsed, context->args());
-    if (!ret.isOK()) {
-        std::cerr << ret.toString() << std::endl;
-        std::cerr << "try '" << context->args()[0] << " --help' for more information" << std::endl;
-        quickExit(ExitCode::badOptions);
-    }
-}
 }  // namespace mongo

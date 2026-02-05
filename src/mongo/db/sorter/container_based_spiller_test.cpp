@@ -512,9 +512,14 @@ TEST_F(SortedContainerWriterTest, ContainerWriterAllowsNullValueWithNonNullKey) 
     exhaustIterators<IntWrapper, NullValue>(writer);
 }
 
-class ContainerBasedSpillerTest : public ServiceContextMongoDTest {};
+class ContainerBasedSpillerTest : public ServiceContextMongoDTest,
+                                  public testing::WithParamInterface<int64_t> {};
 
-TEST_F(ContainerBasedSpillerTest, Spill) {
+INSTANTIATE_TEST_SUITE_P(ContainerBasedSpillerTest,
+                         ContainerBasedSpillerTest,
+                         testing::Values(1, 2, 4));
+
+TEST_P(ContainerBasedSpillerTest, Spill) {
     auto opCtx = makeOperationContext();
 
     auto replCoord = dynamic_cast<repl::ReplicationCoordinatorMock*>(
@@ -535,7 +540,8 @@ TEST_F(ContainerBasedSpillerTest, Spill) {
         container,
         stats,
         ns.dbName(),
-        SorterChecksumVersion::v2};
+        SorterChecksumVersion::v2,
+        /*batchSize=*/GetParam()};
 
     std::vector<std::pair<IntWrapper, NullValue>> data{{50, {}}, {100, {}}, {75, {}}, {125, {}}};
     std::span span{data};
@@ -556,7 +562,7 @@ TEST_F(ContainerBasedSpillerTest, Spill) {
     EXPECT_EQ(it2->next().first, 125);
 }
 
-TEST_F(ContainerBasedSpillerTest, MergeSpills) {
+TEST_P(ContainerBasedSpillerTest, MergeSpills) {
     auto opCtx = makeOperationContext();
 
     auto replCoord = dynamic_cast<repl::ReplicationCoordinatorMock*>(
@@ -577,7 +583,8 @@ TEST_F(ContainerBasedSpillerTest, MergeSpills) {
         container,
         containerStats,
         ns.dbName(),
-        SorterChecksumVersion::v2};
+        SorterChecksumVersion::v2,
+        /*batchSize=*/GetParam()};
 
     std::vector<std::pair<IntWrapper, NullValue>> data{
         {50, {}}, {100, {}}, {75, {}}, {125, {}}, {25, {}}};
@@ -592,7 +599,7 @@ TEST_F(ContainerBasedSpillerTest, MergeSpills) {
         SortOptions{}, SorterSpiller<IntWrapper, NullValue>::Settings{}, span.subspan(4, 1), 0));
 
     SorterStats sorterStats{nullptr};
-    auto storage = spiller.mergeSpills(
+    spiller.mergeSpills(
         SortOptions{},
         SorterSpiller<IntWrapper, NullValue>::Settings{},
         sorterStats,
@@ -600,7 +607,6 @@ TEST_F(ContainerBasedSpillerTest, MergeSpills) {
         [](const IntWrapper& left, const IntWrapper& right) { return IWComparator{}(left, right); },
         2,
         2);
-    spiller.setStorage(std::move(storage));
 
     EXPECT_EQ(iterators.size(), 2);
     EXPECT_EQ(container.entries().size(), data.size());
@@ -620,7 +626,7 @@ TEST_F(ContainerBasedSpillerTest, MergeSpills) {
     EXPECT_FALSE(iterators[1]->more());
 }
 
-TEST_F(ContainerBasedSpillerTest, MergeSpillsMultiplePasses) {
+TEST_P(ContainerBasedSpillerTest, MergeSpillsMultiplePasses) {
     auto opCtx = makeOperationContext();
 
     auto replCoord = dynamic_cast<repl::ReplicationCoordinatorMock*>(
@@ -641,7 +647,8 @@ TEST_F(ContainerBasedSpillerTest, MergeSpillsMultiplePasses) {
         container,
         containerStats,
         ns.dbName(),
-        SorterChecksumVersion::v2};
+        SorterChecksumVersion::v2,
+        /*batchSize=*/GetParam()};
 
     std::vector<std::pair<IntWrapper, NullValue>> data{{50, {}},
                                                        {100, {}},
@@ -664,7 +671,7 @@ TEST_F(ContainerBasedSpillerTest, MergeSpillsMultiplePasses) {
     }
 
     SorterStats sorterStats{nullptr};
-    auto storage = spiller.mergeSpills(
+    spiller.mergeSpills(
         SortOptions{},
         SorterSpiller<IntWrapper, NullValue>::Settings{},
         sorterStats,
@@ -672,7 +679,6 @@ TEST_F(ContainerBasedSpillerTest, MergeSpillsMultiplePasses) {
         [](const IntWrapper& left, const IntWrapper& right) { return IWComparator{}(left, right); },
         3,
         2);
-    spiller.setStorage(std::move(storage));
 
     EXPECT_EQ(iterators.size(), 3);
     EXPECT_EQ(container.entries().size(), data.size());
