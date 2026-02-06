@@ -288,16 +288,6 @@ public:
             _opCtx, _ru, _collection, _container, _stats, opts, _currKey, settings);
     };
 
-    std::shared_ptr<sorter::Iterator<Key, Value>> makeIterator(
-        std::unique_ptr<SortedStorageWriter<Key, Value>> writer) override {
-        return writer->done();
-    }
-
-    std::unique_ptr<sorter::Iterator<Key, Value>> makeIteratorUnique(
-        std::unique_ptr<SortedStorageWriter<Key, Value>> writer) override {
-        return writer->doneUnique();
-    }
-
     size_t getIteratorSize() override {
         return sizeof(sorter::ContainerIterator<Key, Value>);
     };
@@ -316,8 +306,14 @@ public:
     };
 
     boost::optional<boost::filesystem::path> getSpillDirPath() override {
-        // TODO SERVER-117548 Call ident::getDirectory when function returns full path.
-        return boost::filesystem::path(storageGlobalParams.dbpath + "/_tmp");
+        auto ident = _container.ident();
+        invariant(ident);
+        auto dir = ident::getDirectory(ident->getIdent());
+        boost::filesystem::path path{storageGlobalParams.dbpath};
+        if (!dir.empty()) {
+            path /= std::string{dir};
+        }
+        return path;
     };
 
     /**
@@ -398,7 +394,7 @@ public:
                     _containerBasedStorage().remove(current);
                 }
 
-                iters.push_back(this->_storage->makeIterator(std::move(writer)));
+                iters.push_back(writer->done());
                 _current += numSpilled;
                 _containerBasedStorage().updateCurrKey(_current);
 

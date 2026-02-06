@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2020-present MongoDB, Inc.
+ *    Copyright (C) 2026-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -30,52 +30,24 @@
 #pragma once
 
 #include "mongo/base/status.h"
-#include "mongo/db/request_execution_context.h"
-#include "mongo/util/concurrency/thread_pool.h"
-#include "mongo/util/future.h"
-#include "mongo/util/modules.h"
-
-#include <memory>
-#include <string>
+#include "mongo/db/operation_context.h"
+#include "mongo/db/repl/oplog_entry.h"
 
 namespace mongo {
 
-/**
- * The base class for constructing command-specific asynchronous executors.
- * Requests (i.e., instances of `RequestExecutionContext`) are scheduled on a thread-pool, and
- * passed to the command-specific implementation of `handleRequest`.
- */
-class MONGO_MOD_OPEN AsyncRequestExecutor {
+class OplogKeyEntryHandler {
 public:
-    AsyncRequestExecutor(AsyncRequestExecutor&&) = delete;
-    AsyncRequestExecutor(const AsyncRequestExecutor&) = delete;
-
-    explicit AsyncRequestExecutor(std::string name);
+    virtual ~OplogKeyEntryHandler() = default;
 
     /**
-     * Wrap the startup and shutdown interfaces provided by `_pool` and delegate the concurrency
-     * control to corresponding member functions of `ThreadPool`.
+     * Attempts to apply a custom oplog entry. Checks whether the entry is a Key, and handles
+     * the entry using custom logic.
      */
-    void start();
-    void stop();
+    virtual Status applyOplogEntry(OperationContext* opCtx, const repl::OplogEntry& oplogEntry);
 
-    /**
-     * Runs the command-specific code to handle the request.
-     * Must only access the request on the corresponding client thread.
-     */
-    virtual Status handleRequest(std::shared_ptr<RequestExecutionContext>) = 0;
+    static void set(ServiceContext* serviceContext, std::unique_ptr<OplogKeyEntryHandler> handler);
 
-    /**
-     * Schedules the request on a thread pool (i.e., `_pool`) and calls into `handleRequest` to
-     * asynchronously execute the command. Note that the scheduled tasks run inline during shutdown.
-     */
-    Future<void> schedule(std::shared_ptr<RequestExecutionContext> rec);
-
-    static constexpr auto kDiagnosticLogLevel = 4;
-
-private:
-    const std::string _name;
-    std::unique_ptr<ThreadPool> _pool;
+    static OplogKeyEntryHandler* get(ServiceContext* serviceContext);
 };
 
 }  // namespace mongo

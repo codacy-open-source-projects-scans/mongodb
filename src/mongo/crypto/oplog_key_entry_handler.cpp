@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2025-present MongoDB, Inc.
+ *    Copyright (C) 2026-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -27,43 +27,42 @@
  *    it in the license file.
  */
 
-#include "mongo/s/cluster_umc_error_with_write_concern_error_info.h"
+#include "mongo/crypto/oplog_key_entry_handler.h"
 
-#include "mongo/base/error_codes.h"
-#include "mongo/base/init.h"  // IWYU pragma: keep
+#include "mongo/base/status.h"
+#include "mongo/db/repl/oplog_entry.h"
+#include "mongo/db/service_context.h"
+#include "mongo/util/serialization_context.h"
+
+#include <memory>
 
 namespace mongo {
-namespace {
 
-MONGO_INIT_REGISTER_ERROR_EXTRA_INFO(ClusterUMCErrorWithWriteConcernErrorInfo);
+namespace {
+const auto oplogKeyEntryHandler =
+    ServiceContext::declareDecoration<std::unique_ptr<OplogKeyEntryHandler>>();
+
+ServiceContext::ConstructorActionRegisterer oplogKeyEntryHandlerRegisterer{
+    "OplogKeyEntryHandler", [](ServiceContext* serviceContext) {
+        auto oplogKeyEntryHandler = std::make_unique<OplogKeyEntryHandler>();
+        OplogKeyEntryHandler::set(serviceContext, std::move(oplogKeyEntryHandler));
+    }};
 
 }  // namespace
 
-ClusterUMCErrorWithWriteConcernErrorInfo::ClusterUMCErrorWithWriteConcernErrorInfo(
-    Status mainError, WriteConcernErrorDetail writeConcernError)
-    : _mainError(std::move(mainError)), _wcError(std::move(writeConcernError)) {}
-
-std::shared_ptr<const ErrorExtraInfo> ClusterUMCErrorWithWriteConcernErrorInfo::parse(
-    const BSONObj& doc) {
-    uasserted(1004350,
-              fmt::format("ClusterUMCErrorWithWriteConcernErrorInfo should never appear in command "
-                          "result BSON object: {}",
-                          doc.toString()));
-    return {};
+Status OplogKeyEntryHandler::applyOplogEntry(OperationContext* opCtx,
+                                             const repl::OplogEntry& oplogEntry) {
+    return Status::OK();
 }
 
-void ClusterUMCErrorWithWriteConcernErrorInfo::serialize(BSONObjBuilder* bob) const {
-    _mainError.serialize(bob);
-    bob->append("writeConcernError", _wcError.toBSON());
+void OplogKeyEntryHandler::set(ServiceContext* serviceContext,
+                               std::unique_ptr<OplogKeyEntryHandler> handler) {
+    auto& handle = oplogKeyEntryHandler(serviceContext);
+    handle = std::move(handler);
 }
 
-const Status& ClusterUMCErrorWithWriteConcernErrorInfo::getMainStatus() const {
-    return _mainError;
-}
-
-const WriteConcernErrorDetail&
-ClusterUMCErrorWithWriteConcernErrorInfo::getWriteConcernErrorDetail() const {
-    return _wcError;
+OplogKeyEntryHandler* OplogKeyEntryHandler::get(ServiceContext* serviceContext) {
+    return oplogKeyEntryHandler(serviceContext).get();
 }
 
 }  // namespace mongo
