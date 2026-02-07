@@ -44,6 +44,7 @@
 #include "mongo/db/global_catalog/chunk_manager.h"
 #include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/global_catalog/type_collection_common_types_gen.h"
+#include "mongo/db/hierarchical_cancelable_operation_context_factory.h"
 #include "mongo/db/index_builds/index_builds_coordinator_mock.h"
 #include "mongo/db/keypattern.h"
 #include "mongo/db/op_observer/op_observer.h"
@@ -164,7 +165,7 @@ public:
         std::shared_ptr<executor::TaskExecutor> executor,
         std::shared_ptr<executor::TaskExecutor> cleanupExecutor,
         CancellationToken cancelToken,
-        CancelableOperationContextFactory opCtxFactory,
+        std::shared_ptr<HierarchicalCancelableOperationContextFactory> opCtxFactory,
         const mongo::Date_t& startConfigTxnCloneTime) override {
         return makeReadyFutureWith([] {}).semi();
     };
@@ -877,16 +878,20 @@ public:
             opCtx, recipientDoc.getTempReshardingNss(), options);
     }
 
-    SemiFuture<void> notifyToStartCloningUsingCmd(const CancellationToken& cancelToken,
-                                                  RecipientStateMachine& recipient,
+    SemiFuture<void> notifyToStartCloningUsingCmd(RecipientStateMachine& recipient,
                                                   const ReshardingRecipientDocument& recipientDoc) {
-        auto recipientFields = _makeRecipientFields(recipientDoc);
-        return recipient.fulfillAllDonorsPreparedToDonate(
-            {recipientFields.getCloneTimestamp().get(),
-             recipientFields.getApproxDocumentsToCopy().get(),
-             recipientFields.getApproxBytesToCopy().get(),
-             recipientFields.getDonorShards()},
-            cancelToken);
+        while (true) {
+            try {
+                auto recipientFields = _makeRecipientFields(recipientDoc);
+                return recipient.fulfillAllDonorsPreparedToDonate(
+                    {recipientFields.getCloneTimestamp().get(),
+                     recipientFields.getApproxDocumentsToCopy().get(),
+                     recipientFields.getApproxBytesToCopy().get(),
+                     recipientFields.getDonorShards()});
+            } catch (const ExceptionFor<ErrorCodes::PrimaryOnlyServiceInitializing>&) {
+                sleepmillis(100);
+            }
+        }
     }
 
     void notifyToStartCloning(OperationContext* opCtx,
@@ -896,15 +901,7 @@ public:
             resharding::gFeatureFlagReshardingCloneNoRefresh.isEnabledAndIgnoreFCVUnsafe();
 
         if (driveCloneNoRefresh) {
-            CancellationSource cancelSource;
-            SemiFuture<void> future =
-                notifyToStartCloningUsingCmd(cancelSource.token(), recipient, recipientDoc);
-            // There is a race here where the recipient can fulfill the future before cancelSource
-            // is canceled. Due to this we need to check for Status::OK() as well as
-            // CallbackCanceled.
-            cancelSource.cancel();
-            auto status = future.getNoThrow();
-            ASSERT_TRUE(status == ErrorCodes::CallbackCanceled || status == Status::OK()) << status;
+            auto ignore = notifyToStartCloningUsingCmd(recipient, recipientDoc);
         } else {
             _onReshardingFieldsChanges(
                 opCtx, recipient, recipientDoc, CoordinatorStateEnum::kCloning);
