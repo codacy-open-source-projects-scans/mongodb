@@ -44,15 +44,18 @@
 
 namespace mongo {
 
+enum class EngineChoice { kClassic, kSbe };
+
 /*
- * Returns true if SBE should be used given the query details. An optional query solution may be
+ * Returns enum indicating engine choice given the query details. An optional query solution may be
  * passed in, which will be analyzed for SBE eligibility depending on the plan shape.
  */
-bool useSbe(OperationContext* opCtx,
-            const MultipleCollectionAccessor& collections,
-            CanonicalQuery* cq,
-            Pipeline* pipeline,
-            bool needsMerge,
-            std::unique_ptr<QueryPlannerParams> plannerParams);
+EngineChoice chooseEngine(OperationContext* opCtx,
+                          const MultipleCollectionAccessor& collections,
+                          CanonicalQuery* cq,
+                          Pipeline* pipeline,
+                          bool needsMerge,
+                          std::unique_ptr<QueryPlannerParams> plannerParams,
+                          const QuerySolution* solution = nullptr);
 
 }  // namespace mongo
