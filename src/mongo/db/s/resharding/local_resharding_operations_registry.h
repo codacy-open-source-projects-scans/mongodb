@@ -29,18 +29,33 @@
 
 #pragma once
 
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/s/resharding/resharding_metrics_common.h"
+#include "mongo/s/resharding/common_types_gen.h"
+#include "mongo/stdx/unordered_set.h"
 #include "mongo/util/modules.h"
+#include "mongo/util/observable_mutex.h"
 
-#include <cstdint>
+MONGO_MOD_PUBLIC;
 
 namespace mongo {
+class LocalReshardingOperationsRegistry {
+public:
+    using Role = ReshardingMetricsCommon::Role;
+    struct Operation {
+        CommonReshardingMetadata metadata;
+        stdx::unordered_set<Role> roles;
+    };
 
-/**
- * Stores the last committed size and count values for a collection.
- */
-struct MONGO_MOD_PUBLIC CollectionSizeCount {
-    int64_t count{0};
-    int64_t size{0};
+    static LocalReshardingOperationsRegistry& get();
+
+    void registerOperation(Role role, const CommonReshardingMetadata& metadata);
+    void unregisterOperation(Role role, const CommonReshardingMetadata& metadata);
+    boost::optional<Operation> getOperation(const NamespaceString& nss) const;
+
+private:
+    mutable ObservableMutex<std::shared_mutex> _mutex;
+    stdx::unordered_map<NamespaceString, Operation> _operations;
 };
-
 }  // namespace mongo

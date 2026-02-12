@@ -175,6 +175,11 @@ public:
     virtual bool supportsCrossShardTransactions() const = 0;
 
     /**
+     * If true, the provider supports storing findAndModify pre/post-images in the image collection.
+     */
+    virtual bool supportsFindAndModifyImageCollection() const = 0;
+
+    /**
      * If true, the provider supports starting the oplog cap maintainer thread and oplog sampling.
      */
     virtual bool supportsOplogSampling() const = 0;
@@ -204,6 +209,11 @@ public:
      * If true, the provider supports compaction.
      */
     virtual bool supportsCompaction() const = 0;
+
+    /**
+     * If true, this persistence provider expects collection/index table creation to be timestamped.
+     */
+    virtual bool shouldTimestampTableCreations() const = 0;
 };
 
 }  // namespace rss
