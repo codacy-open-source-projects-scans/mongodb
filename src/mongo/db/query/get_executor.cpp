@@ -716,11 +716,6 @@ private:
             return nullptr;
         }
 
-        if (cq.getExplain().has_value()) {
-            // Explain for executionStats cannot resume a partially executed MultiPlanStage.
-            return nullptr;
-        }
-
         auto& solutions = rResult.solutions;
         auto& maybeExplainData = rResult.maybeExplainData;
 
@@ -1210,9 +1205,6 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind
     });
 
     if (MONGO_unlikely(feature_flags::gFeatureFlagGetExecutorDeferredEngineChoice.isEnabled())) {
-        tassert(11742310,
-                "Unexpected subplanning query for get executor deferred engine choice",
-                !SubplanStage::needsSubplanning(*canonicalQuery.get()));
         return exec_deferred_engine_choice::getExecutorFindDeferredEngineChoice(
             opCtx,
             collections,

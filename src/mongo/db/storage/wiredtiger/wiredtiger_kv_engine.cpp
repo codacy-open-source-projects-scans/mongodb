@@ -49,7 +49,6 @@
 #include "mongo/db/storage/journal_listener.h"
 #include "mongo/db/storage/key_format.h"
 #include "mongo/db/storage/kv_backup_block.h"
-#include "mongo/db/storage/snapshot_window_options_gen.h"
 #include "mongo/db/storage/storage_file_util.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
@@ -656,7 +655,7 @@ WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
                                        ClockSource* clockSource,
                                        WiredTigerConfig wtConfig,
                                        const WiredTigerExtensions& wtExtensions,
-                                       const rss::PersistenceProvider& provider,
+                                       rss::PersistenceProvider& provider,
                                        bool repair,
                                        bool isReplSet,
                                        bool shouldRecoverFromOplogAsStandalone,
@@ -670,7 +669,8 @@ WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
       _isReplSet(isReplSet),
       _shouldRecoverFromOplogAsStandalone(shouldRecoverFromOplogAsStandalone),
       _inStandaloneMode(inStandaloneMode),
-      _supportsTableLogging(provider.supportsTableLogging()) {
+      _supportsTableLogging(provider.supportsTableLogging()),
+      _provider(provider) {
     _pinnedOplogTimestamp.store(Timestamp::max().asULL());
     boost::filesystem::path journalPath = path;
     journalPath /= "journal";
@@ -787,7 +787,7 @@ WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
         // We do not maintain any snapshot history for the ephemeral storage engine in
         // production because replication and sharded transactions do not currently run on the
         // inMemory engine. It is live in testing, however.
-        minSnapshotHistoryWindowInSeconds.store(0);
+        _provider.setMinSnapshotHistoryWindowInSeconds(0);
     }
 
     // The WT size storer table is only used if the replicated fastcount collection is disabled.
@@ -1635,7 +1635,6 @@ Status WiredTigerKVEngine::_createRecordStore(const rss::PersistenceProvider& pr
                                               const BSONObj& storageEngineCollectionOptions,
                                               boost::optional<std::string> customBlockCompressor) {
     auto& wtRu = WiredTigerRecoveryUnit::get(ru);
-    auto& session = *wtRu.getSessionNoTxn();
 
     WiredTigerRecordStore::WiredTigerTableConfig wtTableConfig;
     wtTableConfig.keyFormat = keyFormat;
@@ -1676,7 +1675,7 @@ Status WiredTigerKVEngine::_createRecordStore(const rss::PersistenceProvider& pr
                 "uri"_attr = uri,
                 "config"_attr = config);
     auto ensuredIdent = _ensureIdentPath(ident);
-    return wtRCToStatus(session.create(uri.c_str(), config.c_str()), session);
+    return WiredTigerUtil::createTable(wtRu, uri.c_str(), config.c_str());
 }
 
 Status WiredTigerKVEngine::importRecordStore(RecoveryUnit& ru,
@@ -1710,6 +1709,9 @@ Status WiredTigerKVEngine::recoverOrphanedIdent(const rss::PersistenceProvider& 
     return {ErrorCodes::CommandNotSupported, "Orphan file recovery is not supported on Windows"};
 #else
     invariant(_inRepairMode);
+
+    // This method must always be called with an active WriteUnitOfWork.
+    invariant(ru.inUnitOfWork());
 
     // Moves the data file to a temporary name so that a new RecordStore can be created with the
     // same ident name. We will delete the new empty collection and rename the data file back so
@@ -1993,7 +1995,6 @@ std::unique_ptr<RecordStore> WiredTigerKVEngine::makeTemporaryRecordStore(Recove
                                                                           StringData ident,
                                                                           KeyFormat keyFormat) {
     auto& wtRu = WiredTigerRecoveryUnit::get(ru);
-    auto& session = *wtRu.getSessionNoTxn();
 
     WiredTigerRecordStore::WiredTigerTableConfig wtTableConfig;
     wtTableConfig.keyFormat = keyFormat;
@@ -2013,7 +2014,7 @@ std::unique_ptr<RecordStore> WiredTigerKVEngine::makeTemporaryRecordStore(Recove
                 "config"_attr = config);
     {
         auto ensuredIdent = _ensureIdentPath(ident);
-        uassertStatusOK(wtRCToStatus(session.create(uri.c_str(), config.c_str()), session));
+        uassertStatusOK(WiredTigerUtil::createTable(wtRu, uri.c_str(), config.c_str()));
     }
 
     return getTemporaryRecordStore(ru, ident, keyFormat);
@@ -2504,23 +2505,23 @@ void WiredTigerKVEngine::setOldestTimestamp(Timestamp newOldestTimestamp, bool f
 
 Timestamp WiredTigerKVEngine::_calculateHistoryLagFromStableTimestamp(Timestamp stableTimestamp) {
     // The oldest_timestamp should lag behind the stable_timestamp by
-    // 'minSnapshotHistoryWindowInSeconds' seconds.
+    // PersistenceProvider::getMinSnapshotHistoryWindowInSeconds() seconds.
 
     if (isEphemeral() && !TestingProctor::instance().isEnabled()) {
         // No history should be maintained for an ephemeral engine because it is not used yet.
-        invariant(minSnapshotHistoryWindowInSeconds.load() == 0);
+        invariant(_provider.getMinSnapshotHistoryWindowInSeconds() == 0);
     }
 
-    if (stableTimestamp.getSecs() <
-        static_cast<unsigned>(minSnapshotHistoryWindowInSeconds.load())) {
+    const int historyWindowInSeconds = _provider.getMinSnapshotHistoryWindowInSeconds();
+
+    if (stableTimestamp.getSecs() < static_cast<unsigned>(historyWindowInSeconds)) {
         // The history window is larger than the timestamp history thus far. We must wait for
         // the history to reach the window size before moving oldest_timestamp forward. This
         // should only happen in unit tests.
         return Timestamp();
     }
 
-    Timestamp calculatedOldestTimestamp(stableTimestamp.getSecs() -
-                                            minSnapshotHistoryWindowInSeconds.load(),
+    Timestamp calculatedOldestTimestamp(stableTimestamp.getSecs() - historyWindowInSeconds,
                                         stableTimestamp.getInc());
 
     if (calculatedOldestTimestamp.asULL() <= _oldestTimestamp.load()) {
