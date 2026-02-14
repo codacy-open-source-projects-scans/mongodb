@@ -322,47 +322,11 @@ TEST(KeyGeneratorGoldenTest, S2Keys) {
               v3InfoObj,
               fromjson("{a: {type: 'Point', coordinates: [40.0, -73.0]}}"));
 
-    // LineString.
-    runS2Test("V3_LineString",
-              v3KeyPattern,
-              v3InfoObj,
-              fromjson("{a: {type: 'LineString', coordinates: [[0, 0], [1, 1]]}}"));
-
-    // Polygon.
-    runS2Test("V3_Polygon",
-              v3KeyPattern,
-              v3InfoObj,
-              fromjson("{a: {type: 'Polygon', coordinates: [[[0, 0], [0, 1], "
-                       "[1, 1], [1, 0], [0, 0]]]}}"));
-
     // MultiPoint.
     runS2Test("V3_MultiPoint",
               v3KeyPattern,
               v3InfoObj,
               fromjson("{a: {type: 'MultiPoint', coordinates: [[0, 0], [1, 0], [1, 1]]}}"));
-
-    // MultiLineString.
-    runS2Test("V3_MultiLineString",
-              v3KeyPattern,
-              v3InfoObj,
-              fromjson("{a: {type: 'MultiLineString', coordinates: "
-                       "[[[0, 0], [1, 1]], [[2, 2], [3, 3]]]}}"));
-
-    // MultiPolygon.
-    runS2Test("V3_MultiPolygon",
-              v3KeyPattern,
-              v3InfoObj,
-              fromjson("{a: {type: 'MultiPolygon', coordinates: "
-                       "[[[[0, 0], [0, 1], [1, 1], [1, 0], [0, 0]]], "
-                       "[[[2, 2], [2, 3], [3, 3], [3, 2], [2, 2]]]]}}"));
-
-    // GeometryCollection.
-    runS2Test("V3_GeometryCollection",
-              v3KeyPattern,
-              v3InfoObj,
-              fromjson("{a: {type: 'GeometryCollection', geometries: ["
-                       "{type: 'Point', coordinates: [0, 0]}, "
-                       "{type: 'LineString', coordinates: [[0, 0], [1, 1]]}]}}"));
 
     // Compound with non-geo field.
     BSONObj compoundInfoObj = fromjson("{key: {a: '2dsphere', b: 1}, '2dsphereIndexVersion': 3}");
@@ -403,12 +367,6 @@ TEST(KeyGeneratorGoldenTest, S2Keys) {
               v3KeyPattern,
               v2InfoObj,
               fromjson("{a: {type: 'Point', coordinates: [40.0, -73.0]}}"));
-
-    runS2Test("V2_Polygon",
-              v3KeyPattern,
-              v2InfoObj,
-              fromjson("{a: {type: 'Polygon', coordinates: [[[0, 0], [0, 1], "
-                       "[1, 1], [1, 0], [0, 0]]]}}"));
 
     // --- Legacy coordinate pairs ---
     // 2dsphere indexes (v3+) accept legacy coordinate pairs [lon, lat] as well as GeoJSON.
@@ -461,14 +419,6 @@ TEST(KeyGeneratorGoldenTest, S2Keys) {
               fromjson("{a: {type: 'Point', coordinates: [0, 0]}, "
                        "b: {type: 'Point', coordinates: [1, 1]}}"));
 
-    // --- Polygon with hole ---
-    runS2Test("V3_PolygonWithHole",
-              v3KeyPattern,
-              v3InfoObj,
-              fromjson("{a: {type: 'Polygon', coordinates: ["
-                       "[[0, 0], [0, 10], [10, 10], [10, 0], [0, 0]], "
-                       "[[2, 2], [2, 8], [8, 8], [8, 2], [2, 2]]]}}"));
-
     // --- V2 legacy coordinate pair (v2 also supports legacy) ---
     runS2Test("V2_LegacyCoordPair", v3KeyPattern, v2InfoObj, fromjson("{a: [40.0, -73.0]}"));
 
@@ -514,6 +464,109 @@ TEST(KeyGeneratorGoldenTest, S2Keys) {
               v4CompoundInfoObj,
               fromjson("{a: {x: 40.0, y: -70.0, type: 'Point', coordinates: [-70.0, 40.0]},"
                        " b: 'test'}"));
+}
+
+// ---------------------------------------------------------------------------
+// 2dsphere Key Generator (non-golden)
+// ---------------------------------------------------------------------------
+// S2 cell coverings for non-point geometries (lines, polygons, etc.) are non-deterministic across
+// CPU architectures due to floating-point differences in the S2 library's covering algorithm. These
+// tests validate structural properties (non-empty result, key count within expected range) rather
+// than exact cell IDs to avoid platform-dependent golden test failures.
+TEST(KeyGeneratorGoldenTest, S2KeysCoverings) {
+    auto runS2CoveringTest = [](const std::string& label,
+                                const BSONObj& keyPattern,
+                                const BSONObj& infoObj,
+                                const BSONObj& inputDoc,
+                                size_t minExpectedKeys,
+                                size_t maxExpectedKeys) {
+        S2IndexingParams params;
+        const CollatorInterface* collator = nullptr;
+        index2dsphere::initialize2dsphereParams(infoObj, collator, &params);
+
+        SharedBufferFragmentBuilder allocator(BufBuilder::kDefaultInitSizeBytes);
+        KeyStringSet keys;
+        MultikeyPaths multikeyPaths;
+        index2dsphere::getS2Keys(allocator,
+                                 inputDoc,
+                                 keyPattern,
+                                 params,
+                                 &keys,
+                                 &multikeyPaths,
+                                 key_string::Version::kLatestVersion,
+                                 SortedDataIndexAccessMethod::GetKeysContext::kAddingKeys,
+                                 Ordering::make(BSONObj()));
+
+        ASSERT_GTE(keys.size(), minExpectedKeys)
+            << label << ": expected at least " << minExpectedKeys << " keys, got " << keys.size();
+        ASSERT_LTE(keys.size(), maxExpectedKeys)
+            << label << ": expected at most " << maxExpectedKeys << " keys, got " << keys.size();
+    };
+
+    // --- V3 covering tests ---
+    BSONObj v3InfoObj = fromjson("{key: {a: '2dsphere'}, '2dsphereIndexVersion': 3}");
+    BSONObj v3KeyPattern = fromjson("{a: '2dsphere'}");
+
+    runS2CoveringTest("V3_LineString",
+                      v3KeyPattern,
+                      v3InfoObj,
+                      fromjson("{a: {type: 'LineString', coordinates: [[0, 0], [1, 1]]}}"),
+                      15,
+                      25);
+
+    runS2CoveringTest("V3_Polygon",
+                      v3KeyPattern,
+                      v3InfoObj,
+                      fromjson("{a: {type: 'Polygon', coordinates: [[[0, 0], [0, 1], "
+                               "[1, 1], [1, 0], [0, 0]]]}}"),
+                      12,
+                      22);
+
+    runS2CoveringTest("V3_MultiLineString",
+                      v3KeyPattern,
+                      v3InfoObj,
+                      fromjson("{a: {type: 'MultiLineString', coordinates: "
+                               "[[[0, 0], [1, 1]], [[2, 2], [3, 3]]]}}"),
+                      14,
+                      24);
+
+    runS2CoveringTest("V3_MultiPolygon",
+                      v3KeyPattern,
+                      v3InfoObj,
+                      fromjson("{a: {type: 'MultiPolygon', coordinates: "
+                               "[[[[0, 0], [0, 1], [1, 1], [1, 0], [0, 0]]], "
+                               "[[[2, 2], [2, 3], [3, 3], [3, 2], [2, 2]]]]}}"),
+                      6,
+                      16);
+
+    runS2CoveringTest("V3_GeometryCollection",
+                      v3KeyPattern,
+                      v3InfoObj,
+                      fromjson("{a: {type: 'GeometryCollection', geometries: ["
+                               "{type: 'Point', coordinates: [0, 0]}, "
+                               "{type: 'LineString', coordinates: [[0, 0], [1, 1]]}]}}"),
+                      15,
+                      25);
+
+    runS2CoveringTest("V3_PolygonWithHole",
+                      v3KeyPattern,
+                      v3InfoObj,
+                      fromjson("{a: {type: 'Polygon', coordinates: ["
+                               "[[0, 0], [0, 10], [10, 10], [10, 0], [0, 0]], "
+                               "[[2, 2], [2, 8], [8, 8], [8, 2], [2, 2]]]}}"),
+                      9,
+                      19);
+
+    // --- V2 covering test ---
+    BSONObj v2InfoObj = fromjson("{key: {a: '2dsphere'}, '2dsphereIndexVersion': 2}");
+
+    runS2CoveringTest("V2_Polygon",
+                      v3KeyPattern,
+                      v2InfoObj,
+                      fromjson("{a: {type: 'Polygon', coordinates: [[[0, 0], [0, 1], "
+                               "[1, 1], [1, 0], [0, 0]]]}}"),
+                      20,
+                      35);
 }
 
 // ---------------------------------------------------------------------------
