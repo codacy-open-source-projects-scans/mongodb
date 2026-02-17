@@ -138,29 +138,8 @@ CollectionSizeCount ReplicatedFastCountManager::find(const UUID& uuid) const {
     return {};
 }
 
-void ReplicatedFastCountManager::flush(OperationContext* opCtx) {
-    const absl::flat_hash_map<UUID, StoredSizeCount> dirtyMetadata = _getSnapshotOfDirtyMetadata();
-
-    if (MONGO_unlikely(hangAfterReplicatedFastCountSnapshot.shouldFail())) {
-        hangAfterReplicatedFastCountSnapshot.pauseWhileSet();
-    }
-
-    auto acquisition = _acquireFastCountCollection(opCtx);
-    uassert(ErrorCodes::NamespaceNotFound, "Expected fastcount collection to exist", acquisition);
-
-    const CollectionPtr& fastCountColl = acquisition->getCollectionPtr();
-    invariant(fastCountColl,
-              str::stream()
-                  << "Expected to acquire fastcount store as a collection, not a view. isView : "
-                  << acquisition->isView());
-
-    try {
-        _doFlush(opCtx, fastCountColl, dirtyMetadata);
-    } catch (const DBException& ex) {
-        LOGV2_WARNING(7397500,
-                      "Failed to persist collection sizeCount metadata",
-                      "error"_attr = ex.toStatus());
-    }
+void ReplicatedFastCountManager::runIteration_ForTest(OperationContext* opCtx) {
+    _runIteration(opCtx);
 }
 
 void ReplicatedFastCountManager::disablePeriodicWrites_ForTest() {
@@ -185,7 +164,7 @@ ReplicatedFastCountManager::_getSnapshotOfDirtyMetadata() {
     return dirtyMetadata;
 }
 
-void ReplicatedFastCountManager::_doFlush(
+void ReplicatedFastCountManager::_flush(
     OperationContext* opCtx,
     const CollectionPtr& coll,
     const absl::flat_hash_map<UUID, StoredSizeCount>& dirtyMetadata) {
@@ -231,7 +210,7 @@ void ReplicatedFastCountManager::_runBackgroundThreadOnTimer(OperationContext* o
         }
 
         try {
-            flush(opCtx);
+            _runIteration(opCtx);
         } catch (const DBException& ex) {
             if (ex.code() == ErrorCodes::InterruptedDueToReplStateChange &&
                 !_isDisabled.loadRelaxed()) {
@@ -245,6 +224,31 @@ void ReplicatedFastCountManager::_runBackgroundThreadOnTimer(OperationContext* o
                 continue;
             }
         }
+    }
+}
+
+void ReplicatedFastCountManager::_runIteration(OperationContext* opCtx) {
+    const absl::flat_hash_map<UUID, StoredSizeCount> dirtyMetadata = _getSnapshotOfDirtyMetadata();
+
+    if (MONGO_unlikely(hangAfterReplicatedFastCountSnapshot.shouldFail())) {
+        hangAfterReplicatedFastCountSnapshot.pauseWhileSet();
+    }
+
+    auto acquisition = _acquireFastCountCollection(opCtx);
+    uassert(ErrorCodes::NamespaceNotFound, "Expected fastcount collection to exist", acquisition);
+
+    const CollectionPtr& fastCountColl = acquisition->getCollectionPtr();
+    invariant(fastCountColl,
+              str::stream()
+                  << "Expected to acquire fastcount store as a collection, not a view. isView : "
+                  << acquisition->isView());
+
+    try {
+        _flush(opCtx, fastCountColl, dirtyMetadata);
+    } catch (const DBException& ex) {
+        LOGV2_WARNING(7397500,
+                      "Failed to persist collection sizeCount metadata",
+                      "error"_attr = ex.toStatus());
     }
 }
 

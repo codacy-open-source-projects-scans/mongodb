@@ -56,8 +56,27 @@ boost::optional<Timestamp> AttachedPersistenceProvider::getSentinelDataTimestamp
     return boost::none;
 }
 
-std::string AttachedPersistenceProvider::getWiredTigerConfig() const {
-    return "";
+std::string AttachedPersistenceProvider::getWiredTigerConfig(
+    bool wtInMemory, bool wtLogEnabled, const std::string& wtLogCompressor) const {
+
+    StringBuilder ss;
+
+    if (wtInMemory) {
+        invariant(!wtLogEnabled);
+        // If we've requested an ephemeral instance we store everything into memory instead of
+        // backing it onto disk. Logging is not supported in this instance, thus we also have to
+        // disable it.
+        ss << "in_memory=true,log=(enabled=false),";
+    } else {
+        if (wtLogEnabled) {
+            ss << "log=(enabled=true,remove=true,path=journal,compressor=";
+            ss << wtLogCompressor << "),";
+        } else {
+            ss << "log=(enabled=false),";
+        }
+    }
+
+    return ss.str();
 }
 
 std::string AttachedPersistenceProvider::getMainWiredTigerTableSettings() const {
@@ -97,10 +116,6 @@ bool AttachedPersistenceProvider::shouldDelayDataAccessDuringStartup() const {
 }
 
 bool AttachedPersistenceProvider::shouldAvoidDuplicateCheckpoints() const {
-    return false;
-}
-
-bool AttachedPersistenceProvider::shouldForceUpdateWithFullDocument() const {
     return false;
 }
 

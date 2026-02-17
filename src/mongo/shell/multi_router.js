@@ -612,7 +612,6 @@ function MultiRouterMongo(uri, encryptedDBClientCallback, apiParameters) {
 
     this.tojson = this.toString;
 
-    // TODO SERVER-116289 Remove this helper
     this.hasPrimaryMongoRefreshed = false;
     this.refreshPrimaryMongoIfNeeded = function () {
         if (!this.hasPrimaryMongoRefreshed) {
@@ -634,9 +633,15 @@ function MultiRouterMongo(uri, encryptedDBClientCallback, apiParameters) {
     return new Proxy(this, {
         get(target, prop, proxy) {
             // If the proxy is disabled by the test, always run the command on the pinned mongos (primary mongo).
-            // TODO (SERVER-116289) This refresh is required because some tests keep failing in spite all commands being routed to a single mongos.
-            // Remove this refresh (if possible) once the underling reason is solved.
+
             if (jsTest.options().pinToSingleMongos) {
+                // This refresh is a workaround to a fact that evergreen runs core tests in batches.
+                // Pinning to a single mongos is only valid for the current test, but not for the other tests in the batch.
+                // As consequence, the primary mongos might have a stale routing table for a specific database or collection
+                // that is shared by the tests of the batch.
+                // This is not a problem unless we have a known bug that occurs due to that staleness.
+                // Given the flag is to prevent known bugs from polluting the test results,
+                // we ensure the primary mongos to be always up to date.
                 target.refreshPrimaryMongoIfNeeded();
                 const value = target.primaryMongo[prop];
                 if (typeof value === "function") {

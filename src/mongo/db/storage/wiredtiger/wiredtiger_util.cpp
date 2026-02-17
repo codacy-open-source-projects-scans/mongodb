@@ -1522,7 +1522,11 @@ Status WiredTigerUtil::createTable(WiredTigerRecoveryUnit& ru,
     invariant(ru.inUnitOfWork());
     auto& session = *ru.getSessionNoTxn();
     LOGV2(51780, "create table", "uri"_attr = uri, "config"_attr = config);
-    return wtRCToStatus(session.create(uri, config), session);
+    const auto status = wtRCToStatus(session.create(uri, config), session);
+    if (status.isOK()) {
+        ru.onCreateTable(uri);
+    }
+    return status;
 }
 
 }  // namespace mongo

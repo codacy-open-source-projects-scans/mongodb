@@ -47,8 +47,7 @@ protected:
 
         _fastCountManager = &ReplicatedFastCountManager::get(_opCtx->getServiceContext());
         // Allow for control over when we write to our internal collection for testing. We only
-        // write to the internal collection when we explicitly call
-        // ReplicatedFastCountManager::flush().
+        // write to the internal collection when we explicitly call runIteration_ForTest().
         _fastCountManager->disablePeriodicWrites_ForTest();
         _fastCountManager->startup(_opCtx);
 
@@ -236,7 +235,7 @@ TEST_F(ReplicatedFastCountTest, DirtyMetadataWrittenToInternalCollection) {
         _opCtx, uuid2, /*expectPersisted=*/false, /*expectedCount=*/0, /*expectedSize=*/0);
 
     // Manually trigger an iteration to write dirty metadata to the internal collection.
-    _fastCountManager->flush(_opCtx);
+    _fastCountManager->runIteration_ForTest(_opCtx);
 
     checkFastCountMetadataInInternalCollection(_opCtx,
                                                uuid1,
@@ -390,7 +389,7 @@ TEST_F(ReplicatedFastCountTest, DirtyWriteNotLostIfWrittenAfterMetadataSnapshot)
             // Hang after we make a copy of the _metadata map which should include our initial
             // inserts to the collection, but before we actually write to disk and change our dirty
             // flag for the collection we wrote to.
-            _fastCountManager->flush(opCtxForThread);
+            _fastCountManager->runIteration_ForTest(opCtxForThread);
         });
 
         fp->waitForTimesEntered(initialTimesEntered + 1);
@@ -416,7 +415,7 @@ TEST_F(ReplicatedFastCountTest, DirtyWriteNotLostIfWrittenAfterMetadataSnapshot)
 
     // If the dirty metadata wasn't incorrectly cleared, this flush should persist our second batch
     // of inserts.
-    _fastCountManager->flush(_opCtx);
+    _fastCountManager->runIteration_ForTest(_opCtx);
 
     // Verify that all of our writes were persisted to disk.
     checkFastCountMetadataInInternalCollection(_opCtx,

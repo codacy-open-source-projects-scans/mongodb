@@ -44,6 +44,7 @@
 #include "mongo/db/query/bson/bson_helper.h"
 #include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
 #include "mongo/db/repl/oplog_entry.h"
+#include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
 
@@ -169,6 +170,10 @@ std::unique_ptr<MatchExpression> buildOperationFilter(
         BSON("ns" << nsMatch.firstElement() << "$nor"
                   << BSON_ARRAY(BSON("op" << "n") << BSON("op" << "c") << BSON("op" << "ci")
                                                   << BSON("op" << "cd") << BSON("op" << "km"))));
+
+    static_assert(idlEnumCount<repl::OpTypeEnum> == 8,
+                  "unexpected number of oplog entry types - when adding a new oplog entry type, "
+                  "please make sure that the change stream oplog filter handles it correctly!");
 
     BSONObj cmdMatch = DocumentSourceChangeStream::getCmdNsMatchObjForChangeStream(expCtx);
 

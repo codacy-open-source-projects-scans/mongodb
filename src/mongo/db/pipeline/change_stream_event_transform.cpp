@@ -626,6 +626,11 @@ Document ChangeStreamDefaultEventTransformation::applyTransformation(const Docum
             tasserted(11945200, "Change stream encountered unexpected 'km' oplog entry");
         }
         default: {
+            static_assert(
+                idlEnumCount<repl::OpTypeEnum> == 8,
+                "unexpected number of oplog entry types - when adding a new oplog entry type, "
+                "please make sure that the change stream event transformer handles it correctly!");
+
             throwUnsupportedOplogEntryType(input, "unhandled case" /* error */);
         }
     }

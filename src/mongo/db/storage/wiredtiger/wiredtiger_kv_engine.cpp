@@ -38,7 +38,6 @@
 #include "mongo/db/client.h"
 #include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/index_names.h"
-#include "mongo/db/replicated_fast_count/replicated_fast_count_manager.h"
 #include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
@@ -369,22 +368,6 @@ std::string generateWTOpenConfigString(const WiredTigerKVEngineBase::WiredTigerC
     ss << "config_base=false,";
     ss << "statistics=(" << wtConfig.statisticsSetting << "),";
 
-    // TODO: SERVER-109794 move this block into the corresponding persistence providers.
-    if (wtConfig.inMemory) {
-        invariant(!wtConfig.logEnabled);
-        // If we've requested an ephemeral instance we store everything into memory instead of
-        // backing it onto disk. Logging is not supported in this instance, thus we also have to
-        // disable it.
-        ss << "in_memory=true,log=(enabled=false),";
-    } else {
-        if (wtConfig.logEnabled) {
-            ss << "log=(enabled=true,remove=true,path=journal,compressor=";
-            ss << wtConfig.logCompressor << "),";
-        } else {
-            ss << "log=(enabled=false),";
-        }
-    }
-
     ss << providerConfig;
 
     ss << "builtin_extension_config=(zstd=(compression_level=" << wtConfig.zstdCompressorLevel
@@ -690,7 +673,10 @@ WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
     }
 
     std::string config = generateWTOpenConfigString(
-        _wtConfig, wtExtensions.getOpenExtensionsConfig(), provider.getWiredTigerConfig());
+        _wtConfig,
+        wtExtensions.getOpenExtensionsConfig(),
+        provider.getWiredTigerConfig(
+            _wtConfig.inMemory, _wtConfig.logEnabled, _wtConfig.logCompressor));
     LOGV2(22315, "Opening WiredTiger", "config"_attr = config);
 
     auto startTime = Date_t::now();
@@ -1173,10 +1159,6 @@ void WiredTigerKVEngine::flushAllFiles(OperationContext* opCtx, bool callerHolds
 
     // Immediately flush the size storer information to disk. When the node is fsync locked for
     // operations such as backup, it's imperative that we copy the most up-to-date data files.
-    if (!_sizeStorer) {
-        // TODO(SERVER-101413): Remove this once checkpointing and recovery is functional.
-        ReplicatedFastCountManager::get(opCtx->getServiceContext()).flush(opCtx);
-    }
     syncSizeInfo(true);
 
     // If there's no journal (ephemeral), we must checkpoint all of the data.
@@ -1593,9 +1575,8 @@ StatusWith<std::deque<std::string>> WiredTigerKVEngine::extendBackupCursor() {
 }
 
 void WiredTigerKVEngine::syncSizeInfo(bool sync) const {
-    if (!_sizeStorer) {
+    if (!_sizeStorer)
         return;
-    }
 
     while (true) {
         try {
@@ -1795,8 +1776,6 @@ std::unique_ptr<RecordStore> WiredTigerKVEngine::getRecordStore(OperationContext
                                                                 boost::optional<UUID> uuid) {
     std::unique_ptr<WiredTigerRecordStore> ret;
     auto& provider = rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider();
-    bool forceUpdateWithFullDocument =
-        options.forceUpdateWithFullDocument || provider.shouldForceUpdateWithFullDocument();
     if (options.isOplog) {
         const bool isLogged = WiredTigerUtil::useTableLogging(
             provider, nss, _isReplSet, _shouldRecoverFromOplogAsStandalone);
@@ -1812,7 +1791,7 @@ std::unique_ptr<RecordStore> WiredTigerKVEngine::getRecordStore(OperationContext
                                                  .tracksSizeAdjustments = true,
                                                  .isLogged = isLogged,
                                                  .forceUpdateWithFullDocument =
-                                                     forceUpdateWithFullDocument});
+                                                     options.forceUpdateWithFullDocument});
         getOplogManager()->stop();
         getOplogManager()->start(opCtx, *this, *ret, _isReplSet);
     } else {
@@ -1833,7 +1812,7 @@ std::unique_ptr<RecordStore> WiredTigerKVEngine::getRecordStore(OperationContext
             // preventing overwrites.
             .overwrite = options.allowOverwrite,
             .isLogged = isLogged,
-            .forceUpdateWithFullDocument = forceUpdateWithFullDocument,
+            .forceUpdateWithFullDocument = options.forceUpdateWithFullDocument,
             .inMemory = _wtConfig.inMemory,
             .sizeStorer = _sizeStorer.get(),
             .tracksSizeAdjustments = true,
@@ -1986,9 +1965,7 @@ std::unique_ptr<RecordStore> WiredTigerKVEngine::getTemporaryRecordStore(Recover
     params.keyFormat = keyFormat;
     params.overwrite = true;
     params.isLogged = isLogged;
-    auto& provider =
-        rss::ReplicatedStorageService::get(getGlobalServiceContext()).getPersistenceProvider();
-    params.forceUpdateWithFullDocument = provider.shouldForceUpdateWithFullDocument();
+    params.forceUpdateWithFullDocument = false;
     params.inMemory = _wtConfig.inMemory;
     // Temporary collections do not need to persist size information to the size storer.
     params.sizeStorer = nullptr;

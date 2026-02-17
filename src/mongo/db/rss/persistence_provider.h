@@ -71,7 +71,9 @@ public:
      * Additional configuration that should be added to the WiredTiger config string for the
      * 'wiredtiger_open' call.
      */
-    virtual std::string getWiredTigerConfig() const = 0;
+    virtual std::string getWiredTigerConfig(bool wtInMemory,
+                                            bool wtLogEnabled,
+                                            const std::string& wtLogCompressor) const = 0;
 
     /**
      * Additional configuration that should be added to the WiredTiger config string for creating a
@@ -131,14 +133,6 @@ public:
      * coordination by default.
      */
     virtual bool shouldAvoidDuplicateCheckpoints() const = 0;
-
-    /**
-     * If true, always do a full update of documents, instead of recording only the changes to
-     * represent an update.
-     *
-     * TODO SERVER-111602: remove this workaround.
-     */
-    virtual bool shouldForceUpdateWithFullDocument() const = 0;
 
     /**
      * If true, the storage provider supports the reuse of cursors in express path queries. Used to
