@@ -108,6 +108,7 @@ def resmoke_suite_test(
             "--log=evg",
             "--cedarReportFile=cedar_report.json",
             "--skipSymbolization",  # Symbolization is not yet functional, SERVER-103538
+            "--continueOnFailure",
         ],
         "//conditions:default": [],
     }) + select({
@@ -158,7 +159,6 @@ def resmoke_suite_test(
             "run",
             "--suites=$(location %s)" % native.package_relative_label(generated_config),
             "--multiversionDir=multiversion_binaries",
-            "--continueOnFailure",
             "--releasesFile=$(location //src/mongo/util/version:releases.yml)",
             "--archiveMode=directory",
             "--archiveLimitMb=500",

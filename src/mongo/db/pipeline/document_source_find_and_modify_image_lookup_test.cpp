@@ -57,6 +57,7 @@
 #include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
 #include "mongo/unittest/unittest.h"
+#include "mongo/util/duration.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
 
@@ -85,6 +86,10 @@ repl::OplogEntry makeOplogEntry(
     boost::optional<repl::OpTime> preImageOpTime = boost::none,
     boost::optional<repl::OpTime> postImageOpTime = boost::none,
     boost::optional<repl::RetryImageEnum> needsRetryImage = boost::none) {
+    // Set the mock oplog entry's wall clock time to less than the current time so that tests can
+    // verify later that the forged image noop oplog entry's wall clock time clock time is set to
+    // the current time instead of the findAndModify oplog entry's wall clock time.
+    auto wallClockTime = Date_t::now() - Milliseconds(1);
     return {
         repl::DurableOplogEntry(opTime,                           // optime
                                 opType,                           // opType
@@ -98,8 +103,8 @@ repl::OplogEntry makeOplogEntry(
                                 o2Field,                          // o2
                                 sessionInfo,                      // sessionInfo
                                 boost::none,                      // upsert
-                                Date_t(),                         // wall clock time
-                                stmtIds,                          // statement ids
+                                wallClockTime,
+                                stmtIds,         // statement ids
                                 repl::OpTime(),  // optime of previous write within same transaction
                                 preImageOpTime,  // pre-image optime
                                 postImageOpTime,    // post-image optime
@@ -358,19 +363,19 @@ TEST_F(FindAndModifyImageLookupTest, ShouldForgeImageEntryWhenMatchingImageDocIs
         const auto uuid = UUID::gen();
 
         // Define a findAndModify/update oplog entry with the 'needsRetryImage' field set.
-        const auto oplogEntryBson = makeOplogEntry(opTime,
-                                                   repl::OpTypeEnum::kUpdate,
-                                                   nss,
-                                                   uuid,
-                                                   BSON("$set" << BSON("a" << 1)),
-                                                   BSON("_id" << 1),
-                                                   sessionInfo,
-                                                   {stmtId},
-                                                   boost::none /* preImageOpTime */,
-                                                   boost::none /* postImageOpTime */,
-                                                   imageType)
-                                        .getEntry()
-                                        .toBSON();
+        const auto oplogEntry = makeOplogEntry(opTime,
+                                               repl::OpTypeEnum::kUpdate,
+                                               nss,
+                                               uuid,
+                                               BSON("$set" << BSON("a" << 1)),
+                                               BSON("_id" << 1),
+                                               sessionInfo,
+                                               {stmtId},
+                                               boost::none /* preImageOpTime */,
+                                               boost::none /* postImageOpTime */,
+                                               imageType)
+                                    .getEntry();
+        const auto oplogEntryBson = oplogEntry.toBSON();
 
         auto mock = exec::agg::MockStage::createForTest(Document(oplogEntryBson), getExpCtx());
         imageLookupStage->setSource(mock.get());
@@ -394,6 +399,9 @@ TEST_F(FindAndModifyImageLookupTest, ShouldForgeImageEntryWhenMatchingImageDocIs
         ASSERT_EQUALS(stmtId, stmtIds.front());
         ASSERT_EQUALS(ts - 1, forgedImageEntry.getTimestamp());
         ASSERT_EQUALS(1, forgedImageEntry.getTerm().value());
+        // Check that the wall clock time is set to the current time which should be larger than the
+        // the findAndModify oplog entry's wall clock time.
+        ASSERT_LT(oplogEntry.getWallClockTime(), forgedImageEntry.getWallClockTime());
 
         // The next doc should be the doc for the original findAndModify oplog entry with the
         // 'needsRetryImage' field removed and 'preImageOpTime'/'postImageOpTime' field appended.
@@ -608,16 +616,8 @@ TEST_F(FindAndModifyImageLookupTest,
         BSONObjBuilder applyOpsWithoutNeedsRetryImageBuilder;
         applyOpsWithoutNeedsRetryImageBuilder.append(
             "applyOps", BSON_ARRAY(insertOp.toBSON() << updateOpWithoutNeedsRetryImage.toBSON()));
-        auto expectedOplogEntryBson = makeOplogEntry(applyOpsOpTime,
-                                                     repl::OpTypeEnum::kCommand,
-                                                     {},
-                                                     oplogEntryUUID,
-                                                     applyOpsWithoutNeedsRetryImageBuilder.obj(),
-                                                     sessionInfo,
-                                                     {})
-                                          .getEntry()
-                                          .toBSON()
-                                          .addFields(BSON(commitTxnTsFieldName << commitTxnTs));
+        auto expectedOplogEntryBson = oplogEntryBson.addFields(BSON(
+            repl::OplogEntry::kObjectFieldName << applyOpsWithoutNeedsRetryImageBuilder.obj()));
 
         ASSERT_BSONOBJ_EQ(expectedOplogEntryBson, downConvertedOplogEntryBson);
 

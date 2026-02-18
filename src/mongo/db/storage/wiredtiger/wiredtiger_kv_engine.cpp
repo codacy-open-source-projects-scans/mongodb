@@ -38,6 +38,7 @@
 #include "mongo/db/client.h"
 #include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/index_names.h"
+#include "mongo/db/replicated_fast_count/replicated_fast_count_manager.h"
 #include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
@@ -511,13 +512,6 @@ Status WiredTigerKVEngineBase::insertIntoIdent(RecoveryUnit& ru,
     c->set_value(c, WiredTigerItem{value}.get());
 
     int rc = WT_OP_CHECK(wiredTigerCursorInsert(wtRu, c));
-    if (rc == WT_DUPLICATE_KEY)
-        // TODO (SERVER-109707): Find (or create) a new way to represent the case of a duplicate
-        // key.
-        return Status{
-            DuplicateKeyErrorInfo(BSONObj(), BSONObj(), BSONObj(), std::monostate(), boost::none),
-            "Key already exists in ident"};
-
     return wtRCToStatus(rc, cursor->session);
 }
 
@@ -1159,6 +1153,14 @@ void WiredTigerKVEngine::flushAllFiles(OperationContext* opCtx, bool callerHolds
 
     // Immediately flush the size storer information to disk. When the node is fsync locked for
     // operations such as backup, it's imperative that we copy the most up-to-date data files.
+    if (!_sizeStorer) {
+        if (gFeatureFlagReplicatedFastCount.isEnabledUseLastLTSFCVWhenUninitialized(
+                VersionContext::getDecoration(opCtx),
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+            // TODO(SERVER-101413): Remove this once checkpointing and recovery is functional.
+            ReplicatedFastCountManager::get(opCtx->getServiceContext()).flush(opCtx);
+        }
+    }
     syncSizeInfo(true);
 
     // If there's no journal (ephemeral), we must checkpoint all of the data.
@@ -1575,8 +1577,9 @@ StatusWith<std::deque<std::string>> WiredTigerKVEngine::extendBackupCursor() {
 }
 
 void WiredTigerKVEngine::syncSizeInfo(bool sync) const {
-    if (!_sizeStorer)
+    if (!_sizeStorer) {
         return;
+    }
 
     while (true) {
         try {

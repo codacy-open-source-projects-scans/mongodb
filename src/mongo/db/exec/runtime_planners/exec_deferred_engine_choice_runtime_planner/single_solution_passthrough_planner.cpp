@@ -53,7 +53,11 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> SingleSolutionPassthroughPl
             .plannerOptions = plannerOptions(),
         }),
         _querySolution.get());
-    return executorFromSolution(
-        engine, std::move(canonicalQuery), std::move(_querySolution), nullptr, pipeline);
+    return executorFromSolution(engine,
+                                std::move(canonicalQuery),
+                                std::move(_querySolution),
+                                nullptr,
+                                _plannerData.cachedPlanHash,
+                                pipeline);
 }
 }  // namespace mongo::exec_deferred_engine_choice

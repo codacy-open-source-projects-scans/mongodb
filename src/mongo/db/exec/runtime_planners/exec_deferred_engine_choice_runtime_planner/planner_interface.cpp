@@ -76,6 +76,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>
 DeferredEngineChoicePlannerInterface::_makeSbePlanExecutor(std::unique_ptr<CanonicalQuery> cq,
                                                            std::unique_ptr<QuerySolution> solution,
                                                            std::unique_ptr<MultiPlanStage> mps,
+                                                           boost::optional<size_t> cachedPlanHash,
                                                            Pipeline* pipeline) {
     plannerParams()->setTargetSbeStageBuilder(*cq, collections());
 
@@ -94,8 +95,6 @@ DeferredEngineChoicePlannerInterface::_makeSbePlanExecutor(std::unique_ptr<Canon
         ? search_helpers::getSearchRemoteExplains(expCtx, cq->cqPipeline())
         : nullptr;
 
-    // SERVER-117566 integrate with plan cache.
-    static const boost::optional<size_t> cachedPlanHash = boost::none;
     static const bool isFromPlanCache = false;
     stage_builder::prepareSlotBasedExecutableTree(opCtx(),
                                                   sbePlanAndData.first.get(),
@@ -133,12 +132,12 @@ DeferredEngineChoicePlannerInterface::executorFromSolution(
     std::unique_ptr<CanonicalQuery> cq,
     std::unique_ptr<QuerySolution> querySolution,
     std::unique_ptr<MultiPlanStage> mps,
+    boost::optional<size_t> cachedPlanHash,
     Pipeline* pipeline) {
-    // TODO SERVER-117636 implement multiplanning in new get executor.
     switch (engine) {
         case EngineChoice::kSbe:
             return _makeSbePlanExecutor(
-                std::move(cq), std::move(querySolution), std::move(mps), pipeline);
+                std::move(cq), std::move(querySolution), std::move(mps), cachedPlanHash, pipeline);
         case EngineChoice::kClassic: {
             auto expCtx = cq->getExpCtx();
             auto planStage = mps ? std::move(mps) : buildExecutableTree(*querySolution);
@@ -153,7 +152,7 @@ DeferredEngineChoicePlannerInterface::executorFromSolution(
                                             plannerOptions(),
                                             std::move(_nss),
                                             yieldPolicy(),
-                                            boost::none,
+                                            cachedPlanHash,
                                             PlanExplainerData{}));
         }
     }

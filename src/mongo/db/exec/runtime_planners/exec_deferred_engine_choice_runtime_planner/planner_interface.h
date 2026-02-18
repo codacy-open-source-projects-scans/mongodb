@@ -68,6 +68,7 @@ public:
         std::unique_ptr<CanonicalQuery> canonicalQuery,
         std::unique_ptr<QuerySolution> querySolution,
         std::unique_ptr<MultiPlanStage> mps,
+        boost::optional<size_t> cachedPlanHash,
         Pipeline* pipeline = nullptr);
 
     OperationContext* opCtx() {
@@ -102,6 +103,7 @@ private:
         std::unique_ptr<CanonicalQuery> canonicalQuery,
         std::unique_ptr<QuerySolution> querySolution,
         std::unique_ptr<MultiPlanStage> mps,
+        boost::optional<size_t> cachedPlanHash,
         Pipeline* pipeline);
 };
 

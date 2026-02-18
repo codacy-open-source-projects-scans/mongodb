@@ -28,15 +28,10 @@
  */
 
 #include "mongo/db/exec/classic/multi_plan.h"
+#include "mongo/db/exec/plan_cache_util.h"
 #include "mongo/db/exec/runtime_planners/exec_deferred_engine_choice_runtime_planner/planner_interface.h"
-#include "mongo/db/pipeline/sbe_pushdown.h"
 #include "mongo/db/query/engine_selection.h"
-#include "mongo/db/query/plan_executor_factory.h"
-#include "mongo/db/query/plan_ranking/plan_ranker.h"
 #include "mongo/db/query/plan_yield_policy_impl.h"
-#include "mongo/db/query/stage_builder/stage_builder_util.h"
-
-#include <absl/functional/bind_front.h>
 
 namespace mongo::exec_deferred_engine_choice {
 
@@ -47,7 +42,8 @@ MultiPlanner::MultiPlanner(PlannerData plannerData,
         cq()->getExpCtxRaw(),
         collections().getMainCollectionPtrOrAcquisition(),
         cq(),
-        absl::bind_front(&MultiPlanner::_cacheDependingOnPlan, this),
+        plan_cache_util::ClassicPlanCacheWriter{opCtx(),
+                                                collections().getMainCollectionPtrOrAcquisition()},
         boost::none /*replanReason*/);
     for (auto&& solution : solutions) {
         solution->indexFilterApplied = plannerParams()->indexFiltersApplied;
@@ -59,12 +55,6 @@ MultiPlanner::MultiPlanner(PlannerData plannerData,
 const MultiPlanStats* MultiPlanner::getSpecificStats() const {
     return static_cast<const MultiPlanStats*>(_multiplanStage->getSpecificStats());
 }
-
-// TODO SERVER-117636: Split out caching mechanism from multiplanning.
-void MultiPlanner::_cacheDependingOnPlan(const CanonicalQuery& queryToCache,
-                                         MultiPlanStage& mps,
-                                         std::unique_ptr<plan_ranker::PlanRankingDecision> ranking,
-                                         std::vector<plan_ranker::CandidatePlan>& candidates) {}
 
 std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> MultiPlanner::makeExecutor(
     std::unique_ptr<CanonicalQuery> canonicalQuery, Pipeline* pipeline) {
@@ -92,6 +82,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> MultiPlanner::makeExecutor(
                                 std::move(canonicalQuery),
                                 std::move(querySolution),
                                 std::move(_multiplanStage),
+                                _plannerData.cachedPlanHash,
                                 pipeline);
 }
 }  // namespace mongo::exec_deferred_engine_choice

@@ -86,6 +86,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> SubPlanner::makeExecutor(
                                 std::move(canonicalQuery),
                                 std::move(querySolution),
                                 nullptr /*MultiPlanStage*/,
+                                _plannerData.cachedPlanHash,
                                 pipeline);
 }
 

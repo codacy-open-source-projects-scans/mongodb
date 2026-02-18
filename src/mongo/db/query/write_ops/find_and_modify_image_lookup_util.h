@@ -59,8 +59,9 @@ MONGO_MOD_PUBLIC boost::optional<BSONObj> fetchPreOrPostImageFromSnapshot(
  * collection or by performing a snapshot read against the collection the findAndModify wrote to.
  * Returns a forged noop oplog entry containing the image. Returns none if no image is found.
  */
-boost::optional<repl::OplogEntry> forgeNoopImageOplogEntry(OperationContext* opCtx,
-                                                           const repl::OplogEntry& oplogEntry,
-                                                           FindOneLocallyFunc findOneLocallyFunc);
+MONGO_MOD_PUBLIC boost::optional<repl::OplogEntry> forgeNoopImageOplogEntry(
+    OperationContext* opCtx,
+    const repl::OplogEntry& oplogEntry,
+    FindOneLocallyFunc findOneLocallyFunc);
 
 }  // namespace mongo

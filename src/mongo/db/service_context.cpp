@@ -590,25 +590,5 @@ void Service::ServiceDeleter::operator()(Service* service) const {
     delete service;
 }
 
-namespace {
-auto setUpPostTransportLayerTasks =
-    ServiceContext::declareDecoration<std::queue<std::function<void(OperationContext*)>>>();
-}  // namespace
-
-void addSetUpPostTransportLayerTask(ServiceContext* serviceContext,
-                                    std::function<void(OperationContext*)> cb) {
-    auto& tasks = (*serviceContext)[setUpPostTransportLayerTasks];
-    tasks.push(std::move(cb));
-}
-
-void setUpPostTransportLayer(ServiceContext* serviceContext, OperationContext* opCtx) {
-    auto& tasks = (*serviceContext)[setUpPostTransportLayerTasks];
-    try {
-        for (; !tasks.empty(); tasks.pop())
-            tasks.front()(opCtx);
-    } catch (const DBException& ex) {
-        iasserted(ex.toStatus().withContext("setUpPostTransportLayer"));
-    }
-}
 
 }  // namespace mongo

@@ -35,6 +35,7 @@
 #include "mongo/db/repl/image_collection_entry_gen.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/rss/replicated_storage_service.h"
+#include "mongo/util/time_support.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
@@ -154,15 +155,31 @@ boost::optional<repl::OplogEntry> forgeNoopImageOplogEntry(OperationContext* opC
     forgedNoop.setTxnNumber(*oplogEntry.getTxnNumber());
     forgedNoop.setObject(*image);
     forgedNoop.setOpType(repl::OpTypeEnum::kNoop);
-    forgedNoop.setWallClockTime(oplogEntry.getWallClockTime());
+
+    // The wall clock time for migrated oplog entries may not get overwritten on the recipient, and
+    // currently replication lag is calculated based on the oplog wall clock time. For this reason,
+    // set the forged noop oplog entry's wall clock time to the current time instead of the
+    // findAndModify oplog entry's wall clock time.
+    forgedNoop.setWallClockTime(Date_t::now());
+
     forgedNoop.setNss(oplogEntry.getNss());
     forgedNoop.setUuid(oplogEntry.getUuid());
     forgedNoop.setStatementIds(oplogEntry.getStatementIds());
 
-    // Set the opTime to be the findAndModify timestamp - 1. We guarantee that there will be no
-    // collisions because we always reserve an extra oplog slot when writing the retryable
-    // findAndModify entry on the primary.
+    // The op time for migrated oplog entries do get overwritten on the recipient anyway when they
+    // get written to the oplog. However, we set the forged noop oplog entry's op time to the
+    // findAndModify oplog entry's op time - 1 for the following reasons.
+    // 1. The oplog fetching in resharding uses the oplog timestamp as the _id for the documents in
+    //   the oplog buffer collection and as the resume id. So the op time for each forged noop oplog
+    //   entry must be valid and unique. Therefore:
+    //   - When writing a retryable findAndModify oplog entry on the primary, we reserve an
+    //     additional oplog slot right before it.
+    //   - When forging pre/post-image noop oplog entry, we set its timestamp to that of the
+    //     findAndModify's oplog entry minus 1.
+    // 2. The oplog fetching in chunk migration does not have such requirements since there is no
+    //    resumability. However, for consistency we still set the timestamp the same way.
     forgedNoop.setOpTime(repl::OpTime(oplogEntry.getTimestamp() - 1, *oplogEntry.getTerm()));
+
     return repl::OplogEntry{forgedNoop.toBSON()};
 }
 

@@ -211,7 +211,8 @@ void MigrationBatchInserter::run(Status status) const try {
               "Incrementing cloned count by  ",
               "batchNumCloned"_attr = batchNumCloned,
               "batchClonedBytes"_attr = batchClonedBytes,
-              logAttrs(_nss));
+              logAttrs(_nss),
+              "migrationId"_attr = _migrationId);
         _migrationProgress->incNumCloned(batchNumCloned);
         _migrationProgress->incNumBytes(batchClonedBytes);
 
@@ -245,6 +246,10 @@ void MigrationBatchInserter::run(Status status) const try {
 } catch (const DBException& e) {
     ClientLock lk(_innerOpCtx->getClient());
     _innerOpCtx->getServiceContext()->killOperation(lk, _innerOpCtx, ErrorCodes::Error(6718402));
-    LOGV2(6718407, "Batch application failed", "error"_attr = e.toStatus(), logAttrs(_nss));
+    LOGV2(6718407,
+          "Batch application failed",
+          "error"_attr = e.toStatus(),
+          logAttrs(_nss),
+          "migrationId"_attr = _migrationId);
 }
 }  // namespace mongo

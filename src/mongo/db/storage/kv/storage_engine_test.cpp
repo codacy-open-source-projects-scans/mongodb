@@ -226,11 +226,11 @@ TEST_F(StorageEngineTest, DirectWritesFailures) {
         auto s1 =
             storage_engine_direct_crud::insert(*_storageEngine, *ru, intIdent, intKey, value1);
         ASSERT_NOT_OK(s1);
-        ASSERT_EQ(ErrorCodes::DuplicateKey, s1.code());
+        ASSERT_EQ(ErrorCodes::KeyExists, s1.code());
         auto s2 =
             storage_engine_direct_crud::insert(*_storageEngine, *ru, strIdent, strKey, value1);
         ASSERT_NOT_OK(s2);
-        ASSERT_EQ(ErrorCodes::DuplicateKey, s2.code());
+        ASSERT_EQ(ErrorCodes::KeyExists, s2.code());
     }
 
 
@@ -240,11 +240,11 @@ TEST_F(StorageEngineTest, DirectWritesFailures) {
         auto s1 =
             storage_engine_direct_crud::insert(*_storageEngine, *ru, intIdent, intKey, value2);
         ASSERT_NOT_OK(s1);
-        ASSERT_EQ(ErrorCodes::DuplicateKey, s1.code());
+        ASSERT_EQ(ErrorCodes::KeyExists, s1.code());
         auto s2 =
             storage_engine_direct_crud::insert(*_storageEngine, *ru, strIdent, strKey, value2);
         ASSERT_NOT_OK(s2);
-        ASSERT_EQ(ErrorCodes::DuplicateKey, s2.code());
+        ASSERT_EQ(ErrorCodes::KeyExists, s2.code());
     }
 
     // Deleting non-existent keys will return NoSuchKey.

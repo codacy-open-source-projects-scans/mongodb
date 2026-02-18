@@ -1284,27 +1284,28 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
     {"upgradeDowngradeViewlessTimeseries",
      {[](OperationContext* opCtx, const ApplierOperation& op, OplogApplication::Mode mode)
           -> Status {
-         const auto& entry = *op;
-         auto cmd = UpgradeDowngradeViewlessTimeseriesOplogEntry::parse(entry.getObject());
+          const auto& entry = *op;
+          auto cmd = UpgradeDowngradeViewlessTimeseriesOplogEntry::parse(entry.getObject());
 
-         auto ns = NamespaceStringUtil::deserialize(entry.getNss().dbName(),
-                                                    cmd.getUpgradeDowngradeViewlessTimeseries());
+          auto ns = NamespaceStringUtil::deserialize(entry.getNss().dbName(),
+                                                     cmd.getUpgradeDowngradeViewlessTimeseries());
 
-         tassert(11450502,
-                 "upgradeDowngradeViewlessTimeseries oplog entries must have an UUID",
-                 entry.getUuid().has_value());
+          tassert(11450502,
+                  "upgradeDowngradeViewlessTimeseries oplog entries must have an UUID",
+                  entry.getUuid().has_value());
 
-         if (cmd.getIsUpgrade()) {
-             timeseries::upgradeToViewlessTimeseries(opCtx, ns, entry.getUuid());
-         } else {
-             // Use skipViewCreation from oplog entry if present, otherwise default to false.
-             const bool skipViewCreation = cmd.getSkipViewCreation().value_or(false);
-             timeseries::downgradeFromViewlessTimeseries(
-                 opCtx, ns, entry.getUuid(), skipViewCreation);
-         }
+          if (cmd.getIsUpgrade()) {
+              timeseries::upgradeToViewlessTimeseries(opCtx, ns, entry.getUuid());
+          } else {
+              // Use skipViewCreation from oplog entry if present, otherwise default to false.
+              const bool skipViewCreation = cmd.getSkipViewCreation().value_or(false);
+              timeseries::downgradeFromViewlessTimeseries(
+                  opCtx, ns, entry.getUuid(), skipViewCreation);
+          }
 
-         return Status::OK();
-     }}},
+          return Status::OK();
+      },
+      {ErrorCodes::NamespaceNotFound}}},
     {"setMultikeyMetadata",
      {[](OperationContext* opCtx, const ApplierOperation& op, OplogApplication::Mode mode)
           -> Status {

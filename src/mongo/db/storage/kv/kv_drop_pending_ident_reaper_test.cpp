@@ -740,23 +740,6 @@ TEST_F(KVDropPendingIdentReaperTest, HasExpiredChecksForCheckpointIteration) {
     ASSERT_TRUE(reaper.hasExpiredIdents(Timestamp::min()));
 }
 
-DEATH_TEST_F(KVDropPendingIdentReaperTestDeathTest,
-             AddCheckpointStyleIdentWithConfiguredDelay,
-             "invariant") {
-    auto engine = getEngine();
-    KVDropPendingIdentReaper reaper(engine);
-    reaper.configureDelay(Seconds(1));
-    reaper.addDropPendingIdent(engine->checkpointIteration, std::make_shared<Ident>("ident"));
-}
-
-TEST_F(KVDropPendingIdentReaperTest, RemovingDelayReallowsCheckpointDropTimes) {
-    auto engine = getEngine();
-    KVDropPendingIdentReaper reaper(engine);
-    reaper.configureDelay(Seconds(1));
-    reaper.configureDelay(Seconds(0));
-    reaper.addDropPendingIdent(engine->checkpointIteration, std::make_shared<Ident>("ident"));
-}
-
 TEST_F(KVDropPendingIdentReaperTest, IdentWithDelayDroppedAtCorrectTime) {
     auto engine = getEngine();
     KVDropPendingIdentReaper reaper(engine);
@@ -773,44 +756,52 @@ TEST_F(KVDropPendingIdentReaperTest, IdentWithDelayDroppedAtCorrectTime) {
 
     // This should have no effect.
     auto opCtx = makeOpCtx();
-    reaper.dropIdentsOlderThan(opCtx.get(), makeTimestampWithNextInc(dropTimestamp));
+    ASSERT_FALSE(reaper.hasExpiredIdents(Timestamp{Seconds(14), 0}));
+    reaper.dropIdentsOlderThan(opCtx.get(), Timestamp(Seconds(14), 0));
     ASSERT_EQUALS(0U, engine->droppedIdents.size());
 
     // After adding the delay, the ident should finally be dropped.
-    Timestamp extendedDropTimestamp{Seconds(15), 0};
-    reaper.dropIdentsOlderThan(opCtx.get(), makeTimestampWithNextInc(extendedDropTimestamp));
+    Timestamp extendedDropTimestamp{Seconds(15), 1};
+    ASSERT_TRUE(reaper.hasExpiredIdents(extendedDropTimestamp));
+    reaper.dropIdentsOlderThan(opCtx.get(), extendedDropTimestamp);
     ASSERT_EQUALS(1U, engine->droppedIdents.size());
     ASSERT_EQUALS(identName, engine->droppedIdents.front());
 }
 
-TEST_F(KVDropPendingIdentReaperTest, IdentWithDelayStillNotDroppedAfterRemovingDelay) {
-    // TODO SERVER-117466 this test asserts incorrect behaviour that should go away
-    // after this ticket is done.
+TEST_F(KVDropPendingIdentReaperTest, UpdatingDelayDynamicallyUpdatesWhichIdentsAreDroppable) {
     auto engine = getEngine();
     KVDropPendingIdentReaper reaper(engine);
-    reaper.configureDelay(Seconds(5));
+    reaper.configureDelay(Seconds(10));
 
-    Timestamp dropTimestamp{Seconds(10), 0};
-    std::string identName = "ident";
-
-    {
-        // The reaper must have the only references to the ident before it will drop it.
-        std::shared_ptr<Ident> ident = std::make_shared<Ident>(identName);
-        reaper.addDropPendingIdent(dropTimestamp, ident);
+    for (int i = 10; i < 15; ++i) {
+        reaper.addDropPendingIdent(Timestamp(Seconds(i), 0),
+                                   std::make_shared<Ident>(fmt::format("table-{}", i)));
     }
 
-    reaper.configureDelay(Seconds(0));
+    Timestamp dropTimestamp{Seconds(15), 1};
 
-    // This should have no effect.
     auto opCtx = makeOpCtx();
-    reaper.dropIdentsOlderThan(opCtx.get(), makeTimestampWithNextInc(dropTimestamp));
+
+    // Would drop everything with no delay, but current delay means nothing is dropped
+    ASSERT_FALSE(reaper.hasExpiredIdents(dropTimestamp));
+    reaper.dropIdentsOlderThan(opCtx.get(), dropTimestamp);
     ASSERT_EQUALS(0U, engine->droppedIdents.size());
 
-    // After adding the delay, the ident should finally be dropped.
-    Timestamp extendedDropTimestamp{Seconds(15), 0};
-    reaper.dropIdentsOlderThan(opCtx.get(), makeTimestampWithNextInc(extendedDropTimestamp));
-    ASSERT_EQUALS(1U, engine->droppedIdents.size());
-    ASSERT_EQUALS(identName, engine->droppedIdents.front());
+    // Lowering the delay lets it drop some but not all of the idents
+    reaper.configureDelay(Seconds(4));
+    ASSERT_TRUE(reaper.hasExpiredIdents(dropTimestamp));
+    reaper.dropIdentsOlderThan(opCtx.get(), dropTimestamp);
+    ASSERT_FALSE(reaper.hasExpiredIdents(dropTimestamp));
+    ASSERT_EQUALS((std::vector<std::string>{"table-10", "table-11"}), engine->droppedIdents);
+
+    // Removing the delay entirely allows all the idents to be dropped
+    reaper.configureDelay(Seconds(0));
+    ASSERT_TRUE(reaper.hasExpiredIdents(dropTimestamp));
+    reaper.dropIdentsOlderThan(opCtx.get(), dropTimestamp);
+    ASSERT_FALSE(reaper.hasExpiredIdents(dropTimestamp));
+    ASSERT_EQUALS(
+        (std::vector<std::string>{"table-10", "table-11", "table-12", "table-13", "table-14"}),
+        engine->droppedIdents);
 }
 
 TEST_F(KVDropPendingIdentReaperTest, DropIdentsChecksForInterruptsBeforeDropping) {

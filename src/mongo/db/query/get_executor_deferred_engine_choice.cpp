@@ -91,12 +91,13 @@ StatusWith<std::unique_ptr<PlannerInterface>> preparePlanner(
     const MultipleCollectionAccessor& collections,
     Pipeline* pipeline) {
     auto ws = std::make_unique<WorkingSet>();
-    auto makePlannerData = [&]() {
+    auto makePlannerData = [&](boost::optional<size_t> cachedPlanHash) {
         return PlannerData{
-            opCtx, cq, std::move(ws), collections, plannerParams, yieldPolicy, boost::none};
+            opCtx, cq, std::move(ws), collections, plannerParams, yieldPolicy, cachedPlanHash};
     };
-    auto buildSingleSolutionPlanner = [&](std::unique_ptr<QuerySolution> solution) {
-        return std::make_unique<SingleSolutionPassthroughPlanner>(makePlannerData(),
+    auto buildSingleSolutionPlanner = [&](std::unique_ptr<QuerySolution> solution,
+                                          boost::optional<size_t> cachedPlanHash) {
+        return std::make_unique<SingleSolutionPassthroughPlanner>(makePlannerData(cachedPlanHash),
                                                                   std::move(solution));
     };
 
@@ -110,7 +111,7 @@ StatusWith<std::unique_ptr<PlannerInterface>> preparePlanner(
         planCacheCounters.incrementClassicSkippedCounter();
         auto solution = std::make_unique<QuerySolution>();
         solution->setRoot(std::make_unique<EofNode>(eof_node::EOFType::NonExistentNamespace));
-        return buildSingleSolutionPlanner(std::move(solution));
+        return buildSingleSolutionPlanner(std::move(solution), boost::none /*cachedPlanHash*/);
     }
 
     if (cq->getFindCommandRequest().getTailable() && !mainColl->isCapped()) {
@@ -126,19 +127,28 @@ StatusWith<std::unique_ptr<PlannerInterface>> preparePlanner(
         cq->setCollator(mainColl->getDefaultCollator()->clone());
     }
 
-    if (auto idHackPlan = tryIdHack(opCtx, collections, cq, makePlannerData); idHackPlan) {
+    if (auto idHackPlan = tryIdHack(opCtx, collections, cq, [&]() {
+            return makePlannerData(boost::none /*cachedPlanHash*/);
+        })) {
         uassertStatusOK(idHackPlan->plan());
         return {{std::move(idHackPlan)}};
     }
 
-    // TODO SERVER-117566 Implement plan cache storing and lookup.
     auto planCacheKey =
         plan_cache_key_factory::make<PlanCacheKey>(*cq, collections.getMainCollectionAcquisition());
     PlanCacheInfo planCacheInfo{planCacheKey.planCacheKeyHash(), planCacheKey.planCacheShapeHash()};
     setOpDebugPlanCacheInfo(opCtx, planCacheInfo);
 
+    boost::optional<size_t> cachedPlanHash = boost::none;
+    if (auto cs = CollectionQueryInfo::get(collections.getMainCollection())
+                      .getPlanCache()
+                      ->getCacheEntryIfActive(planCacheKey)) {
+        // TODO SERVER-117566 Implement plan cache lookup.
+        cachedPlanHash = cs->cachedPlan->solutionHash;
+    }
+
     if (SubplanStage::needsSubplanning(*cq)) {
-        return std::make_unique<SubPlanner>(makePlannerData());
+        return std::make_unique<SubPlanner>(makePlannerData(cachedPlanHash));
     }
 
     auto solutions = uassertStatusOK(QueryPlanner::plan(*cq, *plannerParams));
@@ -152,9 +162,9 @@ StatusWith<std::unique_ptr<PlannerInterface>> preparePlanner(
         !cq->getExpCtxRaw()->getQueryKnobConfiguration().getUseMultiplannerForSingleSolutions()) {
         // Only one possible plan. Build the stages from the solution.
         solutions[0]->indexFilterApplied = plannerParams->indexFiltersApplied;
-        return buildSingleSolutionPlanner(std::move(solutions[0]));
+        return buildSingleSolutionPlanner(std::move(solutions[0]), cachedPlanHash);
     }
-    return std::make_unique<MultiPlanner>(makePlannerData(), std::move(solutions));
+    return std::make_unique<MultiPlanner>(makePlannerData(cachedPlanHash), std::move(solutions));
 }
 
 std::unique_ptr<PlannerInterface> getPlanner(

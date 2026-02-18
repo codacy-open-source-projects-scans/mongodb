@@ -554,7 +554,7 @@ void tryOptimizeMatchOnlyPipelineDirectly(mongo::Pipeline* pipe) {
     // result set. Unless executed against a view, the 'from' pipeline will only contain a $match
     // connecting the 'to' and 'from' fields.
     if (DocumentSource* match = pipe->peekFront();
-        match && pipe->size() == 1 && match->getId() != DocumentSourceMatch::id) {
+        match && pipe->size() == 1 && match->getId() == DocumentSourceMatch::id) {
         // $match is the only stage, optimize directly.
         if (!static_cast<DocumentSourceMatch&>(*match).optimize()) {
             (void)pipe->popFront();

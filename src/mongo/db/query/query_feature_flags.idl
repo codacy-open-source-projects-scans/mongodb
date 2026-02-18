@@ -408,3 +408,10 @@ feature_flags:
         cpp_varname: gFeatureFlagGetExecutorDeferredEngineChoice
         fcv_gated: false
         default: false
+
+    featureFlagImprovedDepsAnalysis:
+        description: "Feature flag to enable pipeline rewrites that require a dependency graph"
+        cpp_varname: gFeatureFlagImprovedDepsAnalysis
+        fcv_gated: false
+        default: false
+        incremental_rollout_phase: in_development

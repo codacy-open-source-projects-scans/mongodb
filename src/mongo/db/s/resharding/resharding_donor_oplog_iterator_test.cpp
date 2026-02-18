@@ -168,6 +168,16 @@ repl::OplogEntry toOplogEntry(const repl::MutableOplogEntry& oplog) {
 
 class ReshardingDonorOplogIterTest : public ShardServerTestFixture {
 public:
+    void setUp() override {
+        ShardServerTestFixture::setUp();
+        _makeTaskExecutorForIterator();
+    }
+
+    void tearDown() override {
+        ShardServerTestFixture::tearDown();
+        _joinTaskExecutorForIterator();
+    }
+
     repl::MutableOplogEntry makeInsertOplog(ReshardingDonorOplogId oplogId, BSONObj doc) {
         return makeOplog(_crudNss, _uuid, repl::OpTypeEnum::kInsert, doc, {}, oplogId);
     }
@@ -210,21 +220,8 @@ public:
         return oplog.get_id()->getDocument().toBson();
     }
 
-    std::shared_ptr<executor::ThreadPoolTaskExecutor> makeTaskExecutorForIterator() {
-        // The ReshardingDonorOplogIterator expects there to already be a Client associated with the
-        // thread from the thread pool. We set up the ThreadPoolTaskExecutor similarly to how the
-        // recipient's primary-only service is set up.
-        executor::ThreadPoolMock::Options threadPoolOptions;
-        threadPoolOptions.onCreateThread = [] {
-            Client::initThread("TestReshardingDonorOplogIterator",
-                               getGlobalServiceContext()->getService());
-        };
-
-        auto executor = executor::makeThreadPoolTestExecutor(
-            std::make_unique<executor::NetworkInterfaceMock>(), std::move(threadPoolOptions));
-
-        executor->startup();
-        return executor;
+    std::shared_ptr<executor::ThreadPoolTaskExecutor> getTaskExecutorForIterator() {
+        return _executor;
     }
 
     std::shared_ptr<HierarchicalCancelableOperationContextFactory> makeCancelableOpCtx() {
@@ -273,6 +270,27 @@ public:
     }
 
 private:
+    void _makeTaskExecutorForIterator() {
+        // The ReshardingDonorOplogIterator expects there to already be a Client associated with the
+        // thread from the thread pool. We set up the ThreadPoolTaskExecutor similarly to how the
+        // recipient's primary-only service is set up.
+        executor::ThreadPoolMock::Options threadPoolOptions;
+        threadPoolOptions.onCreateThread = [] {
+            Client::initThread("TestReshardingDonorOplogIterator",
+                               getGlobalServiceContext()->getService());
+        };
+
+        _executor = executor::makeThreadPoolTestExecutor(
+            std::make_unique<executor::NetworkInterfaceMock>(), std::move(threadPoolOptions));
+
+        _executor->startup();
+    }
+
+    void _joinTaskExecutorForIterator() {
+        _executor->shutdown();
+        _executor->join();
+    }
+
     const NamespaceString _oplogNss = NamespaceString::createNamespaceString_forTest(
         DatabaseName::kConfig,
         fmt::format("{}xxx.yyy", NamespaceString::kReshardingLocalOplogBufferPrefix));
@@ -280,6 +298,8 @@ private:
     const UUID _uuid{UUID::gen()};
 
     RAIIServerParameterControllerForTest controller{"reshardingOplogBatchLimitOperations", 1};
+
+    std::shared_ptr<executor::ThreadPoolTaskExecutor> _executor;
 };
 
 TEST_F(ReshardingDonorOplogIterTest, BasicExhaust) {
@@ -294,7 +314,7 @@ TEST_F(ReshardingDonorOplogIterTest, BasicExhaust) {
     client.insert(nss, finalOplog.toBSON());
 
     ReshardingDonorOplogIterator iter(makePipeline(), kResumeFromBeginning, &onInsertAlwaysReady);
-    auto executor = makeTaskExecutorForIterator();
+    auto executor = getTaskExecutorForIterator();
     auto factory = makeCancelableOpCtx();
     auto altClient = makeKillableClient();
     AlternativeClientRegion acr(altClient);
@@ -327,7 +347,7 @@ TEST_F(ReshardingDonorOplogIterTest, ResumeFromMiddle) {
 
     ReshardingDonorOplogId resumeToken(Timestamp(2, 4), Timestamp(2, 4));
     ReshardingDonorOplogIterator iter(makePipeline(), resumeToken, &onInsertAlwaysReady);
-    auto executor = makeTaskExecutorForIterator();
+    auto executor = getTaskExecutorForIterator();
     auto factory = makeCancelableOpCtx();
     auto altClient = makeKillableClient();
     AlternativeClientRegion acr(altClient);
@@ -383,7 +403,7 @@ TEST_F(ReshardingDonorOplogIterTest, ExhaustWithIncomingInserts) {
                      }};
 
     ReshardingDonorOplogIterator iter(makePipeline(), kResumeFromBeginning, &insertNotifier);
-    auto executor = makeTaskExecutorForIterator();
+    auto executor = getTaskExecutorForIterator();
     auto factory = makeCancelableOpCtx();
     auto altClient = makeKillableClient();
     AlternativeClientRegion acr(altClient);
@@ -417,7 +437,7 @@ TEST_F(ReshardingDonorOplogIterTest, BatchIncludesProgressMarkEntries) {
     client.insert(nss, finalOplog.toBSON());
 
     ReshardingDonorOplogIterator iter(makePipeline(), kResumeFromBeginning, &onInsertAlwaysReady);
-    auto executor = makeTaskExecutorForIterator();
+    auto executor = getTaskExecutorForIterator();
     auto factory = makeCancelableOpCtx();
     auto altClient = makeKillableClient();
     AlternativeClientRegion acr(altClient);
@@ -458,7 +478,7 @@ DEATH_TEST_REGEX_F(ReshardingDonorOplogIterTestDeathTest,
     client.insert(nss, progressMarkOplog4.toBSON());
 
     ReshardingDonorOplogIterator iter(makePipeline(), kResumeFromBeginning, &onInsertAlwaysReady);
-    auto executor = makeTaskExecutorForIterator();
+    auto executor = getTaskExecutorForIterator();
     auto factory = makeCancelableOpCtx();
     auto altClient = makeKillableClient();
     AlternativeClientRegion acr(altClient);
@@ -483,7 +503,7 @@ TEST_F(ReshardingDonorOplogIterTest, GetNextBatchAutomaticallyRetriesOnRetryable
 
     ReshardingDonorOplogIterator iter(
         std::move(mockPipeline), kResumeFromBeginning, &onInsertAlwaysReady);
-    auto executor = makeTaskExecutorForIterator();
+    auto executor = getTaskExecutorForIterator();
     auto factory = makeCancelableOpCtx();
     auto altClient = makeKillableClient();
     AlternativeClientRegion acr(altClient);
@@ -527,7 +547,7 @@ TEST_F(ReshardingDonorOplogIterTest, GetNextBatchPassesHighestSeenOplogIdAsResum
 
     ReshardingDonorOplogIterator iter(
         std::move(mockPipeline), kResumeFromBeginning, &onInsertAlwaysReady);
-    auto executor = makeTaskExecutorForIterator();
+    auto executor = getTaskExecutorForIterator();
     auto factory = makeCancelableOpCtx();
     auto altClient = makeKillableClient();
     AlternativeClientRegion acr(altClient);
@@ -578,7 +598,7 @@ TEST_F(ReshardingDonorOplogIterTest, GetNextBatchStopsWhenCancellationTokenIsCan
 
     ReshardingDonorOplogIterator iter(
         std::move(mockPipeline), kResumeFromBeginning, &onInsertAlwaysReady);
-    auto executor = makeTaskExecutorForIterator();
+    auto executor = getTaskExecutorForIterator();
     auto factory = makeCancelableOpCtx();
     auto altClient = makeKillableClient();
     AlternativeClientRegion acr(altClient);
@@ -602,7 +622,7 @@ TEST_F(ReshardingDonorOplogIterTest, GetNextBatchThrowsOnNonRetryableError) {
 
     ReshardingDonorOplogIterator iter(
         std::move(mockPipeline), kResumeFromBeginning, &onInsertAlwaysReady);
-    auto executor = makeTaskExecutorForIterator();
+    auto executor = getTaskExecutorForIterator();
     auto factory = makeCancelableOpCtx();
     auto altClient = makeKillableClient();
     AlternativeClientRegion acr(altClient);

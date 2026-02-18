@@ -49,17 +49,15 @@ bool PlanEnumeratorContext::canPlanBeEnumerated(JoinMethod method,
                                                 const JoinSubset& left,
                                                 const JoinSubset& right,
                                                 const JoinSubset& subset) {
-    if ((method == JoinMethod::NLJ || method == JoinMethod::INLJ) &&
+    if ((_strategy.planShape == PlanTreeShape::LEFT_DEEP || method == JoinMethod::NLJ ||
+         method == JoinMethod::INLJ) &&
         !right.isBaseCollectionAccess()) {
+        // Left-deep tree must have a "base" collection and not an intermediate join on the right.
         // NLJ plans perform poorly when the right hand side is not a collection access, while INLJ
         // requires the right side to be a base table access. Don't enumerate this plan.
         return false;
     }
 
-    if (_strategy.planShape == PlanTreeShape::LEFT_DEEP && !right.isBaseCollectionAccess()) {
-        // Left-deep tree must have a "base" collection and not an intermediate join on the right.
-        return false;
-    }
     if (_strategy.planShape == PlanTreeShape::RIGHT_DEEP && !left.isBaseCollectionAccess()) {
         // Right-deep tree must have a "base" collection and not an intermediate join on the left.
         return false;
@@ -88,14 +86,120 @@ bool PlanEnumeratorContext::canPlanBeEnumerated(JoinMethod method,
     return true;
 }
 
-void PlanEnumeratorContext::updateBestJoinPlanForSubset(JoinMethod method,
-                                                        JoinPlanNodeId left,
-                                                        JoinPlanNodeId right,
-                                                        JoinCostEstimate cost,
-                                                        JoinSubset& subset) {
-    subset.bestPlanIndex = subset.plans.size();
+void PlanEnumeratorContext::addPlanToSubset(JoinMethod method,
+                                            JoinPlanNodeId left,
+                                            JoinPlanNodeId right,
+                                            JoinCostEstimate cost,
+                                            JoinSubset& subset,
+                                            bool isBestPlan) {
+    if (isBestPlan) {
+        // Update the index to reflect this is the best plan we have costed so far.
+        subset.bestPlanIndex = subset.plans.size();
+    }
+
     subset.plans.push_back(
         _registry.registerJoinNode(subset, method, left, right, std::move(cost)));
+    LOGV2_DEBUG(11336912,
+                5,
+                "Enumerating plan for join subset",
+                "plan"_attr =
+                    _registry.joinPlanNodeToBSON(subset.plans.back(), _ctx.joinGraph.numNodes()),
+                "isBestPlan"_attr = isBestPlan);
+}
+
+void PlanEnumeratorContext::enumerateINLJPlan(EdgeId edge,
+                                              JoinPlanNodeId leftPlan,
+                                              const JoinSubset& right,
+                                              JoinSubset& subset) {
+    const auto rightNodeId = right.getNodeId();
+    // TODO SERVER-117583: Pick index in a cost-based manner.
+    auto ie = bestIndexSatisfyingJoinPredicates(_ctx, rightNodeId, _ctx.joinGraph.getEdge(edge));
+    if (!ie) {
+        // No such index.
+        return;
+    }
+
+    auto inljCost = _coster->costINLJFragment(_registry.get(leftPlan), rightNodeId, ie);
+    bool isBestPlan = isBestPlanSoFar(subset, inljCost);
+    if (_strategy.mode == PlanEnumerationMode::CHEAPEST && !isBestPlan) {
+        // Only build this plan if it is better than what we already have.
+        return;
+    }
+
+    const auto& nss = _ctx.joinGraph.accessPathAt(rightNodeId)->nss();
+    auto rhs = _registry.registerINLJRHSNode(rightNodeId, ie, nss);
+    addPlanToSubset(JoinMethod::INLJ, leftPlan, rhs, std::move(inljCost), subset, isBestPlan);
+}
+
+void PlanEnumeratorContext::enumerateJoinPlan(JoinMethod method,
+                                              JoinPlanNodeId leftPlanId,
+                                              JoinPlanNodeId rightPlanId,
+                                              JoinSubset& subset) {
+    JoinCostEstimate joinCost = [this, leftPlanId, rightPlanId, method]() {
+        const auto& leftPlan = _registry.get(leftPlanId);
+        const auto& rightPlan = _registry.get(rightPlanId);
+        if (method == JoinMethod::NLJ) {
+            return _coster->costNLJFragment(leftPlan, rightPlan);
+        }
+        tassert(1748000, "Expected HJ", method == JoinMethod::HJ);
+        return _coster->costHashJoinFragment(leftPlan, rightPlan);
+    }();
+
+    bool isBestPlan = isBestPlanSoFar(subset, joinCost);
+    if (_strategy.mode == PlanEnumerationMode::CHEAPEST && !isBestPlan) {
+        // Only build this plan if it is better than what we already have.
+        return;
+    }
+
+    addPlanToSubset(method, leftPlanId, rightPlanId, std::move(joinCost), subset, isBestPlan);
+}
+
+void PlanEnumeratorContext::enumerateAllJoinPlans(JoinMethod method,
+                                                  const JoinSubset& left,
+                                                  const JoinSubset& right,
+                                                  const std::vector<EdgeId>& edges,
+                                                  JoinSubset& subset) {
+    if (method == JoinMethod::INLJ) {
+        tassert(11371701, "Expected at least one edge", edges.size() >= 1);
+        // Enumerate an INLJ for every plan we have in the left subset.
+        for (auto&& plan : left.plans) {
+            if (_registry.isOfType<INLJRHSNode>(plan)) {
+                // Index probes are only relevant as the RHS of an INLJ.
+                continue;
+            }
+            enumerateINLJPlan(edges[0], plan, right, subset);
+        }
+        return;
+    }
+
+    // Enumerate a join for every pair of plans.
+    for (auto&& leftPlan : left.plans) {
+        if (_registry.isOfType<INLJRHSNode>(leftPlan)) {
+            // Index probes are only relevant as the RHS of an INLJ.
+            continue;
+        }
+        for (auto&& rightPlan : right.plans) {
+            if (_registry.isOfType<INLJRHSNode>(rightPlan)) {
+                // Index probes are only relevant as the RHS of an INLJ.
+                continue;
+            }
+            enumerateJoinPlan(method, leftPlan, rightPlan, subset);
+        }
+    }
+}
+
+void PlanEnumeratorContext::enumerateCheapestJoinPlan(JoinMethod method,
+                                                      const JoinSubset& left,
+                                                      const JoinSubset& right,
+                                                      const std::vector<EdgeId>& edges,
+                                                      JoinSubset& subset) {
+    // Only build a join using the best plans we have for each subset.
+    if (method == JoinMethod::INLJ) {
+        tassert(11371705, "Expected at least one edge", edges.size() >= 1);
+        enumerateINLJPlan(edges[0], left.bestPlan(), right, subset);
+        return;
+    }
+    enumerateJoinPlan(method, left.bestPlan(), right.bestPlan(), subset);
 }
 
 void PlanEnumeratorContext::addJoinPlan(JoinMethod method,
@@ -107,52 +211,17 @@ void PlanEnumeratorContext::addJoinPlan(JoinMethod method,
         return;
     }
 
-    const auto leftPlan = _registry.get(left.bestPlan());
-
-    if (method == JoinMethod::INLJ) {
-        tassert(11371701, "Expected at least one edge", edges.size() >= 1);
-        auto edge = edges[0];
-        // TODO SERVER-117583: Pick index in a cost-based manner.
-        auto ie = bestIndexSatisfyingJoinPredicates(
-            _ctx, (NodeId)*begin(right.subset), _ctx.joinGraph.getEdge(edge));
-        if (!ie) {
-            // No such index.
-            return;
+    switch (_strategy.mode) {
+        case PlanEnumerationMode::CHEAPEST: {
+            enumerateCheapestJoinPlan(method, left, right, edges, subset);
+            break;
         }
 
-        const auto rightNodeId = right.getNodeId();
-        auto inljCost = _coster->costINLJFragment(leftPlan, rightNodeId, ie);
-        if (subset.hasPlans() && inljCost >= _registry.getCost(subset.bestPlan())) {
-            // Only build this plan if it is better than what we already have.
-            return;
+        case PlanEnumerationMode::ALL: {
+            enumerateAllJoinPlans(method, left, right, edges, subset);
+            break;
         }
-
-        const auto& nss = _ctx.joinGraph.accessPathAt(rightNodeId)->nss();
-        auto rhs = _registry.registerINLJRHSNode(rightNodeId, ie, nss);
-        updateBestJoinPlanForSubset(method, left.bestPlan(), rhs, std::move(inljCost), subset);
-
-    } else {
-        const auto rightPlan = _registry.get(right.bestPlan());
-        JoinCostEstimate joinCost = [this, leftPlan, rightPlan, method]() {
-            if (method == JoinMethod::NLJ) {
-                return _coster->costNLJFragment(leftPlan, rightPlan);
-            }
-            tassert(1748000, "Expected HJ", method == JoinMethod::HJ);
-            return _coster->costHashJoinFragment(leftPlan, rightPlan);
-        }();
-        if (subset.hasPlans() && joinCost >= _registry.getCost(subset.bestPlan())) {
-            // Only build this plan if it is better than what we already have.
-            return;
-        }
-        updateBestJoinPlanForSubset(
-            method, left.bestPlan(), right.bestPlan(), std::move(joinCost), subset);
     }
-
-    LOGV2_DEBUG(11336912,
-                5,
-                "Enumerating plan for join subset",
-                "plan"_attr =
-                    _registry.joinPlanNodeToBSON(subset.plans.back(), _ctx.joinGraph.numNodes()));
 }
 
 void PlanEnumeratorContext::enumerateJoinPlans(const JoinSubset& left,

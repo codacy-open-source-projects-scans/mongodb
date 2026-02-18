@@ -270,6 +270,8 @@ functions:
     display_name: "adjust venv"
     params:
       binary: bash
+      env:
+        use_python310: ${use_python310|}
       args:
         - "src/evergreen/functions/venv_adjust.sh"
 
@@ -788,6 +790,8 @@ functions:
     display_name: "set up venv"
     params:
       binary: bash
+      env:
+        use_python310: ${use_python310|}
       args:
         - "src/evergreen/functions/venv_setup.sh"
 

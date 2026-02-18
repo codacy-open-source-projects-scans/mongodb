@@ -48,6 +48,8 @@ enum class PlanTreeShape { LEFT_DEEP, RIGHT_DEEP, ZIG_ZAG };
 enum class PlanEnumerationMode {
     // Only enumerate plans if they are cheaper than the lowest-cost plan for each subset.
     CHEAPEST,
+    // Enumerates all plans, regardless of cost.
+    ALL
 };
 
 /**
@@ -125,14 +127,43 @@ private:
     void enumerateJoinPlans(const JoinSubset& left, const JoinSubset& right, JoinSubset& cur);
 
     /**
-     * Helper for adding a join plan to subset 'cur', constructed using the specified join 'method'
-     * connecting the best plans from the provided subsets.
+     * Helpers for adding a join plan to subset 'cur', constructed using the specified join 'method'
+     * connecting the best plans from the provided subsets in 'CHEAPEST' enuemration mode, and every
+     * pair of plans in 'ALL' plans enumeration mode.
      */
     void addJoinPlan(JoinMethod method,
                      const JoinSubset& left,
                      const JoinSubset& right,
                      const std::vector<EdgeId>& edges,
                      JoinSubset& cur);
+    void enumerateAllJoinPlans(JoinMethod method,
+                               const JoinSubset& left,
+                               const JoinSubset& right,
+                               const std::vector<EdgeId>& edges,
+                               JoinSubset& subset);
+    void enumerateCheapestJoinPlan(JoinMethod method,
+                                   const JoinSubset& left,
+                                   const JoinSubset& right,
+                                   const std::vector<EdgeId>& edges,
+                                   JoinSubset& subset);
+
+    /**
+     * Helper for enumerating an INLJ plan with the specified left subtree & generating an index
+     * probe on the RHS for the subset 'right'.
+     */
+    void enumerateINLJPlan(EdgeId edge,
+                           JoinPlanNodeId leftPlan,
+                           const JoinSubset& right,
+                           JoinSubset& subset);
+
+    /**
+     * Helper to enumerate an NLJ/HJ join plan combining the subtrees identified by 'leftPlan' &
+     * 'rightPlan'.
+     */
+    void enumerateJoinPlan(JoinMethod method,
+                           JoinPlanNodeId leftPlan,
+                           JoinPlanNodeId rightPlan,
+                           JoinSubset& subset);
 
     /**
      * Determines based on the shape of the tree obtained by joining the best plans on each side if
@@ -144,11 +175,16 @@ private:
                              const JoinSubset& right,
                              const JoinSubset& subset);
 
-    void updateBestJoinPlanForSubset(JoinMethod method,
-                                     JoinPlanNodeId left,
-                                     JoinPlanNodeId right,
-                                     JoinCostEstimate cost,
-                                     JoinSubset& subset);
+    void addPlanToSubset(JoinMethod method,
+                         JoinPlanNodeId left,
+                         JoinPlanNodeId right,
+                         JoinCostEstimate cost,
+                         JoinSubset& subset,
+                         bool isBestPlan);
+
+    inline bool isBestPlanSoFar(const JoinSubset& subset, const JoinCostEstimate& planCost) const {
+        return !subset.hasPlans() || (planCost < _registry.getCost(subset.bestPlan()));
+    }
 
     const JoinReorderingContext& _ctx;
     std::unique_ptr<JoinCardinalityEstimator> _estimator;

@@ -815,7 +815,6 @@ void StorageEngineImpl::setRecoveryCheckpointMetadata(StringData checkpointMetad
 void StorageEngineImpl::promoteToLeader() {
     _engine->promoteToLeader();
     _dropPendingIdentReaper.configureDelay(Seconds(0));
-    // TODO SERVER-117466 catch up on buffered drops
 }
 
 void StorageEngineImpl::demoteFromLeader() {

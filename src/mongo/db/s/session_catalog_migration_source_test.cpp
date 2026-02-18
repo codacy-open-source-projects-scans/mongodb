@@ -58,6 +58,7 @@
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/debug_util.h"
+#include "mongo/util/duration.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
 
@@ -90,10 +91,12 @@ const ChunkRange kNestedChunkRange(BSON("x.y" << 0), BSON("x.y" << 100));
 const LogicalSessionId kMigrationLsid;
 
 enum class TransactionType { kUnprepared, kPrepared };
+enum class PrePostImageLocation { kSideCollection, kOplog, kSnapshot };
 
 struct PrePostImageTestCase {
     repl::RetryImageEnum imageType;
     boost::optional<TransactionType> txnType;
+    boost::optional<PrePostImageLocation> imageLocation;
 
     BSONObj toBSON() const {
         BSONObjBuilder b;
@@ -101,11 +104,26 @@ struct PrePostImageTestCase {
         if (txnType) {
             b.append("txnType", *txnType == TransactionType::kPrepared ? "prepared" : "unprepared");
         }
+        if (imageLocation) {
+            b.append("imageLocation", *imageLocation);
+        }
         return b.obj();
     }
 };
 
-class SessionCatalogMigrationSourceTest : public MockReplCoordServerFixture {};
+class SessionCatalogMigrationSourceTest : public MockReplCoordServerFixture {
+public:
+    void setUpFeatureFlags(const PrePostImageTestCase& testCase) {
+        _disallowImageCollectionFeatureFlag.reset();
+        if (testCase.imageLocation != PrePostImageLocation::kSideCollection) {
+            _disallowImageCollectionFeatureFlag.emplace(
+                "featureFlagDisallowFindAndModifyImageCollection", true);
+        }
+    }
+
+private:
+    boost::optional<RAIIServerParameterControllerForTest> _disallowImageCollectionFeatureFlag;
+};
 
 /**
  * Creates an OplogEntry with given parameters and preset defaults for this test suite.
@@ -777,13 +795,17 @@ TEST_F(SessionCatalogMigrationSourceTest, ForgeImageEntriesWhenFetchingEntriesWi
     DBDirectClient client(opCtx());
     client.insert(NamespaceString::kConfigImagesNamespace, imageEntry.toBSON());
 
+    // Set the findAndModify oplog entry's wall clock time to less than the current time so that
+    // we can verify later that the forged image noop oplog entry's wall clock time is set to
+    // the current time instead of the findAndModify oplog entry's wall clock time.
+    auto entryWallClockTime = Date_t::now() - Milliseconds(1);
     // Insert an oplog entry with a non-null needsRetryImage field.
     auto entry = makeOplogEntry(
         repl::OpTime(Timestamp(52, 346), 2),  // optime
         repl::OpTypeEnum::kDelete,            // op type
         BSON("x" << 50),                      // o
         boost::none,                          // o2
-        Date_t::now(),                        // wall clock time,
+        entryWallClockTime,                   // wall clock time,
         sessionId,
         txnNumber,
         {1},                               // statement id
@@ -818,6 +840,9 @@ TEST_F(SessionCatalogMigrationSourceTest, ForgeImageEntriesWhenFetchingEntriesWi
     for (size_t i = 0; i < entry.getStatementIds().size(); i++) {
         ASSERT_EQ(entry.getStatementIds()[i], nextOplogResult.oplog->getStatementIds()[i]);
     }
+    // Check that the wall clock time is set to the current time which should be larger than the
+    // the findAndModify oplog entry's wall clock time.
+    ASSERT_LT(entry.getWallClockTime(), nextOplogResult.oplog->getWallClockTime());
 
     // The next oplog entry should be the original entry that generated the image entry.
     ASSERT_TRUE(migrationSource.hasMoreOplog());
@@ -955,9 +980,9 @@ TEST_F(SessionCatalogMigrationSourceTest, SessionDumpWithMultipleNewWrites) {
     ASSERT_TRUE(migrationSource.fetchNextOplog(opCtx()));
 
     migrationSource.notifyNewWriteOpTime(
-        entry2.getOpTime(), SessionCatalogMigrationSource::EntryAtOpTimeType::kRetryableWrite);
+        {entry2.getOpTime(), SessionCatalogMigrationSource::EntryAtOpTimeType::kRetryableWrite});
     migrationSource.notifyNewWriteOpTime(
-        entry3.getOpTime(), SessionCatalogMigrationSource::EntryAtOpTimeType::kRetryableWrite);
+        {entry3.getOpTime(), SessionCatalogMigrationSource::EntryAtOpTimeType::kRetryableWrite});
 
     {
         ASSERT_TRUE(migrationSource.hasMoreOplog());
@@ -995,8 +1020,8 @@ TEST_F(SessionCatalogMigrationSourceTest, ShouldAssertIfOplogCannotBeFound) {
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
 
     migrationSource.notifyNewWriteOpTime(
-        repl::OpTime(Timestamp(100, 3), 1),
-        SessionCatalogMigrationSource::EntryAtOpTimeType::kRetryableWrite);
+        {repl::OpTime(Timestamp(100, 3), 1),
+         SessionCatalogMigrationSource::EntryAtOpTimeType::kRetryableWrite});
     ASSERT_TRUE(migrationSource.hasMoreOplog());
     ASSERT_THROWS(migrationSource.fetchNextOplog(opCtx()), AssertionException);
 }
@@ -1022,7 +1047,9 @@ TEST_F(SessionCatalogMigrationSourceTest,
     insertOplogEntry(entry);
 
     migrationSource.notifyNewWriteOpTime(
-        entry.getOpTime(), SessionCatalogMigrationSource::EntryAtOpTimeType::kTransaction);
+        {entry.getOpTime(),
+         SessionCatalogMigrationSource::EntryAtOpTimeType::kTransaction,
+         entry.getOpTime().getTimestamp()});
     ASSERT_TRUE(migrationSource.hasMoreOplog());
     ASSERT_TRUE(migrationSource.fetchNextOplog(opCtx()));
 
@@ -1064,7 +1091,9 @@ DEATH_TEST_F(SessionCatalogMigrationSourceTestDeathTest,
     insertOplogEntry(entry);
 
     migrationSource.notifyNewWriteOpTime(
-        entry.getOpTime(), SessionCatalogMigrationSource::EntryAtOpTimeType::kTransaction);
+        {entry.getOpTime(),
+         SessionCatalogMigrationSource::EntryAtOpTimeType::kTransaction,
+         entry.getOpTime().getTimestamp()});
     ASSERT_TRUE(migrationSource.hasMoreOplog());
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
     ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 0);
@@ -1150,7 +1179,9 @@ TEST_F(SessionCatalogMigrationSourceTest,
     numOps += 2;
 
     migrationSource.notifyNewWriteOpTime(
-        entry4.getOpTime(), SessionCatalogMigrationSource::EntryAtOpTimeType::kTransaction);
+        {entry4.getOpTime(),
+         SessionCatalogMigrationSource::EntryAtOpTimeType::kTransaction,
+         entry4.getOpTime().getTimestamp()});
 
     const auto expectedSessionId = *getParentSessionId(sessionId);
     const auto expectedTxnNumber = *sessionId.getTxnNumber();
@@ -1265,7 +1296,9 @@ TEST_F(SessionCatalogMigrationSourceTest,
     numOps += 2;
 
     migrationSource.notifyNewWriteOpTime(
-        entry3.getOpTime(), SessionCatalogMigrationSource::EntryAtOpTimeType::kTransaction);
+        {entry3.getOpTime(),
+         SessionCatalogMigrationSource::EntryAtOpTimeType::kTransaction,
+         entry3.getOpTime().getTimestamp()});
 
     const auto expectedSessionId = *getParentSessionId(sessionId);
     const auto expectedTxnNumber = *sessionId.getTxnNumber();
@@ -1386,7 +1419,9 @@ TEST_F(SessionCatalogMigrationSourceTest,
         numOps += 2;
 
         migrationSource.notifyNewWriteOpTime(
-            entry3.getOpTime(), SessionCatalogMigrationSource::EntryAtOpTimeType::kTransaction);
+            {entry3.getOpTime(),
+             SessionCatalogMigrationSource::EntryAtOpTimeType::kTransaction,
+             entry3.getOpTime().getTimestamp()});
 
         const auto expectedSessionId = *getParentSessionId(sessionId);
         const auto expectedTxnNumber = *sessionId.getTxnNumber();
@@ -1445,7 +1480,7 @@ TEST_F(SessionCatalogMigrationSourceTest, ShouldBeAbleInsertNewWritesAfterBuffer
         insertOplogEntry(entry);
 
         migrationSource.notifyNewWriteOpTime(
-            entry.getOpTime(), SessionCatalogMigrationSource::EntryAtOpTimeType::kRetryableWrite);
+            {entry.getOpTime(), SessionCatalogMigrationSource::EntryAtOpTimeType::kRetryableWrite});
 
         ASSERT_TRUE(migrationSource.hasMoreOplog());
         ASSERT_TRUE(migrationSource.fetchNextOplog(opCtx()));
@@ -1472,7 +1507,7 @@ TEST_F(SessionCatalogMigrationSourceTest, ShouldBeAbleInsertNewWritesAfterBuffer
         insertOplogEntry(entry);
 
         migrationSource.notifyNewWriteOpTime(
-            entry.getOpTime(), SessionCatalogMigrationSource::EntryAtOpTimeType::kRetryableWrite);
+            {entry.getOpTime(), SessionCatalogMigrationSource::EntryAtOpTimeType::kRetryableWrite});
 
         ASSERT_TRUE(migrationSource.hasMoreOplog());
         ASSERT_TRUE(migrationSource.fetchNextOplog(opCtx()));
@@ -1498,7 +1533,7 @@ TEST_F(SessionCatalogMigrationSourceTest, ShouldBeAbleInsertNewWritesAfterBuffer
         insertOplogEntry(entry);
 
         migrationSource.notifyNewWriteOpTime(
-            entry.getOpTime(), SessionCatalogMigrationSource::EntryAtOpTimeType::kRetryableWrite);
+            {entry.getOpTime(), SessionCatalogMigrationSource::EntryAtOpTimeType::kRetryableWrite});
 
         ASSERT_TRUE(migrationSource.hasMoreOplog());
         ASSERT_TRUE(migrationSource.fetchNextOplog(opCtx()));
@@ -1760,11 +1795,10 @@ TEST_F(SessionCatalogMigrationSourceTest,
         repl::OpTime lastWriteOpTime;
         if (isPrepared) {
             auto commitOpTime = repl::OpTime(Timestamp(opTimeSecs, 4), 1);
-            auto entry4 = makeCommandOplogEntry(commitOpTime,
-                                                entry2.getOpTime(),
-                                                BSON("commitTransaction" << 1),
-                                                sessionId,
-                                                txnNumber);
+            CommitTransactionOplogObject commandObj;
+            commandObj.setCommitTimestamp(commitOpTime.getTimestamp());
+            auto entry4 = makeCommandOplogEntry(
+                commitOpTime, entry2.getOpTime(), commandObj.toBSON(), sessionId, txnNumber);
             insertOplogEntry(entry4);
             lastWriteOpTime = commitOpTime;
         } else {
@@ -1886,11 +1920,10 @@ TEST_F(SessionCatalogMigrationSourceTest,
         repl::OpTime lastWriteOpTime;
         if (isPrepared) {
             auto commitOpTime = repl::OpTime(Timestamp(opTimeSecs, 5), 1);
-            auto entry3 = makeCommandOplogEntry(commitOpTime,
-                                                entry2.getOpTime(),
-                                                BSON("commitTransaction" << 1),
-                                                sessionId,
-                                                txnNumber);
+            CommitTransactionOplogObject commandObj;
+            commandObj.setCommitTimestamp(commitOpTime.getTimestamp());
+            auto entry3 = makeCommandOplogEntry(
+                commitOpTime, entry2.getOpTime(), commandObj.toBSON(), sessionId, txnNumber);
             insertOplogEntry(entry3);
             lastWriteOpTime = commitOpTime;
         } else {
@@ -2133,11 +2166,10 @@ TEST_F(
         repl::OpTime lastWriteOpTime;
         if (testCase.txnType == TransactionType::kPrepared) {
             auto commitOpTime = repl::OpTime(Timestamp(opTimeSecs, 4), 1);
-            auto entry3 = makeCommandOplogEntry(commitOpTime,
-                                                entry2.getOpTime(),
-                                                BSON("commitTransaction" << 1),
-                                                sessionId,
-                                                txnNumber);
+            CommitTransactionOplogObject commandObj;
+            commandObj.setCommitTimestamp(commitOpTime.getTimestamp());
+            auto entry3 = makeCommandOplogEntry(
+                commitOpTime, entry2.getOpTime(), commandObj.toBSON(), sessionId, txnNumber);
             insertOplogEntry(entry3);
             lastWriteOpTime = commitOpTime;
         } else {
@@ -2200,7 +2232,10 @@ TEST_F(
 TEST_F(SessionCatalogMigrationSourceTest, MissingImageDocumentForRetryableWrite) {
     std::vector<PrePostImageTestCase> testCases;
     for (auto imageType : {repl::RetryImageEnum::kPreImage, repl::RetryImageEnum::kPostImage}) {
-        testCases.emplace_back(imageType);
+        for (auto imageLocation :
+             {PrePostImageLocation::kSideCollection, PrePostImageLocation::kSnapshot}) {
+            testCases.push_back({.imageType = imageType, .imageLocation = imageLocation});
+        }
     }
 
     for (const auto& testCase : testCases) {
@@ -2208,6 +2243,18 @@ TEST_F(SessionCatalogMigrationSourceTest, MissingImageDocumentForRetryableWrite)
               "Running case",
               "test"_attr = unittest::getTestName(),
               "testCase"_attr = testCase.toBSON());
+        setUpFeatureFlags(testCase);
+
+        boost::optional<FailPoint*> fp;
+        boost::optional<int> timesEnteredBefore;
+        if (testCase.imageLocation == PrePostImageLocation::kSnapshot) {
+            // The image should be fetched from the snapshot rather than the image collection. Force
+            // the snapshot read to fail with SnapshotTooOld.
+            fp = globalFailPointRegistry().find(
+                "failChunkMigrationFindAndModifyImageLookupFindOneWithSnapshotTooOld");
+            timesEnteredBefore =
+                fp.get()->setMode(FailPoint::alwaysOn, 0, BSON("nss" << kNs.toString_forTest()));
+        }
 
         const auto sessionId = makeLogicalSessionIdForTest();
         const auto txnNumber = TxnNumber{1};
@@ -2257,6 +2304,11 @@ TEST_F(SessionCatalogMigrationSourceTest, MissingImageDocumentForRetryableWrite)
         ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 1);
         ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
 
+        if (fp) {
+            auto timesEnteredAfter = fp.get()->setMode(FailPoint::off);
+            ASSERT_EQ(timesEnteredAfter, *timesEnteredBefore + 1);
+        }
+
         client.remove(NamespaceString::kSessionTransactionsTableNamespace, sessionRecord.toBSON());
     }
 }
@@ -2264,7 +2316,10 @@ TEST_F(SessionCatalogMigrationSourceTest, MissingImageDocumentForRetryableWrite)
 TEST_F(SessionCatalogMigrationSourceTest, MissingImageDocumentForNewCommittedInternalTransaction) {
     std::vector<PrePostImageTestCase> testCases;
     for (auto imageType : {repl::RetryImageEnum::kPreImage, repl::RetryImageEnum::kPostImage}) {
-        testCases.emplace_back(imageType);
+        for (auto imageLocation :
+             {PrePostImageLocation::kSideCollection, PrePostImageLocation::kSnapshot}) {
+            testCases.push_back({.imageType = imageType, .imageLocation = imageLocation});
+        }
     }
 
     auto opTimeSecs = 250;
@@ -2273,6 +2328,18 @@ TEST_F(SessionCatalogMigrationSourceTest, MissingImageDocumentForNewCommittedInt
               "Running case",
               "test"_attr = unittest::getTestName(),
               "testCase"_attr = testCase.toBSON());
+        setUpFeatureFlags(testCase);
+
+        boost::optional<FailPoint*> fp;
+        boost::optional<int> timesEnteredBefore;
+        if (testCase.imageLocation == PrePostImageLocation::kSnapshot) {
+            // The image should be fetched from the snapshot rather than the image collection. Force
+            // the snapshot read to fail with SnapshotTooOld.
+            fp = globalFailPointRegistry().find(
+                "failChunkMigrationFindAndModifyImageLookupFindOneWithSnapshotTooOld");
+            timesEnteredBefore =
+                fp.get()->setMode(FailPoint::alwaysOn, 0, BSON("nss" << kNs.toString_forTest()));
+        }
 
         const auto sessionId = makeLogicalSessionIdWithTxnNumberAndUUIDForTest();
         const auto txnNumber = TxnNumber{1};
@@ -2331,7 +2398,9 @@ TEST_F(SessionCatalogMigrationSourceTest, MissingImageDocumentForNewCommittedInt
         numOps += 2;
 
         migrationSource.notifyNewWriteOpTime(
-            entry3.getOpTime(), SessionCatalogMigrationSource::EntryAtOpTimeType::kTransaction);
+            {entry3.getOpTime(),
+             SessionCatalogMigrationSource::EntryAtOpTimeType::kTransaction,
+             entry3.getOpTime().getTimestamp()});
 
         const auto expectedSessionId = *getParentSessionId(sessionId);
         const auto expectedTxnNumber = *sessionId.getTxnNumber();
@@ -2359,6 +2428,11 @@ TEST_F(SessionCatalogMigrationSourceTest, MissingImageDocumentForNewCommittedInt
         ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(),
                   numOps - expectedOps.size());
 
+        if (fp) {
+            auto timesEnteredAfter = fp.get()->setMode(FailPoint::off);
+            ASSERT_EQ(timesEnteredAfter, *timesEnteredBefore + 1);
+        }
+
         opTimeSecs++;
     }
 }
@@ -2368,8 +2442,9 @@ TEST_F(SessionCatalogMigrationSourceTest, MissingImageDocumentForCommittedIntern
 
     std::vector<PrePostImageTestCase> testCases;
     for (auto imageType : {repl::RetryImageEnum::kPreImage, repl::RetryImageEnum::kPostImage}) {
-        for (auto txnType : {TransactionType::kUnprepared, TransactionType::kPrepared}) {
-            testCases.emplace_back(imageType, txnType);
+        for (auto imageLocation :
+             {PrePostImageLocation::kSideCollection, PrePostImageLocation::kSnapshot}) {
+            testCases.emplace_back(imageType, TransactionType::kUnprepared, imageLocation);
         }
     }
 
@@ -2378,6 +2453,18 @@ TEST_F(SessionCatalogMigrationSourceTest, MissingImageDocumentForCommittedIntern
               "Running case",
               "test"_attr = unittest::getTestName(),
               "testCase"_attr = testCase.toBSON());
+        setUpFeatureFlags(testCase);
+
+        boost::optional<FailPoint*> fp;
+        boost::optional<int> timesEnteredBefore;
+        if (testCase.imageLocation == PrePostImageLocation::kSnapshot) {
+            // The image should be fetched from the snapshot rather than the image collection. Force
+            // the snapshot read to fail with SnapshotTooOld.
+            fp = globalFailPointRegistry().find(
+                "failChunkMigrationFindAndModifyImageLookupFindOneWithSnapshotTooOld");
+            timesEnteredBefore =
+                fp.get()->setMode(FailPoint::alwaysOn, 0, BSON("nss" << kNs.toString_forTest()));
+        }
 
         const auto sessionId = makeLogicalSessionIdWithTxnNumberAndUUIDForTest();
         const auto txnNumber = TxnNumber{1};
@@ -2468,6 +2555,11 @@ TEST_F(SessionCatalogMigrationSourceTest, MissingImageDocumentForCommittedIntern
         ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
         ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), expectedOps.size());
         ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
+
+        if (fp) {
+            auto timesEnteredAfter = fp.get()->setMode(FailPoint::off);
+            ASSERT_EQ(timesEnteredAfter, *timesEnteredBefore + 1);
+        }
 
         opTimeSecs++;
         client.remove(NamespaceString::kSessionTransactionsTableNamespace, txnRecord.toBSON());
@@ -2633,7 +2725,9 @@ TEST_F(SessionCatalogMigrationSourceTest,
         numOps += 2;
 
         migrationSource.notifyNewWriteOpTime(
-            entry3.getOpTime(), SessionCatalogMigrationSource::EntryAtOpTimeType::kTransaction);
+            {entry3.getOpTime(),
+             SessionCatalogMigrationSource::EntryAtOpTimeType::kTransaction,
+             entry3.getOpTime().getTimestamp()});
 
         const auto expectedSessionId = *getParentSessionId(sessionId);
         const auto expectedTxnNumber = *sessionId.getTxnNumber();
@@ -2952,8 +3046,9 @@ TEST_F(SessionCatalogMigrationSourceTest, IgnoreAbortedTransaction) {
         insertOplogEntry(entry1);
 
         auto abortOpTime = repl::OpTime(Timestamp(opTimeSecs, 2), 1);
+        AbortTransactionOplogObject commandObj;
         auto entry2 = makeCommandOplogEntry(
-            abortOpTime, applyOpsOpTime, BSON("abortTransaction" << 1), sessionId, txnNumber);
+            abortOpTime, applyOpsOpTime, commandObj.toBSON(), sessionId, txnNumber);
         insertOplogEntry(entry2);
 
         SessionTxnRecord txnRecord;
@@ -3457,7 +3552,7 @@ TEST_F(SessionCatalogMigrationSourceTest, UntransferredDataSizeWithCommittedWrit
     // Test inCatchupPhase() and untransferredCatchUpDataSize() with new writes.
     insertOplogEntry(entry);
     migrationSource.notifyNewWriteOpTime(
-        entry.getOpTime(), SessionCatalogMigrationSource::EntryAtOpTimeType::kRetryableWrite);
+        {entry.getOpTime(), SessionCatalogMigrationSource::EntryAtOpTimeType::kRetryableWrite});
 
     ASSERT_TRUE(migrationSource.hasMoreOplog());
     ASSERT_TRUE(migrationSource.inCatchupPhase());
@@ -3465,7 +3560,7 @@ TEST_F(SessionCatalogMigrationSourceTest, UntransferredDataSizeWithCommittedWrit
 
     insertOplogEntry(entry);
     migrationSource.notifyNewWriteOpTime(
-        entry.getOpTime(), SessionCatalogMigrationSource::EntryAtOpTimeType::kRetryableWrite);
+        {entry.getOpTime(), SessionCatalogMigrationSource::EntryAtOpTimeType::kRetryableWrite});
 
     ASSERT_TRUE(migrationSource.hasMoreOplog());
     ASSERT_TRUE(migrationSource.inCatchupPhase());
@@ -3500,7 +3595,7 @@ TEST_F(SessionCatalogMigrationSourceTest, UntransferredDataSizeWithNoCommittedWr
         repl::OpTime(Timestamp(0, 0), 0));  // optime of previous write within same transaction
     insertOplogEntry(entry);
     migrationSource.notifyNewWriteOpTime(
-        entry.getOpTime(), SessionCatalogMigrationSource::EntryAtOpTimeType::kRetryableWrite);
+        {entry.getOpTime(), SessionCatalogMigrationSource::EntryAtOpTimeType::kRetryableWrite});
 
     ASSERT_TRUE(migrationSource.hasMoreOplog());
     ASSERT_TRUE(migrationSource.inCatchupPhase());
@@ -3861,7 +3956,8 @@ TEST_F(SessionCatalogMigrationSourceTest, DiscardOplogEntryForNonRetryableWrite)
     insertOplogEntry(updateOplog);
 
     migrationSource.notifyNewWriteOpTime(
-        updateOplog.getOpTime(), SessionCatalogMigrationSource::EntryAtOpTimeType::kRetryableWrite);
+        {updateOplog.getOpTime(),
+         SessionCatalogMigrationSource::EntryAtOpTimeType::kRetryableWrite});
 
     ASSERT_TRUE(migrationSource.hasMoreOplog());
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
