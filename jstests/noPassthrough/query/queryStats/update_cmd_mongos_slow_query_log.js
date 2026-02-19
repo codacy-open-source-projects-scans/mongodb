@@ -10,6 +10,7 @@
 
 import {after, before, beforeEach, describe, it} from "jstests/libs/mochalite.js";
 import {getSlowQueryLogs} from "jstests/libs/query/query_stats_utils.js";
+import {isUweEnabled} from "jstests/libs/query/uwe_utils.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
 // Test data to insert into collections.
@@ -36,6 +37,12 @@ describe("Mongos - Single vs Batched Updates Query Shape Hash", function () {
                 setParameter: {internalQueryStatsRateLimit: -1},
             },
         });
+        // TODO SERVER-117919 Remove skipping test due to UWE.
+        if (!isUweEnabled(this.st.s)) {
+            this.st.stop();
+            jsTest.log.info("Skipping test: featureFlagUnifiedWriteExecutor is not enabled");
+            quit();
+        }
 
         this.dbName = jsTestName();
         assert.commandWorked(

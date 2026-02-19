@@ -954,7 +954,7 @@ mongo_cc_library(
         ":repl_writer_thread_pool_server_parameters",
         ":set_multikey_metadata_oplog_entry_idl",
         ":truncate_range_oplog_entry_idl",
-        "//src/mongo/db:change_stream_pre_image_util",
+        "//src/mongo/db:change_stream_pre_image_id_util",
         "//src/mongo/db:server_base",
         "//src/mongo/db/admission/execution_control:execution_admission_context",
         "//src/mongo/db/auth:authorization_manager_global",

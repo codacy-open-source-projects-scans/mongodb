@@ -526,4 +526,177 @@ TEST_F(JoinPlanEnumeratorTest, InitialzeLargeSubsets) {
     testLargeSubset(nullptr /* No golden test here. */, PlanTreeShape::LEFT_DEEP, 10);
 }
 
+DEATH_TEST(PerSubsetLevelEnumerationModeDeathTest, NoModes, "11391600") {
+    PerSubsetLevelEnumerationMode(std::vector<std::pair<size_t, PlanEnumerationMode>>{});
+}
+DEATH_TEST(PerSubsetLevelEnumerationModeDeathTest, FirstModeLevelNotZero, "11391600") {
+    PerSubsetLevelEnumerationMode({{1, PlanEnumerationMode::ALL}});
+}
+DEATH_TEST(PerSubsetLevelEnumerationModeDeathTest, SameModeConsecutively, "11391600") {
+    PerSubsetLevelEnumerationMode({{0, PlanEnumerationMode::ALL}, {1, PlanEnumerationMode::ALL}});
+}
+DEATH_TEST(PerSubsetLevelEnumerationModeDeathTest, SameModeConsecutively2, "11391600") {
+    PerSubsetLevelEnumerationMode({{0, PlanEnumerationMode::ALL},
+                                   {3, PlanEnumerationMode::CHEAPEST},
+                                   {6, PlanEnumerationMode::CHEAPEST}});
+}
+DEATH_TEST(PerSubsetLevelEnumerationModeDeathTest, NonAscendingMode, "11391600") {
+    PerSubsetLevelEnumerationMode({{0, PlanEnumerationMode::ALL},
+                                   {1, PlanEnumerationMode::CHEAPEST},
+                                   {1, PlanEnumerationMode::ALL}});
+}
+DEATH_TEST(PerSubsetLevelEnumerationModeDeathTest, NonAscendingMode2, "11391600") {
+    PerSubsetLevelEnumerationMode({{0, PlanEnumerationMode::ALL},
+                                   {5, PlanEnumerationMode::CHEAPEST},
+                                   {4, PlanEnumerationMode::ALL}});
+}
+DEATH_TEST(PerSubsetLevelEnumerationModeDeathTest, NonAscendingMode3, "11391600") {
+    PerSubsetLevelEnumerationMode({
+        {0, PlanEnumerationMode::ALL},
+        {2, PlanEnumerationMode::CHEAPEST},
+        {4, PlanEnumerationMode::ALL},
+        {3, PlanEnumerationMode::CHEAPEST},
+    });
+}
+
+TEST_F(JoinPlanEnumeratorTest, MultiEnumerationModes) {
+    initGraph(3);
+    graph.addSimpleEqualityEdge(NodeId(0), NodeId(1), 0, 1);
+    graph.addSimpleEqualityEdge(NodeId(0), NodeId(2), 0, 2);
+    graph.addSimpleEqualityEdge(NodeId(1), NodeId(2), 1, 2);
+
+    auto jCtx = makeContext();
+    {
+        auto ctx =
+            makeEnumeratorContext(jCtx,
+                                  EnumerationStrategy{.planShape = PlanTreeShape::ZIG_ZAG,
+                                                      .mode = PerSubsetLevelEnumerationMode(
+                                                          {{0, PlanEnumerationMode::ALL},
+                                                           {1, PlanEnumerationMode::CHEAPEST},
+                                                           {2, PlanEnumerationMode::ALL}}),
+                                                      .enableHJOrderPruning = false});
+        ctx.enumerateJoinSubsets();
+
+        auto& level0 = ctx.getSubsets(0);
+        // 3 nodes => 3 base collection accesses (regardless of mode).
+        ASSERT_EQ(level0.size(), 3);
+        for (auto& subset : level0) {
+            ASSERT_EQ(subset.plans.size(), 1);
+        }
+
+        auto& level1 = ctx.getSubsets(1);
+        ASSERT_EQ(level1.size(), 3);
+        size_t totalPlans = 0;
+        for (auto& subset : level1) {
+            // Use cheapest enumeration mode => our "best plan" is always the last one enumerated.
+            // Depending on what's cheapest, we may have more/fewer plans. In this case, however, we
+            // enumerate the best plan first, so we only have one per subset.
+            ASSERT_EQ(subset.plans.size(), 1);
+            totalPlans += subset.plans.size();
+        }
+        // In all-plans enumeration mode, we would expect more plans.
+        ASSERT_EQ(totalPlans, 3);
+
+        auto& level2 = ctx.getSubsets(2);
+        ASSERT_EQ(level2.size(), 1);  // Only one subset left.
+        // Use ALL enumeration mode => every pair of plans generates 2HJ + 1NLJ (RHS must be
+        // base collection for NLJ), and we can enumerate all pairs of plans.
+        ASSERT_EQ(level2[0].plans.size(), 3 * totalPlans * (totalPlans - 1) / 2);
+    }
+
+    {
+        auto ctx =
+            makeEnumeratorContext(jCtx,
+                                  EnumerationStrategy{.planShape = PlanTreeShape::ZIG_ZAG,
+                                                      .mode = PerSubsetLevelEnumerationMode(
+                                                          {{0, PlanEnumerationMode::CHEAPEST},
+                                                           {1, PlanEnumerationMode::ALL},
+                                                           {2, PlanEnumerationMode::CHEAPEST}}),
+                                                      .enableHJOrderPruning = false});
+        ctx.enumerateJoinSubsets();
+
+        auto& level0 = ctx.getSubsets(0);
+        // 3 nodes => 3 base collection accesses (regardless of mode).
+        ASSERT_EQ(level0.size(), 3);
+        for (auto& subset : level0) {
+            ASSERT_EQ(subset.plans.size(), 1);
+        }
+
+        auto& level1 = ctx.getSubsets(1);
+        ASSERT_EQ(level1.size(), 3);
+        for (auto& subset : level1) {
+            // Enumerate up to 2HJ + 2NLJ per subset.
+            ASSERT_EQ(subset.plans.size(), 4);
+        }
+
+        auto& level2 = ctx.getSubsets(2);
+        ASSERT_EQ(level2.size(), 1);  // Only one subset left.
+        // Use CHEAPEST enumeration mode => best plan is always the last one we enumerated.
+        ASSERT_EQ(level2[0].plans.size(), level2[0].bestPlanIndex + 1);
+    }
+
+    {
+        auto ctx =
+            makeEnumeratorContext(jCtx,
+                                  EnumerationStrategy{.planShape = PlanTreeShape::ZIG_ZAG,
+                                                      .mode = PerSubsetLevelEnumerationMode(
+                                                          {{0, PlanEnumerationMode::CHEAPEST},
+                                                           {2, PlanEnumerationMode::ALL}}),
+                                                      .enableHJOrderPruning = false});
+        ctx.enumerateJoinSubsets();
+
+        auto& level0 = ctx.getSubsets(0);
+        // 3 nodes => 3 base collection accesses (regardless of mode).
+        ASSERT_EQ(level0.size(), 3);
+        for (auto& subset : level0) {
+            ASSERT_EQ(subset.plans.size(), 1);
+        }
+
+        auto& level1 = ctx.getSubsets(1);
+        ASSERT_EQ(level1.size(), 3);
+        size_t totalPlans = 0;
+        for (auto& subset : level1) {
+            ASSERT_EQ(subset.plans.size(), 1);
+            totalPlans += subset.plans.size();
+        }
+        ASSERT_EQ(totalPlans, 3);
+
+        auto& level2 = ctx.getSubsets(2);
+        ASSERT_EQ(level2.size(), 1);  // Only one subset left.
+        // Use ALL enumeration mode => every pair of plans generates 2HJ + 1NLJ (RHS must be
+        // base collection for NLJ), and we can enumerate all pairs of plans.
+        ASSERT_EQ(level2[0].plans.size(), 3 * totalPlans * (totalPlans - 1) / 2);
+    }
+
+    {
+        auto ctx =
+            makeEnumeratorContext(jCtx,
+                                  EnumerationStrategy{.planShape = PlanTreeShape::ZIG_ZAG,
+                                                      .mode = PerSubsetLevelEnumerationMode(
+                                                          {{0, PlanEnumerationMode::ALL},
+                                                           {2, PlanEnumerationMode::CHEAPEST}}),
+                                                      .enableHJOrderPruning = false});
+        ctx.enumerateJoinSubsets();
+
+        auto& level0 = ctx.getSubsets(0);
+        // 3 nodes => 3 base collection accesses (regardless of mode).
+        ASSERT_EQ(level0.size(), 3);
+        for (auto& subset : level0) {
+            ASSERT_EQ(subset.plans.size(), 1);
+        }
+
+        auto& level1 = ctx.getSubsets(1);
+        ASSERT_EQ(level1.size(), 3);
+        for (auto& subset : level1) {
+            // ALL => enumerate 2HJ + 2NLJ per subset.
+            ASSERT_EQ(subset.plans.size(), 4);
+        }
+
+        auto& level2 = ctx.getSubsets(2);
+        ASSERT_EQ(level2.size(), 1);  // Only one subset left.
+        // Best plan must be last plan enumerated.
+        ASSERT_EQ(level2[0].plans.size(), level2[0].bestPlanIndex + 1);
+    }
+}
+
 }  // namespace mongo::join_ordering

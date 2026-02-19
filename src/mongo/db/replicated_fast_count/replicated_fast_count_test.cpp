@@ -352,6 +352,78 @@ TEST_F(ReplicatedFastCountTest, DeletesAreCorrectlyAccountedFor) {
     checkUncommittedFastCountChanges(_opCtx, uuid, 0, 0);
 }
 
+TEST_F(ReplicatedFastCountTest, StartupFailsIfFastCountCollectionNotPresent) {
+    RAIIServerParameterControllerForTest featureFlag("featureFlagReplicatedFastCount", true);
+
+    _fastCountManager->shutdown();
+
+    {
+        repl::UnreplicatedWritesBlock uwb(_opCtx);
+        ASSERT_OK(storageInterface()->dropCollection(
+            _opCtx,
+            NamespaceString::makeGlobalConfigCollection(
+                NamespaceString::kSystemReplicatedFastCountStore)));
+    }
+
+    ASSERT_THROWS_CODE(_fastCountManager->startup(_opCtx), DBException, 11718600);
+}
+
+TEST_F(ReplicatedFastCountTest, StartupInitializesMetadataFromExistingInternalCollection) {
+    RAIIServerParameterControllerForTest featureFlag("featureFlagReplicatedFastCount", true);
+
+    _fastCountManager->shutdown();
+
+    // Pre-populate the internal replicated fast count collection with two entries.
+    UUID uuid1 = UUID::gen();
+    UUID uuid2 = UUID::gen();
+
+    const int64_t expectedCount1 = 5;
+    const int64_t expectedSize1 = 100;
+
+    const int64_t expectedCount2 = 10;
+    const int64_t expectedSize2 = 250;
+
+    {
+        AutoGetCollection fastCountColl(_opCtx,
+                                        NamespaceString::makeGlobalConfigCollection(
+                                            NamespaceString::kSystemReplicatedFastCountStore),
+                                        LockMode::MODE_IX);
+        ASSERT(fastCountColl);
+
+        WriteUnitOfWork wuow{_opCtx};
+
+        ASSERT_OK(Helpers::insert(
+            _opCtx,
+            *fastCountColl,
+            BSON("_id" << uuid1 << ReplicatedFastCountManager::kCountKey << expectedCount1
+                       << ReplicatedFastCountManager::kSizeKey << expectedSize1)));
+
+        ASSERT_OK(Helpers::insert(
+            _opCtx,
+            *fastCountColl,
+            BSON("_id" << uuid2 << ReplicatedFastCountManager::kCountKey << expectedCount2
+                       << ReplicatedFastCountManager::kSizeKey << expectedSize2)));
+
+        wuow.commit();
+    }
+
+    checkFastCountMetadataInInternalCollection(
+        _opCtx, uuid1, /*expectPersisted=*/true, expectedCount1, expectedSize1);
+    checkFastCountMetadataInInternalCollection(
+        _opCtx, uuid2, /*expectPersisted=*/true, expectedCount2, expectedSize2);
+
+    checkCommittedFastCountChanges(
+        uuid1, _fastCountManager, /*expectedCount=*/0, /*expectedSize=*/0);
+    checkCommittedFastCountChanges(
+        uuid2, _fastCountManager, /*expectedCount=*/0, /*expectedSize=*/0);
+
+    _fastCountManager->startup(_opCtx);
+
+    // After startup(), the in-memory _metadata map should reflect the persisted values.
+    checkCommittedFastCountChanges(uuid1, _fastCountManager, expectedCount1, expectedSize1);
+    checkCommittedFastCountChanges(uuid2, _fastCountManager, expectedCount2, expectedSize2);
+}
+
 TEST_F(ReplicatedFastCountTest, DirtyWriteNotLostIfWrittenAfterMetadataSnapshot) {
     RAIIServerParameterControllerForTest featureFlag("featureFlagReplicatedFastCount", true);
 

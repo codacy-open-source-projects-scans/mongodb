@@ -57,9 +57,6 @@ void ReplicatedFastCountManager::initializeFastCountCommitFn() {
 }
 
 void ReplicatedFastCountManager::startup(OperationContext* opCtx) {
-    // TODO SERVER-117650: Read existing collection to populate in-memory metadata. This is
-    // currently executed before oplog application, so if there is an create entry for this
-    // collection to apply we will currently miss it.
     uassert(11905700,
             "ReplicatedFastCountManager background thread already running. It should only be "
             "started up once.",
@@ -67,28 +64,31 @@ void ReplicatedFastCountManager::startup(OperationContext* opCtx) {
     {
         auto acquisition = _acquireFastCountCollection(opCtx);
 
-        if (acquisition && acquisition->collectionExists()) {
-            LOGV2(11648801,
-                  "ReplicatedFastCountManager::startup fastcount collection exists, "
-                  "initializing sizes and counts");
-            stdx::lock_guard lock(_metadataMutex);
+        uassert(
+            11718600, "Expected fastcount collection to exist on startup", acquisition.has_value());
 
-            auto cursor = acquisition->getCollectionPtr()->getCursor(opCtx);
-            while (auto record = cursor->next()) {
-                Record& rec = *record;
-                UUID uuid = _UUIDForKey(rec.id);
-                BSONObj data = rec.data.releaseToBson();
+        stdx::lock_guard lock(_metadataMutex);
 
-                auto& meta = _metadata[uuid];
-                meta.sizeCount.count = data.getField(kCountKey).Long();
-                meta.sizeCount.size = data.getField(kSizeKey).Long();
-            }
-            LOGV2(11648802, "ReplicatedFastCountManager::startup initialization complete");
-        } else {
-            LOGV2(11648803,
-                  "ReplicatedFastCountManager::startup fastcount collection does not "
-                  "exist, no initialization needed");
+        const auto startTime = Date_t::now();
+        int numRecordsScanned = 0;
+
+        auto cursor = acquisition->getCollectionPtr()->getCursor(opCtx);
+        while (auto record = cursor->next()) {
+            Record& rec = *record;
+            UUID uuid = _UUIDForKey(rec.id);
+            BSONObj data = rec.data.releaseToBson();
+
+            ++numRecordsScanned;
+
+            auto& meta = _metadata[uuid];
+            meta.sizeCount.count = data.getField(kCountKey).Long();
+            meta.sizeCount.size = data.getField(kSizeKey).Long();
         }
+
+        LOGV2(11648801,
+              "ReplicatedFastCountManager::startup initialization complete",
+              "numRecordsScanned"_attr = numRecordsScanned,
+              "duration"_attr = Date_t::now() - startTime);
     }
 
     _backgroundThread = stdx::thread(
@@ -306,22 +306,20 @@ void ReplicatedFastCountManager::_insertOneMetadata(OperationContext* opCtx,
 
 boost::optional<CollectionOrViewAcquisition>
 ReplicatedFastCountManager::_acquireFastCountCollection(OperationContext* opCtx) {
-    {
-        CollectionOrViewAcquisition acquisition =
-            acquireCollectionOrView(opCtx,
-                                    CollectionOrViewAcquisitionRequest::fromOpCtx(
-                                        opCtx,
-                                        NamespaceString::makeGlobalConfigCollection(
-                                            NamespaceString::kSystemReplicatedFastCountStore),
-                                        AcquisitionPrerequisites::OperationType::kWrite),
-                                    LockMode::MODE_IX);
+    CollectionOrViewAcquisition acquisition =
+        acquireCollectionOrView(opCtx,
+                                CollectionOrViewAcquisitionRequest::fromOpCtx(
+                                    opCtx,
+                                    NamespaceString::makeGlobalConfigCollection(
+                                        NamespaceString::kSystemReplicatedFastCountStore),
+                                    AcquisitionPrerequisites::OperationType::kWrite),
+                                LockMode::MODE_IX);
 
-        if (acquisition.getCollectionPtr()) {
-            return acquisition;
-        }
+    if (acquisition.getCollectionPtr()) {
+        return acquisition;
     }
 
-    uasserted(11718600, "Expected fastcount collection to exist");
+    return boost::none;
 }
 
 BSONObj ReplicatedFastCountManager::_getDocForWrite(const UUID& uuid,

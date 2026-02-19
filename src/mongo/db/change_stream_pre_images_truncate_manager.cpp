@@ -30,6 +30,7 @@
 #include "mongo/db/change_stream_pre_images_truncate_manager.h"
 
 #include "mongo/db/admission/execution_control/execution_admission_context.h"
+#include "mongo/db/change_stream_pre_image_id_util.h"
 #include "mongo/db/change_stream_pre_image_util.h"
 #include "mongo/db/change_stream_pre_images_truncate_markers.h"
 #include "mongo/db/shard_role/lock_manager/exception_util.h"
@@ -82,7 +83,7 @@ void PreImagesTruncateManager::updateMarkersOnInsert(OperationContext* opCtx,
     dassert(bytesInserted != 0);
     auto nsUUID = preImage.getId().getNsUUID();
     auto wallTime = preImage.getOperationTime();
-    auto recordId = change_stream_pre_image_util::toRecordId(preImage.getId());
+    auto recordId = change_stream_pre_image_id_util::toRecordId(preImage.getId());
 
     shard_role_details::getRecoveryUnit(opCtx)->onCommit(
         [this, nsUUID = std::move(nsUUID), recordId = std::move(recordId), bytesInserted, wallTime](

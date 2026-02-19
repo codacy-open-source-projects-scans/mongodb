@@ -28,14 +28,9 @@
  */
 #pragma once
 
-#include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/change_stream_preimage_gen.h"
-#include "mongo/db/query/record_id_bound.h"
-#include "mongo/db/record_id.h"
-#include "mongo/db/repl/oplog.h"
-#include "mongo/platform/int128.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
@@ -50,83 +45,28 @@ namespace mongo {
 namespace MONGO_MOD_NEEDS_REPLACEMENT change_stream_pre_image_util {
 
 /**
- * Whether or not replicated truncates should be used for pre-images collection truncation.
- * This will first consult the active persistence provider (for ASC or DSC) and call
- * 'shouldUseReplicatedTruncates()' on it. If this returns true, then replicated truncates will be
- * used. If this does not return true, the feature flag
- * 'gFeatureFlagUseReplicatedTruncatesForDeletions' will be consulted and its value will be
- * returned.
+ * Whether or not replicated truncates should be used for pre-images collection
+ * truncation. This will first consult the active persistence provider (for ASC
+ * or DSC) and call 'shouldUseReplicatedTruncates()' on it. If this returns
+ * true, then replicated truncates will be used. If this does not return true,
+ * the feature flag 'gFeatureFlagUseReplicatedTruncatesForDeletions' will be
+ * consulted and its value will be returned.
  */
 bool shouldUseReplicatedTruncatesForPreImages(OperationContext* opCtx);
 
 /**
- * If 'expireAfterSeconds' is defined for pre-images, returns its value. Otherwise, returns
- * boost::none.
+ * If 'expireAfterSeconds' is defined for pre-images, returns its value.
+ * Otherwise, returns boost::none.
  */
 boost::optional<Seconds> getExpireAfterSeconds(OperationContext* opCtx);
 
 /**
- * If 'expireAfterSeconds' is defined for pre-images, returns the 'date' at which all pre-images
- * with 'operationTime' <= 'date' are expired. Otherwise, returns boost::none.
+ * If 'expireAfterSeconds' is defined for pre-images, returns the 'date' at
+ * which all pre-images with 'operationTime' <= 'date' are expired. Otherwise,
+ * returns boost::none.
  */
 boost::optional<Date_t> getPreImageOpTimeExpirationDate(OperationContext* opCtx,
                                                         Date_t currentTime);
-
-/**
- * Parses the 'ts' field from the 'ChangeStreamPreImageId' associated with the 'rid'. The 'rid' MUST
- * be generated from a pre-image, otherwise the behavior of this method is undefined.
- */
-Timestamp getPreImageTimestamp(const RecordId& rid);
-
-/**
- * Parses the 'ts' and 'applyOpsIndex' fields from the 'ChangeStreamPreImageId' associated with the
- * 'rid'. The 'rid' MUST be generated from a pre-image, otherwise the behavior of this method is
- * undefined.
- */
-std::pair<Timestamp, int64_t> getPreImageTimestampAndApplyOpsIndex(const RecordId& rid);
-
-/**
- * Converts the 'ts' and 'applyOpsIndex' fields from the 'rid' into a numeric value, for easier
- * arithmetic. The 'rid' MUST be generated from a pre-image.
- * In the resulting numeric value, the 'Timestamp' part will be more significant than the
- * 'applyOpsIndex' part, i.e. the resulting numeric values sort first by their 'Timestamp' part,
- * then by their 'applyOpsIndex' part.
- */
-uint128_t timestampAndApplyOpsIndexToNumber(const RecordId& rid);
-
-/**
- * Converts the 'ts' and 'applyOpsIndex' values into a numeric value, for easier arithmetic.
- * In the resulting numeric value, the 'Timestamp' part will be more significant than the
- * 'applyOpsIndex' part, i.e. the resulting numeric values sort first by their 'Timestamp' part,
- * then by their 'applyOpsIndex' part.
- */
-uint128_t timestampAndApplyOpsIndexToNumber(Timestamp ts, int64_t applyOpsIndex);
-
-/**
- * Converts the numeric value back into its 'ts' and 'applyOpsIndex' components.
- */
-std::pair<Timestamp, int64_t> timestampAndApplyOpsIndexFromNumber(uint128_t value);
-
-/**
- * Converts the 'ChangeStreamPreImageId' to its 'RecordId' equivalent.
- */
-RecordId toRecordId(const ChangeStreamPreImageId& id);
-
-/**
- * Construct a 'RecordIdBound' for the specified combination of 'nsUUID', Timestamp 'ts' and
- * 'applyOpsIndex'.
- */
-RecordIdBound getPreImageRecordIdForNsTimestampApplyOpsIndex(const UUID& nsUUID,
-                                                             Timestamp ts,
-                                                             int64_t applyOpsIndex);
-
-/**
- * A given pre-images collection consists of segments of pre-images generated from different UUIDs.
- * Returns the absolute min/max RecordIdBounds for the segment of pre-images generated from
- * 'nsUUID'.
- */
-RecordIdBound getAbsoluteMinPreImageRecordIdBoundForNs(const UUID& nsUUID);
-RecordIdBound getAbsoluteMaxPreImageRecordIdBoundForNs(const UUID& nsUUID);
 
 /**
  * Truncates all pre-images with '_id.ts' <= 'expirationTimestampApproximation'.
@@ -136,12 +76,11 @@ void truncatePreImagesByTimestampExpirationApproximation(
     const CollectionAcquisition& preImagesColl,
     Timestamp expirationTimestampApproximation);
 
-UUID getPreImageNsUUID(const BSONObj& preImageObj);
-
 /**
- * Finds the next collection UUID in 'preImagesCollPtr' greater than 'currentNsUUID'. Returns
- * boost::none if the next collection is not found. Stores the wall time of the first record in the
- * next collection in 'firstDocWallTime'.
+ * Finds the next collection UUID in 'preImagesCollPtr' greater than
+ * 'currentNsUUID'. Returns boost::none if the next collection is not found.
+ * Stores the wall time of the first record in the next collection in
+ * 'firstDocWallTime'.
  */
 boost::optional<UUID> findNextCollectionUUID(OperationContext* opCtx,
                                              const CollectionAcquisition& preImagesColl,
@@ -155,8 +94,9 @@ stdx::unordered_set<UUID, UUID::Hash> getNsUUIDs(OperationContext* opCtx,
                                                  const CollectionAcquisition& preImagesCollection);
 
 /**
- * Preferred method for getting the current time in pre-image removal code - in testing
- * environments, the 'changeStreamPreImageRemoverCurrentTime' failpoint can alter the return value.
+ * Preferred method for getting the current time in pre-image removal code - in
+ * testing environments, the 'changeStreamPreImageRemoverCurrentTime' failpoint
+ * can alter the return value.
  *
  * Returns the current time.
  */

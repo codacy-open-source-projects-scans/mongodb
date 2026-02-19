@@ -70,7 +70,10 @@ namespace mongo {
  * collection(s) once, the first time a mongod creates its data files. It is assumed
  * these backing collections exist from then on.
  *
- * This class is thread-safe, and synchroizes access to the in-memory SizeCount cache,
+ * The backing collections are expected to exist before starting up the ReplicatedFastCountManager
+ * background thread.
+ *
+ * This class is thread-safe, and synchronizes access to the in-memory SizeCount cache,
  * i.e. _metadata.
  *
  * The write path should generally not depend directly on this class, because it relies on

@@ -39,7 +39,42 @@
 namespace mongo::join_ordering {
 namespace {
 static constexpr size_t kBaseLevel = 0;
+
+/**
+ * Validates that the enumeration strategy 'mode' has two properties- strictly ascending, and no two
+ * consecutive modes are the same.
+ */
+bool isEnumerationModeValid(const std::vector<std::pair<size_t, PlanEnumerationMode>>& mode) {
+    if (mode.size() < 1) {
+        // Must have at least one entry.
+        return false;
+    }
+
+    if (mode[0].first != 0) {
+        // That entry must specify how we should start enumeration from the 1st subset.
+        return false;
+    }
+
+    for (size_t i = 1; i < mode.size(); i++) {
+        if (mode[i - 1].first >= mode[i].first) {
+            // Not strictly ascending.
+            return false;
+        }
+
+        if (mode[i - 1].second == mode[i].second) {
+            // Two consecutive levels specify the same enumeration mode.
+            return false;
+        }
+    }
+    return true;
+}
 }  // namespace
+
+PerSubsetLevelEnumerationMode::PerSubsetLevelEnumerationMode(
+    std::vector<std::pair<size_t, PlanEnumerationMode>> modes)
+    : _modes{std::move(modes)} {
+    tassert(11391600, "Expected valid enumeration mode", isEnumerationModeValid(_modes));
+}
 
 const std::vector<JoinSubset>& PlanEnumeratorContext::getSubsets(int level) {
     return _joinSubsets[level];
@@ -121,7 +156,7 @@ void PlanEnumeratorContext::enumerateINLJPlan(EdgeId edge,
 
     auto inljCost = _coster->costINLJFragment(_registry.get(leftPlan), rightNodeId, ie);
     bool isBestPlan = isBestPlanSoFar(subset, inljCost);
-    if (_strategy.mode == PlanEnumerationMode::CHEAPEST && !isBestPlan) {
+    if (_mode == PlanEnumerationMode::CHEAPEST && !isBestPlan) {
         // Only build this plan if it is better than what we already have.
         return;
     }
@@ -146,7 +181,7 @@ void PlanEnumeratorContext::enumerateJoinPlan(JoinMethod method,
     }();
 
     bool isBestPlan = isBestPlanSoFar(subset, joinCost);
-    if (_strategy.mode == PlanEnumerationMode::CHEAPEST && !isBestPlan) {
+    if (_mode == PlanEnumerationMode::CHEAPEST && !isBestPlan) {
         // Only build this plan if it is better than what we already have.
         return;
     }
@@ -211,7 +246,7 @@ void PlanEnumeratorContext::addJoinPlan(JoinMethod method,
         return;
     }
 
-    switch (_strategy.mode) {
+    switch (_mode) {
         case PlanEnumerationMode::CHEAPEST: {
             enumerateCheapestJoinPlan(method, left, right, edges, subset);
             break;
@@ -250,7 +285,7 @@ void PlanEnumeratorContext::enumerateJoinPlans(const JoinSubset& left,
 }
 
 void PlanEnumeratorContext::enumerateJoinSubsets() {
-    int numNodes = _ctx.joinGraph.numNodes();
+    size_t numNodes = _ctx.joinGraph.numNodes();
     // Use CombinationSequence to efficiently calculate the final size of each level of the dynamic
     // programming table.
     CombinationSequence cs(numNodes);
@@ -258,8 +293,12 @@ void PlanEnumeratorContext::enumerateJoinSubsets() {
     cs.next();
     _joinSubsets.resize(cs.next());
 
+    auto modeIt = _strategy.mode.begin();
+    _mode = modeIt.get().second;
+    modeIt.next();
+
     // Initialize base level of joinSubsets, representing single collections (no joins).
-    for (int i = 0; i < numNodes; ++i) {
+    for (size_t i = 0; i < numNodes; ++i) {
         const auto* cq = _ctx.joinGraph.getNode((NodeId)i).accessPath.get();
         const auto* qsn = _ctx.cbrCqQsns.at(cq).get();
         _joinSubsets[kBaseLevel].push_back(JoinSubset(NodeSet{}.set(i)));
@@ -268,7 +307,15 @@ void PlanEnumeratorContext::enumerateJoinSubsets() {
     }
 
     // Initialize the rest of the joinSubsets.
-    for (int level = 1; level < numNodes; ++level) {
+    for (size_t level = 1; level < numNodes; ++level) {
+        // Find the right enumeration mode for the current level. Only need to increment by one
+        // because strategy modes change at most as frequently as once per level.
+        if (modeIt != _strategy.mode.end() && modeIt.get().first == level) {
+            // Update the mode once we reach the level it refers to.
+            _mode = modeIt.get().second;
+            modeIt.next();
+        }
+
         auto& joinSubsetsPrevLevel = _joinSubsets[level - 1];
         auto& joinSubsetsCurrLevel = _joinSubsets[level];
         // Preallocate entries for all subsets in the current level.
@@ -281,7 +328,7 @@ void PlanEnumeratorContext::enumerateJoinSubsets() {
         // For each join subset of size level-1, iterate through nodes 0 to n-1 and use bitwise-or
         // to enumerate all possible join subsets of size level.
         for (auto&& prevJoinSubset : joinSubsetsPrevLevel) {
-            for (int i = 0; i < numNodes; ++i) {
+            for (size_t i = 0; i < numNodes; ++i) {
                 // If the existing join subset contains the current node, avoid generating a new
                 // entry.
                 if (prevJoinSubset.subset.test(i)) {

@@ -27,7 +27,7 @@
  *    it in the license file.
  */
 
-#include "mongo/db/change_stream_pre_image_util.h"
+#include "mongo/db/change_stream_pre_image_id_util.h"
 
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
@@ -39,11 +39,11 @@
 namespace mongo {
 
 namespace {
-using namespace change_stream_pre_image_util;
+using namespace change_stream_pre_image_id_util;
 
 const UUID kNsUUID = UUID::gen();
 
-TEST(ChangeStreamPreImageUtilTest, GetPreImageTimestampAndApplyOsIndex) {
+TEST(ChangeStreamPreImageIdUtilTest, GetPreImageTimestampAndApplyOsIndex) {
     {
         const Timestamp ts = Timestamp(1, 1);
         const int64_t applyOpsIndex = 0;
@@ -71,7 +71,7 @@ TEST(ChangeStreamPreImageUtilTest, GetPreImageTimestampAndApplyOsIndex) {
     }
 }
 
-TEST(ChangeStreamPreImageUtilTest, TimestampAndApplyOpsNumberConversionEmpty) {
+TEST(ChangeStreamPreImageIdUtilTest, TimestampAndApplyOpsNumberConversionEmpty) {
     const Timestamp ts = Timestamp();
     const int64_t applyOpsIndex = 0;
 
@@ -81,7 +81,7 @@ TEST(ChangeStreamPreImageUtilTest, TimestampAndApplyOpsNumberConversionEmpty) {
     ASSERT_EQ(applyOpsIndex, converted.second);
 }
 
-TEST(ChangeStreamPreImageUtilTest, TimestampAndApplyOpsNumberConversionToNumber) {
+TEST(ChangeStreamPreImageIdUtilTest, TimestampAndApplyOpsNumberConversionToNumber) {
     const Timestamp ts = {Seconds(992412), 1};
     const int64_t applyOpsIndex = 1;
 
@@ -94,7 +94,7 @@ TEST(ChangeStreamPreImageUtilTest, TimestampAndApplyOpsNumberConversionToNumber)
     ASSERT_EQ(applyOpsIndex, converted.second);
 }
 
-TEST(ChangeStreamPreImageUtilTest, TimestampAndApplyOpsNumericIncrements) {
+TEST(ChangeStreamPreImageIdUtilTest, TimestampAndApplyOpsNumericIncrements) {
     const Timestamp ts = {Seconds(992412), 1};
     const int64_t applyOpsIndex = 1;
 
@@ -123,7 +123,7 @@ TEST(ChangeStreamPreImageUtilTest, TimestampAndApplyOpsNumericIncrements) {
     }
 }
 
-TEST(ChangeStreamPreImageUtilTest, TimestampAndApplyOpsNumericDecrements) {
+TEST(ChangeStreamPreImageIdUtilTest, TimestampAndApplyOpsNumericDecrements) {
     const Timestamp ts = {Seconds(992412), 1};
     const int64_t applyOpsIndex = 1;
 
@@ -153,7 +153,7 @@ TEST(ChangeStreamPreImageUtilTest, TimestampAndApplyOpsNumericDecrements) {
     }
 }
 
-TEST(ChangeStreamPreImageUtilTest, TimestampAndApplyOpsIndexNumericOverflows) {
+TEST(ChangeStreamPreImageIdUtilTest, TimestampAndApplyOpsIndexNumericOverflows) {
     // Use maximum value for Timestamp seconds part and do arithmetic.
     {
         const Timestamp ts = Timestamp{Seconds(std::numeric_limits<uint32_t>::max()), 123};
@@ -204,7 +204,7 @@ TEST(ChangeStreamPreImageUtilTest, TimestampAndApplyOpsIndexNumericOverflows) {
     }
 }
 
-DEATH_TEST_REGEX(ChangeStreamPreImageUtilDeathTest,
+DEATH_TEST_REGEX(ChangeStreamPreImageIdUtilDeathTest,
                  TimestampAndApplyOpsNumberConversionNegativeApplyOpsIndex,
                  "invariant.*failure") {
     // Triggers an invariant failure.

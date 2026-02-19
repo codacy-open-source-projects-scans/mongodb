@@ -29,19 +29,16 @@
 
 #include "mongo/db/change_stream_pre_image_util.h"
 
-#include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/change_stream_options_gen.h"
 #include "mongo/db/change_stream_options_manager.h"
+#include "mongo/db/change_stream_pre_image_id_util.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_yield_policy.h"
-#include "mongo/db/record_id.h"
-#include "mongo/db/record_id_helpers.h"
 #include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/service_context.h"
@@ -54,7 +51,6 @@
 #include "mongo/util/str.h"
 
 #include <cstdint>
-#include <limits>
 #include <string>
 #include <utility>
 #include <variant>
@@ -62,15 +58,6 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo {
-static constexpr auto kTopLevelFieldName = "ridAsBSON"_sd;
-
-// Number of valid bits for 'applyOpsIndex' value. The highest (64th) bit would be the sign bit, but
-// 'applyOpsIndex' values must always be >= 0.
-static constexpr uint64_t kApplyOpsIndexBits = 63;
-
-// Bit mask for masking out the highest bit of an 'applyOpsIndex' value.
-static constexpr uint128_t kBitMaskForApplyOpsIndex = ~(uint64_t(1) << kApplyOpsIndexBits);
-
 // Fail point to set current time for time-based expiration of pre-images.
 MONGO_FAIL_POINT_DEFINE(changeStreamPreImageRemoverCurrentTime);
 
@@ -122,88 +109,6 @@ boost::optional<Date_t> getPreImageOpTimeExpirationDate(OperationContext* opCtx,
     return boost::none;
 }
 
-Timestamp getPreImageTimestamp(const RecordId& rid) {
-    auto ridAsNestedBSON = record_id_helpers::toBSONAs(rid, kTopLevelFieldName);
-
-    // 'toBSONAs()' discards type bits of the underlying KeyString of the RecordId. However, since
-    // the 'ts' field of 'ChangeStreamPreImageId' is distinct CType::kTimestamp, type bits aren't
-    // necessary to obtain the original value.
-    auto ridBSON = ridAsNestedBSON.getObjectField(kTopLevelFieldName);
-
-    auto tsElem = ridBSON.getField(ChangeStreamPreImageId::kTsFieldName);
-    invariant(!tsElem.eoo());
-    return tsElem.timestamp();
-}
-
-std::pair<Timestamp, int64_t> getPreImageTimestampAndApplyOpsIndex(const RecordId& rid) {
-    auto ridAsNestedBSON = record_id_helpers::toBSONAs(rid, kTopLevelFieldName);
-
-    // 'toBSONAs()' discards type bits of the underlying KeyString of the RecordId. However, since
-    // the 'ts' field of 'ChangeStreamPreImageId' is distinct CType::kTimestamp, type bits aren't
-    // necessary to obtain the original value.
-    auto ridBSON = ridAsNestedBSON.getObjectField(kTopLevelFieldName);
-
-    auto tsElem = ridBSON.getField(ChangeStreamPreImageId::kTsFieldName);
-    invariant(!tsElem.eoo());
-
-    auto applyOpsElem = ridBSON.getField(ChangeStreamPreImageId::kApplyOpsIndexFieldName);
-    invariant(!applyOpsElem.eoo());
-
-    return {tsElem.timestamp(), applyOpsElem.numberLong()};
-}
-
-uint128_t timestampAndApplyOpsIndexToNumber(const RecordId& rid) {
-    auto [ts, applyOpsIndex] = getPreImageTimestampAndApplyOpsIndex(rid);
-    return timestampAndApplyOpsIndexToNumber(ts, applyOpsIndex);
-}
-
-uint128_t timestampAndApplyOpsIndexToNumber(Timestamp ts, int64_t applyOpsIndex) {
-    // 'applyOpsIndex' cannot be negative. It is stored as an int64_t inside the records,
-    // but must have a value >= 0.
-    invariant(applyOpsIndex >= 0);
-
-    // The higher 65 bits of the resulting uint128_t value are the timestamp bits. The highest bit
-    // is always cleared.
-    uint128_t value = static_cast<uint128_t>(ts.asULL()) << kApplyOpsIndexBits;
-
-    // The lower 63 bits of the resulting uint128_t value are the applyOpsIndex bits. The maximum
-    // possible value of the applyOpsIndex has only 63 bits set. If the 'applyOpsIndex' part in the
-    // lower half of the uint128_t value overflows, we want it to leak into the lower bits of the
-    // upper half.
-    value |= uint128_t(applyOpsIndex) & kBitMaskForApplyOpsIndex;
-
-    return value;
-}
-
-std::pair<Timestamp, int64_t> timestampAndApplyOpsIndexFromNumber(uint128_t value) {
-    // The 'applyOpsIndex' part are the lower 63 bits of the value.
-    int64_t applyOpsIndex = static_cast<int64_t>(value & kBitMaskForApplyOpsIndex);
-
-    // The timestamp part is contained in the upper 64 bits of the value.
-    return {Timestamp(static_cast<unsigned long long>(value >> kApplyOpsIndexBits)), applyOpsIndex};
-}
-
-RecordId toRecordId(const ChangeStreamPreImageId& id) {
-    return record_id_helpers::keyForElem(
-        BSON(ChangeStreamPreImage::kIdFieldName << id.toBSON()).firstElement());
-}
-
-RecordIdBound getPreImageRecordIdForNsTimestampApplyOpsIndex(const UUID& nsUUID,
-                                                             Timestamp ts,
-                                                             int64_t applyOpsIndex) {
-    return RecordIdBound(change_stream_pre_image_util::toRecordId(
-        ChangeStreamPreImageId(nsUUID, ts, applyOpsIndex)));
-}
-
-RecordIdBound getAbsoluteMinPreImageRecordIdBoundForNs(const UUID& nsUUID) {
-    return getPreImageRecordIdForNsTimestampApplyOpsIndex(nsUUID, Timestamp(), 0);
-}
-
-RecordIdBound getAbsoluteMaxPreImageRecordIdBoundForNs(const UUID& nsUUID) {
-    return getPreImageRecordIdForNsTimestampApplyOpsIndex(
-        nsUUID, Timestamp::max(), std::numeric_limits<int64_t>::max());
-}
-
 void truncatePreImagesByTimestampExpirationApproximation(
     OperationContext* opCtx,
     const CollectionAcquisition& preImagesCollection,
@@ -213,18 +118,24 @@ void truncatePreImagesByTimestampExpirationApproximation(
 
     for (const auto& nsUUID : nsUUIDs) {
         RecordId minRecordId =
-            change_stream_pre_image_util::getAbsoluteMinPreImageRecordIdBoundForNs(nsUUID)
+            change_stream_pre_image_id_util::getAbsoluteMinPreImageRecordIdBoundForNs(nsUUID)
                 .recordId();
 
         RecordId maxRecordIdApproximation =
             RecordIdBound(
-                change_stream_pre_image_util::toRecordId(ChangeStreamPreImageId(
+                change_stream_pre_image_id_util::toRecordId(ChangeStreamPreImageId(
                     nsUUID, expirationTimestampApproximation, std::numeric_limits<int64_t>::max())))
                 .recordId();
 
         // Truncation is based on Timestamp expiration approximation -
         // meaning there isn't a good estimate of the number of bytes and
         // documents to be truncated, so default to 0.
+        //
+        // We deliberately skip RecordId range validation here. Validation relies on replication
+        // frontiers (allDurable / lastApplied) being initialized, which is not the case yet during
+        // this early recovery window. Using those frontiers would incorrectly reject this truncate.
+        // This approximation-based, unreplicated truncate is a transitional mechanism and is
+        // expected to be removed once pre-images are using replicated truncates.
         repl::UnreplicatedWritesBlock uwb(opCtx);
         WriteUnitOfWork wuow(opCtx);
         collection_internal::truncateRange(opCtx,
@@ -232,16 +143,10 @@ void truncatePreImagesByTimestampExpirationApproximation(
                                            minRecordId,
                                            maxRecordIdApproximation,
                                            0,
-                                           0);
+                                           0,
+                                           false /* shouldValidateRecordIdRange */);
         wuow.commit();
     }
-}
-
-UUID getPreImageNsUUID(const BSONObj& preImageObj) {
-    auto parsedUUID = UUID::parse(preImageObj[ChangeStreamPreImage::kIdFieldName]
-                                      .Obj()[ChangeStreamPreImageId::kNsUUIDFieldName]);
-    tassert(7027400, "Pre-image collection UUID must be of UUID type", parsedUUID.isOK());
-    return std::move(parsedUUID.getValue());
 }
 
 boost::optional<UUID> findNextCollectionUUID(OperationContext* opCtx,
@@ -254,7 +159,7 @@ boost::optional<UUID> findNextCollectionUUID(OperationContext* opCtx,
     // 'currentNsUUID'.
     auto minRecordId = currentNsUUID
         ? boost::make_optional(
-              change_stream_pre_image_util::getAbsoluteMaxPreImageRecordIdBoundForNs(
+              change_stream_pre_image_id_util::getAbsoluteMaxPreImageRecordIdBoundForNs(
                   *currentNsUUID))
         : boost::none;
     auto planExecutor =
@@ -269,7 +174,7 @@ boost::optional<UUID> findNextCollectionUUID(OperationContext* opCtx,
     }
 
     firstDocWallTime = preImageObj[ChangeStreamPreImage::kOperationTimeFieldName].date();
-    return getPreImageNsUUID(preImageObj);
+    return change_stream_pre_image_id_util::getPreImageNsUUID(preImageObj);
 }
 
 stdx::unordered_set<UUID, UUID::Hash> getNsUUIDs(OperationContext* opCtx,

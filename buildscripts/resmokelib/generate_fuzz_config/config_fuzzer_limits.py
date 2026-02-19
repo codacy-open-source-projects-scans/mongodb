@@ -622,6 +622,17 @@ config_fuzzer_params = {
             "period": 60,
             "fuzz_at": ["startup", "runtime"],
         },
+        "preAuthMaximumMessageSizeBytes": {
+            "min": 65536,  # 64 KiB
+            "max": 16777216,  # 16 MiB
+            "period": 10,
+            "fuzz_at": ["startup", "runtime"],
+        },
+        "capMemoryConsumptionForPreAuthBuffers": {
+            "min": 80,
+            "max": 100,
+            "fuzz_at": ["startup"],
+        },
     },
     "mongos": {
         # We need a higher timeout to account for test slowness
@@ -729,6 +740,17 @@ config_fuzzer_params = {
         # If we are enabling the above query stats flags in a test, we should also enable this one to catch any errors on collected queries.
         "internalQueryStatsErrorsAreCommandFatal": {
             "default": True,
+            "fuzz_at": ["startup"],
+        },
+        "preAuthMaximumMessageSizeBytes": {
+            "min": 65536,  # 64 KiB
+            "max": 16777216,  # 16 MiB
+            "period": 10,
+            "fuzz_at": ["startup", "runtime"],
+        },
+        "capMemoryConsumptionForPreAuthBuffers": {
+            "min": 80,
+            "max": 100,
             "fuzz_at": ["startup"],
         },
     },

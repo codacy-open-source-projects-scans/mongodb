@@ -53,12 +53,77 @@ enum class PlanEnumerationMode {
 };
 
 /**
+ * This structure allows us to specify a particular enumeration mode per subset level. Note that:
+ *  - A mode must always be specified for level 0.
+ *  - It is not permitted to specify the same exact mode for two consecutive entries.
+ *
+ * The default mode is:
+ *  {{0, CHEAPEST}}
+ *
+ * This means that for all subset levels (including 0), we will use the "CHEAPEST" enumeration mode.
+ *
+ * Modes are "sticky" until a the next entry specifying a new mode for a level is found, i.e. levels
+ * keep using the mode last specified for the previous level unless there is an entry specifically
+ * for that level. For example:
+ *  {{0, CHEAPEST}, {2, ALL}, {4, CHEAPEST}}
+ *
+ * For subset levels 0 & 1, we will apply the "CHEAPEST" enumeration mode. Then, for subsets 2 & 3,
+ * we will apply all plans enumeration (ALL). Finally, for any subset level 4+, we go back to
+ * picking the cheapest subset.
+ */
+class PerSubsetLevelEnumerationMode {
+public:
+    PerSubsetLevelEnumerationMode(PlanEnumerationMode mode) : _modes{{0, mode}} {}
+    PerSubsetLevelEnumerationMode(std::vector<std::pair<size_t, PlanEnumerationMode>> modes);
+
+    struct Iterator {
+        Iterator& next() {
+            if (_index < _mode._modes.size()) {
+                _index++;
+            }
+            return *this;
+        }
+
+        bool operator==(const Iterator& other) const {
+            tassert(
+                11391603, "Must be comparing iterators on same instance", &_mode == &other._mode);
+            return _index == other._index;
+        }
+
+        auto get() const {
+            tassert(11391604, "Must not be end iterator", _index < _mode._modes.size());
+            return _mode._modes[_index];
+        }
+
+    private:
+        Iterator(const PerSubsetLevelEnumerationMode& mode, size_t index)
+            : _mode{mode}, _index{index} {}
+
+        const PerSubsetLevelEnumerationMode& _mode;
+        size_t _index;
+        friend PerSubsetLevelEnumerationMode;
+    };
+
+    Iterator begin() const {
+        return Iterator(*this, 0);
+    };
+
+    Iterator end() const {
+        return Iterator(*this, _modes.size());
+    };
+
+private:
+    const std::vector<std::pair<size_t /* starting subset level */, PlanEnumerationMode>> _modes;
+    friend PerSubsetLevelEnumerationMode::Iterator;
+};
+
+/**
  * This configures the kinds of plans we're generating and how we're choosing between them during
  * enumeration.
  */
 struct EnumerationStrategy {
     PlanTreeShape planShape;
-    PlanEnumerationMode mode;
+    PerSubsetLevelEnumerationMode mode;
     bool enableHJOrderPruning;
 };
 
@@ -190,6 +255,9 @@ private:
     std::unique_ptr<JoinCardinalityEstimator> _estimator;
     std::unique_ptr<JoinCostEstimator> _coster;
     EnumerationStrategy _strategy;
+
+    // Variable tracking current enumeration mode during enumeration.
+    PlanEnumerationMode _mode;
 
     // Hold intermediate results of the enumeration algorithm. The index into the outer vector
     // represents the "level". The i'th level contains solutions for the optimal way to join all

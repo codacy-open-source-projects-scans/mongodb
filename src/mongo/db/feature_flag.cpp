@@ -87,6 +87,9 @@ bool FCVGatedFeatureFlagBase::isEnabled(const VersionContext& vCtx,
                                         const ServerGlobalParams::FCVSnapshot fcv) const {
     const auto currentFcv = vCtx.getOperationFCV(VersionContext::Passkey()).value_or(fcv);
 
+    tassert(11590501,
+            "Trying to check feature flag on undefined FCV",
+            currentFcv.isVersionInitialized());
     return isEnabledOnVersion(currentFcv.getVersion());
 }
 

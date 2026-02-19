@@ -2077,12 +2077,26 @@ mongo_cc_unit_test(
 )
 
 mongo_cc_library(
+    name = "change_stream_pre_image_id_util",
+    srcs = [
+        "change_stream_pre_image_id_util.cpp",
+    ],
+    deps = [
+        ":change_stream_options_manager",
+        ":record_id_helpers",
+        ":server_base",
+        "//src/mongo/db/pipeline:change_stream_preimage",
+    ],
+)
+
+mongo_cc_library(
     name = "change_stream_pre_image_util",
     srcs = [
         "change_stream_pre_image_util.cpp",
     ],
     deps = [
         ":change_stream_options_manager",
+        ":change_stream_pre_image_id_util",
         ":query_exec",
         ":record_id_helpers",
         ":server_base",
@@ -2942,7 +2956,7 @@ mongo_cc_unit_test(
 mongo_cc_unit_test(
     name = "change_stream_pre_images_manager_test",
     srcs = [
-        "change_stream_pre_image_util_test.cpp",
+        "change_stream_pre_image_id_util_test.cpp",
         "change_stream_pre_images_remover_test.cpp",
         "change_stream_pre_images_truncate_manager_test.cpp",
         "change_stream_pre_images_truncate_markers_per_nsUUID_test.cpp",

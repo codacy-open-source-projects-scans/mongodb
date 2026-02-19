@@ -208,4 +208,43 @@ JoinCostEstimate JoinCostEstimatorImpl::costBaseCollectionAccess(NodeId baseNode
     MONGO_UNIMPLEMENTED_TASSERT(11729102);
 }
 
+double estimateMackertLohmanRandIO(double numPagesColl,
+                                   double numPagesInStorageEngineCache,
+                                   double numDocsOutput) {
+    tassert(11943801, "estimateMackertLohmanRandIO() expected numPagesColl > 0", numPagesColl > 0);
+    tassert(11943802,
+            "estimateMackertLohmanRandIO() expected numPagesInStorageEngineCache > 0",
+            numPagesInStorageEngineCache > 0);
+    tassert(
+        11943803, "estimateMackertLohmanRandIO() expected numDocsOutput >= 0", numDocsOutput >= 0);
+
+    // For ease of reference, the formula in the paper is:
+    //         / min(Dx, T)                 when T <= b
+    // Y_wap = | Dx                         when T > b  AND Dx <= b
+    //         \ b + (Dx - b) * (T-b)/T     when T > b  AND Dx > b
+    // T = numPagesColl
+    // b = numPagesInStorageEngineCache
+    // D*x = numDocsOutput
+
+    // Case 1: The entire collection fits in the WT cache.
+    if (numPagesColl <= numPagesInStorageEngineCache) {
+        return std::min(numDocsOutput, numPagesColl);
+    }
+
+    // Case 2: The collection is bigger than the cache, but all the returned documents fit in the WT
+    // cache. We assume that have a totally unclustered index, meaning that every key returned from
+    // the index scan results in a random I/O.
+    if (numDocsOutput <= numPagesInStorageEngineCache) {
+        return numDocsOutput;
+    }
+
+    // Case 3: The collection is bigger than the cache and the sum of pages that are fetched are
+    // also bigger than the cache. This results in cache eviction and means that fetching the same
+    // page multiple times may result multiple random I/Os (whereas in the case of a smaller result
+    // set, that page would be cached).
+    return numPagesInStorageEngineCache +
+        (numDocsOutput - numPagesInStorageEngineCache) *
+        (numPagesColl - numPagesInStorageEngineCache) / numPagesColl;
+}
+
 }  // namespace mongo::join_ordering

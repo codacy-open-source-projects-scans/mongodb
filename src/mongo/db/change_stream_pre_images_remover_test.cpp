@@ -30,6 +30,7 @@
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
+#include "mongo/db/change_stream_pre_image_id_util.h"
 #include "mongo/db/change_stream_pre_image_test_helpers.h"
 #include "mongo/db/change_stream_pre_image_util.h"
 #include "mongo/db/change_stream_pre_images_collection_manager.h"
@@ -200,7 +201,7 @@ protected:
         auto cursor = preImagesCollection.getCollectionPtr()->getCursor(opCtx, true /* forward */);
 
         RecordId seekTo =
-            change_stream_pre_image_util::getAbsoluteMinPreImageRecordIdBoundForNs(nsUUID)
+            change_stream_pre_image_id_util::getAbsoluteMinPreImageRecordIdBoundForNs(nsUUID)
                 .recordId();
 
         boost::optional<Record> record =
@@ -208,7 +209,7 @@ protected:
         while (record) {
             const BSONObj preImageObj = record->data.toBson();
 
-            if (nsUUID != change_stream_pre_image_util::getPreImageNsUUID(preImageObj)) {
+            if (nsUUID != change_stream_pre_image_id_util::getPreImageNsUUID(preImageObj)) {
                 // Record is already for a different 'nsUUID' value. Abort sampling.
                 break;
             }
@@ -432,9 +433,9 @@ TEST_F(PreImagesRemoverTest, RecordIdToPreImageTimestampRetrieval) {
         int64_t applyOpsIndex = 0;
 
         ChangeStreamPreImageId preImageId(UUID::gen(), ts0, applyOpsIndex);
-        auto preImageRecordId = change_stream_pre_image_util::toRecordId(preImageId);
+        auto preImageRecordId = change_stream_pre_image_id_util::toRecordId(preImageId);
 
-        auto ts1 = change_stream_pre_image_util::getPreImageTimestamp(preImageRecordId);
+        auto ts1 = change_stream_pre_image_id_util::getPreImageTimestamp(preImageRecordId);
         ASSERT_EQ(ts0, ts1);
     }
 
@@ -444,9 +445,9 @@ TEST_F(PreImagesRemoverTest, RecordIdToPreImageTimestampRetrieval) {
         int64_t applyOpsIndex = 0;
 
         ChangeStreamPreImageId preImageId(UUID::gen(), ts0, applyOpsIndex);
-        auto preImageRecordId = change_stream_pre_image_util::toRecordId(preImageId);
+        auto preImageRecordId = change_stream_pre_image_id_util::toRecordId(preImageId);
 
-        auto ts1 = change_stream_pre_image_util::getPreImageTimestamp(preImageRecordId);
+        auto ts1 = change_stream_pre_image_id_util::getPreImageTimestamp(preImageRecordId);
         ASSERT_EQ(ts0, ts1);
     }
 
@@ -456,9 +457,9 @@ TEST_F(PreImagesRemoverTest, RecordIdToPreImageTimestampRetrieval) {
         int64_t applyOpsIndex = 0;
 
         ChangeStreamPreImageId preImageId(UUID::gen(), ts0, applyOpsIndex);
-        auto preImageRecordId = change_stream_pre_image_util::toRecordId(preImageId);
+        auto preImageRecordId = change_stream_pre_image_id_util::toRecordId(preImageId);
 
-        auto ts1 = change_stream_pre_image_util::getPreImageTimestamp(preImageRecordId);
+        auto ts1 = change_stream_pre_image_id_util::getPreImageTimestamp(preImageRecordId);
         ASSERT_EQ(ts0, ts1);
     }
 
@@ -473,9 +474,9 @@ TEST_F(PreImagesRemoverTest, RecordIdToPreImageTimestampRetrieval) {
         int64_t applyOpsIndex = std::numeric_limits<int64_t>::max();
 
         ChangeStreamPreImageId preImageId(UUID::gen(), ts0, applyOpsIndex);
-        auto preImageRecordId = change_stream_pre_image_util::toRecordId(preImageId);
+        auto preImageRecordId = change_stream_pre_image_id_util::toRecordId(preImageId);
 
-        auto ts1 = change_stream_pre_image_util::getPreImageTimestamp(preImageRecordId);
+        auto ts1 = change_stream_pre_image_id_util::getPreImageTimestamp(preImageRecordId);
         ASSERT_EQ(ts0, ts1);
     }
 
@@ -485,9 +486,9 @@ TEST_F(PreImagesRemoverTest, RecordIdToPreImageTimestampRetrieval) {
         int64_t applyOpsIndex = std::numeric_limits<int64_t>::max();
 
         ChangeStreamPreImageId preImageId(UUID::gen(), ts0, applyOpsIndex);
-        auto preImageRecordId = change_stream_pre_image_util::toRecordId(preImageId);
+        auto preImageRecordId = change_stream_pre_image_id_util::toRecordId(preImageId);
 
-        auto ts1 = change_stream_pre_image_util::getPreImageTimestamp(preImageRecordId);
+        auto ts1 = change_stream_pre_image_id_util::getPreImageTimestamp(preImageRecordId);
         ASSERT_EQ(ts0, ts1);
     }
 }

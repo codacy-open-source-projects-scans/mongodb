@@ -224,4 +224,17 @@ TEST_F(JoinCostEstimatorTest, NLJLowerCostThanHashJoin) {
     ASSERT_LT(nljCost, hjCost);
 }
 
+TEST(MackertLohmanTest, CollectionFitsInCache) {
+    ASSERT_EQ(10, estimateMackertLohmanRandIO(100, 1000, 10));
+    ASSERT_EQ(100, estimateMackertLohmanRandIO(100, 1000, 10000));
+}
+
+TEST(MackerLohmanTest, CollectionDoesntFitInCacheResultSetFitsInCache) {
+    ASSERT_EQ(10, estimateMackertLohmanRandIO(1000, 100, 10));
+}
+
+TEST(MackerLohmanTest, CollectionDoesntFitInCacheResultSetDoesntFitInCache) {
+    ASSERT_EQ(910, estimateMackertLohmanRandIO(1000, 100, 1000));
+}
+
 }  // namespace mongo::join_ordering

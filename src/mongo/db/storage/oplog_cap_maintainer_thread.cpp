@@ -259,7 +259,11 @@ bool OplogCapMaintainerThread::_deleteExcessDocuments(OperationContext* opCtx) {
         auto mayTruncateUpTo = opCtx->getServiceContext()->getStorageEngine()->getPinnedOplog();
 
         Timer timer;
-        _reclaimOplog(opCtx, *rs, RecordId(mayTruncateUpTo.asULL()));
+
+        if (_reclaimOplog(opCtx, *rs, RecordId(mayTruncateUpTo.asULL())).isNull()) {
+            LOGV2_DEBUG(11341900, 2, "Truncation did not occur");
+            return false;
+        }
 
         auto elapsedMicros = timer.micros();
         totalTimeTruncating.fetchAndAdd(elapsedMicros);
@@ -277,10 +281,10 @@ bool OplogCapMaintainerThread::_deleteExcessDocuments(OperationContext* opCtx) {
     return true;
 }
 
-void OplogCapMaintainerThread::_reclaimOplog(OperationContext* opCtx,
-                                             RecordStore& rs,
-                                             RecordId mayTruncateUpTo) {
-    oplog_truncation::reclaimOplog(opCtx, rs, mayTruncateUpTo);
+RecordId OplogCapMaintainerThread::_reclaimOplog(OperationContext* opCtx,
+                                                 RecordStore& rs,
+                                                 RecordId mayTruncateUpTo) {
+    return oplog_truncation::reclaimOplog(opCtx, rs, mayTruncateUpTo);
 }
 
 void OplogCapMaintainerThread::run() {

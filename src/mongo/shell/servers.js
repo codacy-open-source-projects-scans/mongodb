@@ -58,10 +58,7 @@ MongoRunner.getMongoShellPath = function () {
 };
 
 MongoRunner.getExtensionPath = function (shared_library_name) {
-    if (!jsTestOptions().inEvergreen) {
-        return MongoRunner.getInstallPath("..", "lib", shared_library_name);
-    }
-    return shared_library_name;
+    return MongoRunner.getInstallPath("..", "lib", shared_library_name);
 };
 
 MongoRunner.parsePort = function (...args) {
