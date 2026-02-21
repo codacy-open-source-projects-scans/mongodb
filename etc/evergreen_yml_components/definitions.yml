@@ -513,7 +513,7 @@ functions:
     display_name: "archive new corpus"
     params:
       target: corpora.tgz
-      source_dir: src/corpora-merged
+      source_dir: src/corpora
       include:
         - "**"
 

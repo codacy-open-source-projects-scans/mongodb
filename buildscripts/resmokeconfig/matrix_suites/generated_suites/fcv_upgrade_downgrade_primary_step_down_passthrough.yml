@@ -138,6 +138,7 @@ selector:
     - featureFlagSearchHybridScoringFull
     - featureFlagRankFusion
     - featureFlagMongotIndexedViews
+    - featureFlagCreateViewlessTimeseriesCollections
     - uses_transactions
     - requires_fcv_80
     - requires_fcv_81

@@ -817,10 +817,7 @@ int WiredTigerUtil::verifyTable(WiredTigerSession& session,
     WiredTigerConnection& connection = session.getConnection();
 
     // Open a new session with custom error handlers.
-    const char* sessionConfig = nullptr;
-    if (gFeatureFlagPrefetch.isEnabled() && !connection.isEphemeral()) {
-        sessionConfig = "prefetch=(enabled=true)";
-    }
+    const char* sessionConfig = connection.isEphemeral() ? nullptr : "prefetch=(enabled=true)";
     WiredTigerSession verifySession(&connection, &eventHandler, sessionConfig);
 
     const char* verifyConfig =

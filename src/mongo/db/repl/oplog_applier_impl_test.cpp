@@ -1212,6 +1212,32 @@ Status TrackOpsAppliedApplier::applyOplogBatchPerWorker(
     return Status::OK();
 }
 
+TEST_F(OplogApplierImplTest, ApplyOpsRidOnNonRridCollectionGroupedRridDisabled) {
+    auto nss = NamespaceString::createNamespaceString_forTest(
+        "test.ApplyOpsRidOnNonRridCollectionGroupedRridDisabled");
+    createCollection(_opCtx.get(), nss, {});
+
+    auto op1 = makeInsertDocumentOplogEntry({Timestamp(Seconds(1), 1), 1LL}, nss, BSON("_id" << 1));
+
+    MutableOplogEntry op2Mutable;
+    op2Mutable.setOpType(OpTypeEnum::kInsert);
+    op2Mutable.setNss(nss);
+    op2Mutable.setObject(BSON("_id" << 2));
+    op2Mutable.setObject2(BSON("_id" << 2));
+    op2Mutable.setOpTime({Timestamp(Seconds(1), 2), 1LL});
+    op2Mutable.setRecordId(RecordId(2));
+    op2Mutable.setWallClockTime(Date_t::now());
+    auto op2 = OplogEntry(op2Mutable.toBSON());
+
+    std::vector<ApplierOperation> ops = {ApplierOperation{&op1}, ApplierOperation{&op2}};
+    OplogEntryOrGroupedInserts groupedInserts(ops.begin(), ops.end());
+
+    RAIIServerParameterControllerForTest _featureFlagReplRidController{
+        "featureFlagRecordIdsReplicated", false};
+    (void)_applyOplogEntryOrGroupedInsertsWrapper(
+        _opCtx.get(), groupedInserts, OplogApplication::Mode::kApplyOpsCmd);
+}
+
 using OplogApplierImplTestDeathTest = OplogApplierImplTest;
 DEATH_TEST_F(OplogApplierImplTestDeathTest,
              MultiApplyAbortsWhenNoOperationsAreGiven,
@@ -1230,9 +1256,11 @@ DEATH_TEST_F(OplogApplierImplTestDeathTest,
     oplogApplier.applyOplogBatch(_opCtx.get(), {}).getStatus().ignore();
 }
 
-DEATH_TEST_F(OplogApplierImplTestDeathTest, ApplyOpsRidOnNonRridCollectionGrouped, "11454702") {
+DEATH_TEST_F(OplogApplierImplTestDeathTest,
+             ApplyOpsRidOnNonRridCollectionGroupedRridEnabled,
+             "11454702") {
     auto nss = NamespaceString::createNamespaceString_forTest(
-        "test.ApplyOpsRidOnNonRridCollectionGrouped");
+        "test.ApplyOpsRidOnNonRridCollectionGroupedRridEnabled");
     createCollection(_opCtx.get(), nss, {});
 
     auto op1 = makeInsertDocumentOplogEntry({Timestamp(Seconds(1), 1), 1LL}, nss, BSON("_id" << 1));
@@ -1250,6 +1278,8 @@ DEATH_TEST_F(OplogApplierImplTestDeathTest, ApplyOpsRidOnNonRridCollectionGroupe
     std::vector<ApplierOperation> ops = {ApplierOperation{&op1}, ApplierOperation{&op2}};
     OplogEntryOrGroupedInserts groupedInserts(ops.begin(), ops.end());
 
+    RAIIServerParameterControllerForTest _featureFlagReplRidController{
+        "featureFlagRecordIdsReplicated", true};
     (void)_applyOplogEntryOrGroupedInsertsWrapper(
         _opCtx.get(), groupedInserts, OplogApplication::Mode::kApplyOpsCmd);
 }

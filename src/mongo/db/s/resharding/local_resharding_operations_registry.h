@@ -54,8 +54,12 @@ public:
     void unregisterOperation(Role role, const CommonReshardingMetadata& metadata);
     boost::optional<Operation> getOperation(const NamespaceString& nss) const;
 
+    void resyncFromDisk(OperationContext* opCtx);
+
 private:
+    using UuidToOperation = stdx::unordered_map<UUID, Operation>;
+
     mutable ObservableMutex<std::shared_mutex> _mutex;
-    stdx::unordered_map<NamespaceString, Operation> _operations;
+    stdx::unordered_map<NamespaceString, UuidToOperation> _namespaceToOperations;
 };
 }  // namespace mongo

@@ -46,6 +46,8 @@
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/stage_builder/sbe/builder.h"
 #include "mongo/db/query/stage_builder/stage_builder_util.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_kv_engine.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
 #include "mongo/util/assert_util.h"
 
 #include <algorithm>
@@ -159,18 +161,20 @@ AvailableIndexes extractINLJEligibleIndexes(const QuerySolutionMap& solns,
 
 CatalogStats createCatalogStats(OperationContext* opCtx, const MultipleCollectionAccessor& mca) {
     auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
-    CatalogStats catStats;
-    mca.forEach([&catStats, &ru](const CollectionPtr& coll) {
+    stdx::unordered_map<NamespaceString, CollectionStats> collStats;
+    mca.forEach([&collStats, &ru](const CollectionPtr& coll) {
         auto* recordStore = coll->getRecordStore();
-        double allocatedDataPageBytes =
-            recordStore->storageSize(ru) - recordStore->freeStorageSize(ru);
         // TODO SERVER-117620: set .pageSizeBytes.
-        catStats.collStats.emplace(coll->ns(),
-                                   CollectionStats{
-                                       .allocatedDataPageBytes = allocatedDataPageBytes,
-                                   });
+        collStats.emplace(coll->ns(),
+                          CollectionStats{
+                              .logicalDataSizeBytes = static_cast<double>(recordStore->dataSize()),
+                          });
     });
-    return catStats;
+    auto engine = opCtx->getServiceContext()->getStorageEngine();
+    double cacheSizeBytes = engine->getCacheSizeMB() * 1024 * 1024;
+    return {.collStats = std::move(collStats),
+            // This calculation assumes that all pages in WT cache are 32KiB.
+            .numPagesInStorageEngineCache = cacheSizeBytes / (32 * 1024)};
 }
 
 }  // namespace

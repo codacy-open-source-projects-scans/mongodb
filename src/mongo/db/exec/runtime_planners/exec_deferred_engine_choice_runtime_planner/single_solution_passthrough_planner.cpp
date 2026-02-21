@@ -28,7 +28,6 @@
  */
 
 #include "mongo/db/exec/runtime_planners/exec_deferred_engine_choice_runtime_planner/planner_interface.h"
-#include "mongo/db/query/engine_selection.h"
 
 namespace mongo::exec_deferred_engine_choice {
 
@@ -37,27 +36,13 @@ SingleSolutionPassthroughPlanner::SingleSolutionPassthroughPlanner(
     : DeferredEngineChoicePlannerInterface(std::move(plannerData)),
       _querySolution(std::move(querySolution)) {}
 
-std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> SingleSolutionPassthroughPlanner::makeExecutor(
-    std::unique_ptr<CanonicalQuery> canonicalQuery, Pipeline* pipeline) {
-    bool needsMerge = canonicalQuery->getExpCtx()->getNeedsMerge();
-    auto engine = chooseEngine(
-        opCtx(),
-        collections(),
-        canonicalQuery.get(),
-        pipeline,
-        needsMerge,
-        std::make_unique<QueryPlannerParams>(QueryPlannerParams::ArgsForPushDownStagesDecision{
-            .opCtx = opCtx(),
-            .canonicalQuery = *cq(),
-            .collections = collections(),
-            .plannerOptions = plannerOptions(),
-        }),
-        _querySolution.get());
-    return executorFromSolution(engine,
-                                std::move(canonicalQuery),
-                                std::move(_querySolution),
-                                nullptr,
-                                _plannerData.cachedPlanHash,
-                                pipeline);
+PlanRankingResult SingleSolutionPassthroughPlanner::extractPlanRankingResult() {
+    tassert(11974302,
+            "Expected `extractPlanRankingResult` to only be called with get executor deferred "
+            "feature flag enabled.",
+            feature_flags::gFeatureFlagGetExecutorDeferredEngineChoice.isEnabled());
+    return PlanRankingResult{.solutions = makeQsnResult(std::move(_querySolution)),
+                             .plannerParams = extractPlannerParams(),
+                             .cachedPlanHash = cachedPlanHash()};
 }
 }  // namespace mongo::exec_deferred_engine_choice

@@ -27,7 +27,7 @@ import re
 import subprocess
 import sys
 from functools import cache
-from typing import List, NamedTuple
+from typing import NamedTuple
 
 import typer
 import yaml
@@ -141,7 +141,7 @@ def get_resmoke_configs():
         return yaml.safe_load(f)
 
 
-def query_targets_to_burn_in(origin_rev: str) -> List[BurnInTargetInfo]:
+def query_targets_to_burn_in(origin_rev: str) -> list[BurnInTargetInfo]:
     change_detector = LocalFileChangeDetector(origin_rev)
     tests_changed = change_detector.find_changed_tests([Repo(".")])
 
@@ -183,7 +183,7 @@ def query_targets_to_burn_in(origin_rev: str) -> List[BurnInTargetInfo]:
 
 
 @cache
-def get_targets_with_tag(tag: str) -> List[str]:
+def get_targets_with_tag(tag: str) -> list[str]:
     try:
         query = f"attr(tags, '\\b{tag}(?![a-zA-Z0-9_-])', //...)"
         result = subprocess.run(
@@ -350,7 +350,7 @@ def generate_tasks(origin_rev: str, outfile: Annotated[str, typer.Option()]):
             task["activate"] = False
     for task in project["tasks"]:
         task["exec_timeout_secs"] = 1800
-    project["tasks"].extend([task.as_dict() for task in results_tasks])
+    project["tasks"].extend([task for task in results_tasks])
 
     with open(outfile, "w") as f:
         f.write(json.dumps(project, indent=4))

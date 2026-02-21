@@ -62,6 +62,32 @@ inline bool hasMongotExtension(const auto& extensionNames) {
 }  // namespace detail
 
 /**
+ * Checks that the pipeline isn't empty and if the first stage in the pipeline is the $vectorSearch
+ * extension stage. The legacy stage returns false.
+ *
+ * TODO SERVER-117168 Remove this function.
+ */
+inline bool isExtensionVectorSearchPipeline(
+    const std::shared_ptr<IncrementalFeatureRolloutContext>& ifrContext,
+    const std::vector<BSONObj>& pipeline) {
+    if (pipeline.empty()) {
+        return false;
+    }
+    const auto& firstStageBson = pipeline[0];
+    using detail::is;
+    if (is<DocumentSourceVectorSearch>(firstStageBson)) {
+        // Note we don't need to worry about/consult 'featureFlagExtensionViewsAndUnionWith'
+        // because the extension will enforce this behavior by toggling
+        // 'gFeatureFlagVectorSearchExtension' and retrying, so thankfully this is enough, and
+        // we don't need to understand what context this BSON appears in (w.r.t. views or
+        // sub-pipelines).
+        return ifrContext->getSavedFlagValue(feature_flags::gFeatureFlagVectorSearchExtension) &&
+            detail::hasMongotExtension(serverGlobalParams.extensions);
+    }
+    return false;
+}
+
+/**
  * Checks that the pipeline isn't empty and if the first stage in the pipeline is a mongot stage
  * Namely, that includes:
  * - $search

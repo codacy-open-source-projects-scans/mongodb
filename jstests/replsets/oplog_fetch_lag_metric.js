@@ -3,9 +3,6 @@
  * fetcher is from the primary. Verifies that the metric is ~0 when caught up, shows positive
  * lag when the secondary falls behind, and returns to ~0 after catching up.
  *
- * @tags: [
- *   tsan_incompatible,
- * ]
  */
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";

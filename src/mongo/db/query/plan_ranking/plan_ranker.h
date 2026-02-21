@@ -29,8 +29,7 @@
 
 #pragma once
 
-#include "mongo/db/exec/runtime_planners/classic_runtime_planner/planner_interface.h"
-#include "mongo/db/exec/runtime_planners/planner_interface.h"
+#include "mongo/db/exec/runtime_planners/planner_types.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/plan_yield_policy.h"
@@ -41,25 +40,9 @@
 namespace mongo {
 namespace plan_ranking {
 
-struct PlanRankingResult {
-    std::vector<std::unique_ptr<QuerySolution>> solutions;
-    boost::optional<PlanExplainerData> maybeExplainData;
-    // True if these plans were chosen without a pre-execution trial run that measured the
-    // 'work' metric (for example, selected by a non-multiplanner). Such plans must be
-    // run in a pre-execution phase to measure the amount of work done to produce the
-    // first batch, so they can be considered for insertion into the classic plan cache.
-    bool needsWorksMeasured{false};
-
-    // Ranker strategies may involve execution; they can return execution-relevant state
-    // here, and the caller can choose to resume execution from that point.
-    // (e.g., MultiPlanStage may contain spooled results, partially evaluated ixscans, etc.)
-    // If none, the caller should consume the provided solution(s) as-is.
-    boost::optional<mongo::classic_runtime_planner::SavedExecState> execState;
-};
-
 class PlanRankingStrategy {
 public:
-    virtual StatusWith<plan_ranking::PlanRankingResult> rankPlans(PlannerData& pd) = 0;
+    virtual StatusWith<PlanRankingResult> rankPlans(PlannerData& pd) = 0;
 
     virtual ~PlanRankingStrategy() = default;
 };

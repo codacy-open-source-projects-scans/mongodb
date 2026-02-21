@@ -1,13 +1,13 @@
 # JS Debugging in the MongoDB Shell
 
-
 Use the `--shellJSDebugMode` flag for resmoke (or the `--jsDebugMode` flag directly on the mongo shell) to trigger an interactive debug prompt when `debugger` statements are hit in JS test code.
 
 Sample JS Test:
+
 ```js
 let x = 42;
 let y = ["a", 15, [1, 2, 3]];
-let z = {id: ObjectId(), value:42};
+let z = {id: ObjectId(), value: 42};
 
 debugger;
 assert.eq(x, 7);
@@ -16,27 +16,33 @@ print("Test Passed!");
 ```
 
 Running this test from the shell will fail since `x != 7`, and the `debugger` is a no-op (does not have any callback handler):
+
 ```bash
 ./bazel-bin/install/bin/mongo --nodb jstests/my_test.js
 ```
+
 Output:
+
 ```
 Test Passed!
 ```
 
 Run with the `--jsDebugMode` flag:
+
 ```bash
 ./bazel-bin/install/bin/mongo --nodb --jsDebugMode jstests/my_test.js
 ```
 
 Should pause first at line 5, and prompt the user for input:
+
 ```
 JSDEBUG> JavaScript execution paused in 'debugger' statement.
 JSDEBUG> Type 'dbcont' to continue
-JSDEBUG@jstests/my_test.js:5> 
+JSDEBUG@jstests/my_test.js:5>
 ```
 
 Inspect variables:
+
 ```
 JSDEBUG@jstests/my_test.js:5> x
 42
@@ -47,12 +53,14 @@ JSDEBUG@jstests/my_test.js:5> z
 ```
 
 Modify `x` so it passes its upcoming assertion:
+
 ```
 JSDEBUG@jstests/my_test.js:5> x = 7
 7
 ```
 
 The `q` variable does not exist yet, so we can set it to pass its upcoming assertion:
+
 ```
 JSDEBUG@jstests/my_test.js:5> q
 ReferenceError: q is not defined
@@ -61,22 +69,25 @@ foo
 ```
 
 Send a `dbcont` command to continue execution, and now the test passes!
+
 ```
 JSDEBUG@jstests/my_test.js:5> dbcont
 JSDEBUG> Continuing execution...
 Test Passed!
-All pids dead / alive (0): 
+All pids dead / alive (0):
 Searching for files in: /home/ubuntu/mongo
 ```
 
 ## Resmoke
 
 Use the `--shellJSDebugMode` flag in resmoke to stop on debugger statements:
+
 ```bash
 buildscripts/resmoke.py run --suites=no_passthrough --shellJSDebugMode jstests/my_test.js
 ```
 
 Update variables `x` and `q` to repair the failing assertions:
+
 ```
 JSDEBUG> JavaScript execution paused in 'debugger' statement.
 JSDEBUG> Type 'dbcont' to continue

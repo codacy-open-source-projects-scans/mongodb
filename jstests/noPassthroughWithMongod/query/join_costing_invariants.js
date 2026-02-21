@@ -89,8 +89,8 @@ function getCosts(command1, command2, path) {
     print(`Winning plan for command #1: ${JSON.stringify(winningPlan1)}`);
     print(`Winning plan for command #2: ${JSON.stringify(winningPlan2)}`);
 
-    const cost1 = Number(getValueByPath(winningPlan1, path + ".costEstimate").toFixed(3));
-    const cost2 = Number(getValueByPath(winningPlan2, path + ".costEstimate").toFixed(3));
+    const cost1 = Number(getValueByPath(winningPlan1, path + ".costEstimate"));
+    const cost2 = Number(getValueByPath(winningPlan2, path + ".costEstimate"));
 
     return [cost1, cost2];
 }

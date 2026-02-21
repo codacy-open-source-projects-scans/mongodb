@@ -37,8 +37,6 @@
 #include "mongo/db/exec/plan_cache_util.h"
 #include "mongo/db/exec/runtime_planners/planner_interface.h"
 #include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
-#include "mongo/db/query/engine_selection.h"
-#include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/write_ops/canonical_update.h"
@@ -46,6 +44,8 @@
 #include "mongo/util/modules.h"
 
 namespace mongo::exec_deferred_engine_choice {
+
+std::vector<std::unique_ptr<QuerySolution>> makeQsnResult(std::unique_ptr<QuerySolution> qsn);
 
 /*
  * Base abstract class for executor runtime planner implementations that defer engine selection
@@ -55,21 +55,6 @@ namespace mongo::exec_deferred_engine_choice {
 class DeferredEngineChoicePlannerInterface : public PlannerInterface {
 public:
     DeferredEngineChoicePlannerInterface(PlannerData plannerData);
-
-    std::unique_ptr<PlanStage> buildExecutableTree(const QuerySolution& qs);
-
-    /*
-     * Given a query solution and `toSbe` to indicate which engine to lower to, builds and returns
-     * a plan executor. When `makeExecutor` is called, subclasses of this can determine which engine
-     * to use and call this function to lower depending on the decision.
-     */
-    std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> executorFromSolution(
-        EngineChoice engine,
-        std::unique_ptr<CanonicalQuery> canonicalQuery,
-        std::unique_ptr<QuerySolution> querySolution,
-        std::unique_ptr<MultiPlanStage> mps,
-        boost::optional<size_t> cachedPlanHash,
-        Pipeline* pipeline = nullptr);
 
     OperationContext* opCtx() {
         return _plannerData.opCtx;
@@ -92,19 +77,22 @@ public:
     QueryPlannerParams* plannerParams() {
         return _plannerData.plannerParams.get();
     }
+    boost::optional<size_t> cachedPlanHash() {
+        return _plannerData.cachedPlanHash;
+    }
 
 protected:
+    std::unique_ptr<WorkingSet> extractWs() {
+        return std::move(_plannerData.workingSet);
+    }
+    std::shared_ptr<QueryPlannerParams> extractPlannerParams() {
+        return std::move(_plannerData.plannerParams);
+    }
+
+    std::unique_ptr<PlanStage> buildExecutableTree(const QuerySolution& qs);
+
     stage_builder::PlanStageToQsnMap _planStageQsnMap;
     PlannerData _plannerData;
-    NamespaceString _nss;
-
-private:
-    std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> _makeSbePlanExecutor(
-        std::unique_ptr<CanonicalQuery> canonicalQuery,
-        std::unique_ptr<QuerySolution> querySolution,
-        std::unique_ptr<MultiPlanStage> mps,
-        boost::optional<size_t> cachedPlanHash,
-        Pipeline* pipeline);
 };
 
 /**
@@ -115,8 +103,7 @@ public:
     SingleSolutionPassthroughPlanner(PlannerData plannerData,
                                      std::unique_ptr<QuerySolution> querySolution);
 
-    std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> makeExecutor(
-        std::unique_ptr<CanonicalQuery> canonicalQuery, Pipeline* pipeline = nullptr) override;
+    PlanRankingResult extractPlanRankingResult() override;
 
 private:
     std::unique_ptr<QuerySolution> _querySolution;
@@ -135,8 +122,7 @@ public:
      */
     const MultiPlanStats* getSpecificStats() const;
 
-    std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> makeExecutor(
-        std::unique_ptr<CanonicalQuery> canonicalQuery, Pipeline* pipeline = nullptr) override;
+    PlanRankingResult extractPlanRankingResult() override;
 
 private:
     void _cacheDependingOnPlan(const CanonicalQuery&,
@@ -155,8 +141,7 @@ class SubPlanner final : public DeferredEngineChoicePlannerInterface {
 public:
     SubPlanner(PlannerData plannerData);
 
-    std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> makeExecutor(
-        std::unique_ptr<CanonicalQuery> canonicalQuery, Pipeline* pipeline = nullptr) override;
+    PlanRankingResult extractPlanRankingResult() override;
 
 private:
     std::unique_ptr<SubplanStage> _subPlanStage;

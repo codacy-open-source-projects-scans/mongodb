@@ -13,13 +13,14 @@ import {createSearchIndex, dropSearchIndex} from "jstests/libs/search.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 import {getShardNames} from "jstests/libs/sharded_cluster_fixture_helpers.js";
 
-const dbName = jsTestName();
+// TODO SERVER-119626 Check if getSiblingDB() is still needed.
+const testDb = db.getSiblingDB(jsTestName());
 const shardedCollName = jsTestName() + "_sharded";
 const unshardedCollName = jsTestName() + "_unsharded";
 const searchIndexName = "test_search_index";
 
-const shardedColl = db.getCollection(shardedCollName);
-const unshardedColl = db.getCollection(unshardedCollName);
+const shardedColl = testDb.getCollection(shardedCollName);
+const unshardedColl = testDb.getCollection(unshardedCollName);
 
 let shardPrimaries;
 let shard0DB;
@@ -27,11 +28,11 @@ let shard1DB;
 
 describe("requiresSearchMetaCursor in sharded search queries", function () {
     before(function () {
-        const shardNames = getShardNames(db.getMongo());
+        const shardNames = getShardNames(testDb.getMongo());
         assert.gte(shardNames.length, 2, "Test requires at least 2 shards");
 
         // Set primary shard so the unsharded collection lives on a specific shard.
-        assert.commandWorked(db.adminCommand({enableSharding: db.getName(), primaryShard: shardNames[0]}));
+        assert.commandWorked(testDb.adminCommand({enableSharding: testDb.getName(), primaryShard: shardNames[0]}));
 
         shardedColl.drop();
         unshardedColl.drop();
@@ -52,10 +53,10 @@ describe("requiresSearchMetaCursor in sharded search queries", function () {
         assert.commandWorked(unshardedColl.insert([{b: 1}, {b: 3}, {b: 5}]));
 
         // Shard the test collection, split it at {_id: 10}, and move the higher chunk to shard1.
-        assert.commandWorked(db.adminCommand({shardCollection: shardedColl.getFullName(), key: {_id: 1}}));
-        assert.commandWorked(db.adminCommand({split: shardedColl.getFullName(), middle: {_id: 10}}));
+        assert.commandWorked(testDb.adminCommand({shardCollection: shardedColl.getFullName(), key: {_id: 1}}));
+        assert.commandWorked(testDb.adminCommand({split: shardedColl.getFullName(), middle: {_id: 10}}));
         assert.commandWorked(
-            db.adminCommand({
+            testDb.adminCommand({
                 moveChunk: shardedColl.getFullName(),
                 find: {_id: 11},
                 to: shardNames[1],
@@ -75,10 +76,10 @@ describe("requiresSearchMetaCursor in sharded search queries", function () {
         });
 
         // Get shard connections for system.profile checking.
-        shardPrimaries = FixtureHelpers.getPrimaries(db);
+        shardPrimaries = FixtureHelpers.getPrimaries(testDb);
         assert.gte(shardPrimaries.length, 2);
-        shard0DB = shardPrimaries[0].getDB(dbName);
-        shard1DB = shardPrimaries[1].getDB(dbName);
+        shard0DB = shardPrimaries[0].getDB(jsTestName());
+        shard1DB = shardPrimaries[1].getDB(jsTestName());
     });
 
     after(function () {
@@ -119,7 +120,12 @@ describe("requiresSearchMetaCursor in sharded search queries", function () {
         // Check system.profile on both shards to verify requiresSearchMetaCursor is set correctly.
         for (let shardDB of [shard0DB, shard1DB]) {
             const res = shardDB.system.profile
-                .find({"command.comment": comment, "command.aggregate": shardedCollName})
+                .find({
+                    "command.comment": comment,
+                    "command.aggregate": shardedCollName,
+                    "errCode": {"$ne": ErrorCodes.StaleConfig},
+                    "ok": 1,
+                })
                 .toArray();
             // Some shards may not have the command if they don't own any chunks for the query.
             if (res.length > 0) {

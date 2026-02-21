@@ -100,6 +100,18 @@ docs = ["furo", "jaraco.packaging (>=9.3)", "rst.linker (>=1.9)", "sphinx (>=3.5
 testing = ["jaraco.test", "pytest (!=8.0.*)", "pytest (>=6,!=8.1.*)", "pytest-checkdocs (>=2.4)", "pytest-cov", "pytest-enabler (>=2.2)"]
 
 [[package]]
+name = "bazel-runfiles"
+version = "1.8.3"
+description = ""
+optional = false
+python-versions = ">=3.7"
+groups = ["testing"]
+markers = "platform_machine != \"s390x\" and platform_machine != \"ppc64le\" or platform_machine == \"s390x\" or platform_machine == \"ppc64le\""
+files = [
+    {file = "bazel_runfiles-1.8.3-py3-none-any.whl", hash = "sha256:57a2cc04e0b924606e8dd70fc8b31d157db43680a300f546dc60207b5ce7ca82"},
+]
+
+[[package]]
 name = "blinker"
 version = "1.9.0"
 description = "Fast, simple object-to-object and broadcast signaling"
@@ -5884,4 +5896,4 @@ libdeps = ["cxxfilt", "eventlet", "flask", "flask-cors", "gevent", "lxml", "prog
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10,<4.0"
-content-hash = "c4a064d90a866bf24bdc2d77d8f10147a1a6cf2d94f193e064cf8405250449cd"
+content-hash = "33a897a6d5a0482f8d4d9378582c1f3a732d74fae6068e9b80a9ffb6cc7a3873"

@@ -398,6 +398,12 @@ CollectionOptions createRecordChangeStreamPreAndPostImagesCollectionOptions();
 void createCollection(OperationContext* opCtx,
                       const NamespaceString& nss,
                       const CollectionOptions& options);
+
+/**
+ * Creates a capped collection with recordIdsReplicated enabled.
+ */
+void createCappedCollection(OperationContext* opCtx, const NamespaceString& nss);
+
 /**
  * Create test collection with UUID.
  */

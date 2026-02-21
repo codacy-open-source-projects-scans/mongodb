@@ -51,6 +51,7 @@
 #include "mongo/db/storage/recovery_unit_noop.h"
 #include "mongo/db/storage/spill_table.h"
 #include "mongo/db/storage/storage_options.h"
+#include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/storage/storage_repair_observer.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/idl/idl_parser.h"
@@ -94,8 +95,6 @@ MONGO_FAIL_POINT_DEFINE(pauseTimestampMonitor);
 
 namespace {
 const auto kCatalogLogLevel = logv2::LogSeverity::Debug(2);
-// TODO SERVER-118539 make this configurable
-const auto kStandbyReaperDelayHours = 24;
 
 // Returns true if the ident refers to a resumable index build table.
 bool isResumableIndexBuildIdent(StringData ident) {
@@ -824,7 +823,7 @@ void StorageEngineImpl::demoteFromLeader() {
     // handle cases where a secondary sees a drop before the primary, and then the primary crashes,
     // we have a 24-hour delay when dropping tables. This keeps the table data around long enough to
     // drop it again on step-up -- see SERVER-117458.
-    _dropPendingIdentReaper.configureDelay(Seconds(kStandbyReaperDelayHours * 60 * 60));
+    _dropPendingIdentReaper.configureDelay(Seconds(gStandbyDropDelaySeconds.load()));
 }
 
 void StorageEngineImpl::setStableTimestamp(Timestamp stableTimestamp, bool force) {

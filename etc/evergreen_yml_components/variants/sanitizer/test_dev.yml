@@ -370,6 +370,9 @@ buildvariants:
     run_on:
       - amazon2023-arm64-latest-medium-m8g
     expansions:
+      <<: *linux_debug_community_compile_expansions
+      build_mongot: true
+      download_mongot_release: true
       resmoke_jobs_factor: 0.5 # Avoid starting too many mongod's
       test_flags: >-
         --excludeWithAnyTags=requires_http_client
@@ -380,15 +383,24 @@ buildvariants:
       large_distro_name: amazon2023-arm64-latest-medium-m8g
       core_analyzer_distro_name: amazon2023-arm64-latest-m8g-8xlarge
       compile_variant: *linux_arm64_debug_compile_variant_name
+      resmoke_tests_tag_filter: ci-development-critical,ci-release-critical
     tasks:
-      - name: .development_critical !.requires_large_host !.requires_compile_variant !.incompatible_development_variant !.incompatible_community !.requires_all_feature_flags !.suggested_excluding_required__for_devprod_mitigation_only
-      - name: .development_critical .requires_large_host !.requires_compile_variant !.incompatible_development_variant !.incompatible_community !.requires_all_feature_flags !.suggested_excluding_required__for_devprod_mitigation_only
+      - name: .development_critical !.requires_large_host !.requires_compile_variant !.incompatible_development_variant !.incompatible_community !.requires_all_feature_flags !.suggested_excluding_required__for_devprod_mitigation_only !.has_bazel_target
+      - name: .development_critical .requires_large_host !.requires_compile_variant !.incompatible_development_variant !.incompatible_community !.requires_all_feature_flags !.suggested_excluding_required__for_devprod_mitigation_only !.has_bazel_target
         distros:
           - amazon2023-arm64-latest-medium-m8g
-      - name: .release_critical !.requires_large_host !.requires_compile_variant !.incompatible_development_variant !.incompatible_community !.requires_all_feature_flags !.suggested_excluding_required__for_devprod_mitigation_only
-      - name: .release_critical .requires_large_host !.requires_compile_variant !.incompatible_development_variant !.incompatible_community !.requires_all_feature_flags !.suggested_excluding_required__for_devprod_mitigation_only
+      - name: .release_critical !.requires_large_host !.requires_compile_variant !.incompatible_development_variant !.incompatible_community !.requires_all_feature_flags !.suggested_excluding_required__for_devprod_mitigation_only !.has_bazel_target
+      - name: .release_critical .requires_large_host !.requires_compile_variant !.incompatible_development_variant !.incompatible_community !.requires_all_feature_flags !.suggested_excluding_required__for_devprod_mitigation_only !.has_bazel_target
         distros:
           - amazon2023-arm64-latest-medium-m8g
+      - name: resmoke_tests_TG
+        distros:
+          - amazon2023-arm64-latest-m8g-8xlarge
+        depends_on:
+          - name: version_expansions_gen
+            variant: generate-tasks-for-version
+          - name: bazel_result_tasks_gen
+            variant: generate-tasks-for-version
 
   - <<: *linux_debug_aubsan_compile_variant_dependency
     name: linux-debug-aubsan-lite-all-feature-flags-required
@@ -552,6 +564,7 @@ buildvariants:
       san_options: *aubsan_options
       bazel_compile_flags: >-
         --config=dbg_aubsan
+        --linkstatic=True
         --opt=on
         --fission=no
         --fsan=True

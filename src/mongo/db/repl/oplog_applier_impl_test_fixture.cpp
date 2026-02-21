@@ -611,6 +611,13 @@ void createCollection(OperationContext* opCtx,
     });
 }
 
+void createCappedCollection(OperationContext* opCtx, const NamespaceString& nss) {
+    CollectionOptions options;
+    options.capped = true;
+    options.cappedSize = 1024 * 1024;
+    createCollection(opCtx, nss, options);
+}
+
 UUID createCollectionWithUuid(OperationContext* opCtx, const NamespaceString& nss) {
     CollectionOptions options;
     options.uuid = UUID::gen();

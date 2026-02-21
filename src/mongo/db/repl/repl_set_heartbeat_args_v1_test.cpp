@@ -196,9 +196,13 @@ TEST(ReplSetHeartbeatArgs, AcceptsUnknownField) {
 
 TEST(ReplSetHeartbeatArgsV1, PrimaryOptimeFieldsParsedFromReplData) {
     // Verify that $replData sub-document is stored in getExtra() when present in the
-    // heartbeat command body (placed in request metadata by disagg primary, merged by OP_MSG).
+    // heartbeat command body (placed in request metadata, merged by OP_MSG).
     OpTime primaryOpTime({100, 3}, 5);
     Date_t primaryWallTime = Date_t() + Seconds(12345);
+    // Checkpoint timestamp gossiped alongside optimes.
+    Timestamp primaryCheckpointTs(90, 1);
+    // Committed optime gossiped alongside optimes.
+    OpTime primaryCommittedOpTime({95, 2}, 5);
 
     BSONObjBuilder cmdBuilder;
     cmdBuilder.append(kSetNameFieldName, "mySet");
@@ -212,6 +216,8 @@ TEST(ReplSetHeartbeatArgsV1, PrimaryOptimeFieldsParsedFromReplData) {
         BSONObjBuilder replDataBuilder(cmdBuilder.subobjStart(rpc::kReplSetMetadataFieldName));
         primaryOpTime.append("lastAppliedOpTime", &replDataBuilder);
         replDataBuilder.appendDate("lastAppliedWallTime", primaryWallTime);
+        replDataBuilder.append("lastCheckpointTimestamp", primaryCheckpointTs);
+        primaryCommittedOpTime.append("lastCommittedOpTime", &replDataBuilder);
     }
 
     ReplSetHeartbeatArgsV1 parsed;
@@ -221,10 +227,17 @@ TEST(ReplSetHeartbeatArgsV1, PrimaryOptimeFieldsParsedFromReplData) {
     ASSERT_TRUE(extra.has_value());
     auto opTimeElem = (*extra)["lastAppliedOpTime"];
     auto wallTimeElem = (*extra)["lastAppliedWallTime"];
+    auto checkpointElem = (*extra)["lastCheckpointTimestamp"];
+    auto committedElem = (*extra)["lastCommittedOpTime"];
     ASSERT_FALSE(opTimeElem.eoo());
     ASSERT_FALSE(wallTimeElem.eoo());
+    ASSERT_FALSE(checkpointElem.eoo());
+    ASSERT_FALSE(committedElem.eoo());
     ASSERT_EQUALS(OpTime::parseFromOplogEntry(opTimeElem.Obj()).getValue(), primaryOpTime);
     ASSERT_EQUALS(wallTimeElem.Date(), primaryWallTime);
+    ASSERT_EQUALS(checkpointElem.timestamp(), primaryCheckpointTs);
+    ASSERT_EQUALS(OpTime::parseFromOplogEntry(committedElem.Obj()).getValue(),
+                  primaryCommittedOpTime);
 }
 
 TEST(ReplSetHeartbeatArgsV1, PrimaryOptimeFieldsAbsentByDefault) {

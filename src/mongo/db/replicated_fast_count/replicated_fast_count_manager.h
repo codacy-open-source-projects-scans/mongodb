@@ -128,11 +128,17 @@ public:
     CollectionSizeCount find(const UUID& uuid) const;
 
     /**
-     * Snapshots and writes dirty in-memory SizeCounts to the internal fastcount collection on disk.
-     * Not recommended outside of the Checkpointer, generally for mirroring legacy sizeStorer
-     * behavior.
+     * Signals background thread to perform a flush.
+     * This flush involves snapshotting and writing dirty in-memory SizeCounts
+     * to the internal fastcount collection on disk.
      */
-    void flush(OperationContext* opCtx);
+    void flushAsync(OperationContext* opCtx);
+
+    /**
+     * Flushes data synchronously on the caller's thread. Calling thread must be able
+     * to take a MODE_IX lock.
+     */
+    void flushSync_ForTest(OperationContext* opCtx);
 
     /**
      * Disables periodic background writes of metadata for testing purposes. Must be called before
@@ -141,6 +147,8 @@ public:
     void disablePeriodicWrites_ForTest();
 
 private:
+    void _snapshotAndFlush(OperationContext* opCtx);
+
     /**
      * Return a copy of a subset of _metadata, only including the dirty entries. Clears the dirty
      * flags for all currently dirty entries.
@@ -181,7 +189,7 @@ private:
      * Acquire the fastcount collection that underpins this class.
      * Returns boost::none if it doesn't exist.
      */
-    boost::optional<CollectionOrViewAcquisition> _acquireFastCountCollection(
+    boost::optional<CollectionOrViewAcquisition> _acquireFastCountCollectionForWrite(
         OperationContext* opCtx);
 
     /**
@@ -200,7 +208,7 @@ private:
     stdx::thread _backgroundThread;
     bool _writeMetadataPeriodically = true;
     AtomicWord<bool> _isDisabled = false;
-    stdx::condition_variable _condVar;
+    stdx::condition_variable _backgroundThreadReadyForFlush;
 
     /**
      * In-memory cache of committed fast sizes & counts since last checkpoint.

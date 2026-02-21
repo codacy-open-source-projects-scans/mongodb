@@ -726,6 +726,7 @@ tasks:
         "development_critical_single_variant",
         "lint",
         "bazel_check",
+        "monorepo-commit-queue",
       ]
     depends_on:
       - name: version_expansions_gen
@@ -756,6 +757,7 @@ tasks:
         "development_critical_single_variant",
         "lint",
         "bazel_check",
+        "monorepo-commit-queue",
       ]
     depends_on:
       - name: version_expansions_gen
@@ -805,6 +807,7 @@ tasks:
         "assigned_to_jira_team_devprod_build",
         "development_critical_single_variant",
         "lint",
+        "monorepo-commit-queue",
       ]
     depends_on:
       - name: version_expansions_gen
@@ -1929,6 +1932,7 @@ tasks:
       [
         "assigned_to_jira_team_devprod_correctness",
         "development_critical_single_variant",
+        "monorepo-commit-queue",
       ]
     exec_timeout_secs: 600 # 10 minute timeout
     commands:

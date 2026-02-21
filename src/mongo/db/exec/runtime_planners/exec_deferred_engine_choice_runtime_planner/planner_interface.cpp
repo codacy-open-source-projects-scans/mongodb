@@ -30,25 +30,12 @@
 #include "mongo/db/exec/runtime_planners/exec_deferred_engine_choice_runtime_planner/planner_interface.h"
 
 #include "mongo/db/pipeline/sbe_pushdown.h"
-#include "mongo/db/query/plan_executor_factory.h"
-#include "mongo/db/query/plan_yield_policy_sbe.h"
-#include "mongo/db/query/query_planner.h"
-#include "mongo/db/query/stage_builder/classic_stage_builder.h"
-#include "mongo/db/query/stage_builder/sbe/builder.h"
 #include "mongo/db/query/stage_builder/stage_builder_util.h"
 
 namespace mongo::exec_deferred_engine_choice {
 
 DeferredEngineChoicePlannerInterface::DeferredEngineChoicePlannerInterface(PlannerData plannerData)
-    : _plannerData(std::move(plannerData)) {
-    if (collections().hasMainCollection()) {
-        _nss = collections().getMainCollection()->ns();
-    } else {
-        tassert(11742309, "Expected non-null canonical query", cq());
-        const auto nssOrUuid = cq()->getFindCommandRequest().getNamespaceOrUUID();
-        _nss = nssOrUuid.isNamespaceString() ? nssOrUuid.nss() : NamespaceString::kEmpty;
-    }
-}
+    : _plannerData(std::move(plannerData)) {}
 
 std::unique_ptr<PlanStage> DeferredEngineChoicePlannerInterface::buildExecutableTree(
     const QuerySolution& qs) {
@@ -61,102 +48,10 @@ std::unique_ptr<PlanStage> DeferredEngineChoicePlannerInterface::buildExecutable
         &_planStageQsnMap);
 }
 
-std::unique_ptr<QuerySolution> extendSolutionWithPipeline(std::unique_ptr<QuerySolution> solution,
-                                                          CanonicalQuery* cq,
-                                                          const QueryPlannerParams* plannerParams) {
-    if (cq->cqPipeline().empty()) {
-        return solution;
-    }
-    return QueryPlanner::extendWithAggPipeline(
-        *cq, std::move(solution), plannerParams->secondaryCollectionsInfo);
-}
-
-
-std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>
-DeferredEngineChoicePlannerInterface::_makeSbePlanExecutor(std::unique_ptr<CanonicalQuery> cq,
-                                                           std::unique_ptr<QuerySolution> solution,
-                                                           std::unique_ptr<MultiPlanStage> mps,
-                                                           boost::optional<size_t> cachedPlanHash,
-                                                           Pipeline* pipeline) {
-    plannerParams()->setTargetSbeStageBuilder(*cq, collections());
-
-    finalizePipelineStages(pipeline, cq.get());
-    plannerParams()->fillOutSecondaryCollectionsPlannerParams(opCtx(), *cq, collections());
-    solution = extendSolutionWithPipeline(std::move(solution), cq.get(), plannerParams());
-    auto sbeYieldPolicy =
-        PlanYieldPolicySBE::make(opCtx(), yieldPolicy(), collections(), cq->nss());
-    auto sbePlanAndData = stage_builder::buildSlotBasedExecutableTree(
-        opCtx(), collections(), *cq, *solution, sbeYieldPolicy.get());
-
-    const auto* expCtx = cq->getExpCtxRaw();
-    auto remoteCursors =
-        expCtx->getExplain() ? nullptr : search_helpers::getSearchRemoteCursors(cq->cqPipeline());
-    auto remoteExplains = expCtx->getExplain()
-        ? search_helpers::getSearchRemoteExplains(expCtx, cq->cqPipeline())
-        : nullptr;
-
-    static const bool isFromPlanCache = false;
-    stage_builder::prepareSlotBasedExecutableTree(opCtx(),
-                                                  sbePlanAndData.first.get(),
-                                                  &sbePlanAndData.second,
-                                                  *cq.get(),
-                                                  collections(),
-                                                  sbeYieldPolicy.get(),
-                                                  isFromPlanCache,
-                                                  remoteCursors.get());
-
-    auto nss = cq->nss();
-    tassert(11742306,
-            "Solution must be present if cachedPlanHash is present: ",
-            solution != nullptr || !cachedPlanHash.has_value());
-    return uassertStatusOK(plan_executor_factory::make(opCtx(),
-                                                       std::move(cq),
-                                                       std::move(solution),
-                                                       std::move(sbePlanAndData),
-                                                       collections(),
-                                                       plannerOptions(),
-                                                       std::move(nss),
-                                                       std::move(sbeYieldPolicy),
-                                                       isFromPlanCache,
-                                                       cachedPlanHash,
-                                                       false /*usedJoinOpt*/,
-                                                       {},
-                                                       std::move(remoteCursors),
-                                                       std::move(remoteExplains),
-                                                       std::move(mps)));
-}
-
-std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>
-DeferredEngineChoicePlannerInterface::executorFromSolution(
-    EngineChoice engine,
-    std::unique_ptr<CanonicalQuery> cq,
-    std::unique_ptr<QuerySolution> querySolution,
-    std::unique_ptr<MultiPlanStage> mps,
-    boost::optional<size_t> cachedPlanHash,
-    Pipeline* pipeline) {
-    switch (engine) {
-        case EngineChoice::kSbe:
-            return _makeSbePlanExecutor(
-                std::move(cq), std::move(querySolution), std::move(mps), cachedPlanHash, pipeline);
-        case EngineChoice::kClassic: {
-            auto expCtx = cq->getExpCtx();
-            auto planStage = mps ? std::move(mps) : buildExecutableTree(*querySolution);
-            return uassertStatusOK(
-                plan_executor_factory::make(opCtx(),
-                                            std::move(_plannerData.workingSet),
-                                            std::move(planStage),
-                                            std::move(querySolution),
-                                            std::move(cq),
-                                            expCtx,
-                                            collections().getMainCollectionAcquisition(),
-                                            plannerOptions(),
-                                            std::move(_nss),
-                                            yieldPolicy(),
-                                            cachedPlanHash,
-                                            PlanExplainerData{}));
-        }
-    }
-    MONGO_UNREACHABLE_TASSERT(11966100);
+std::vector<std::unique_ptr<QuerySolution>> makeQsnResult(std::unique_ptr<QuerySolution> qsn) {
+    std::vector<std::unique_ptr<QuerySolution>> v;
+    v.push_back(std::move(qsn));
+    return v;
 }
 
 }  // namespace mongo::exec_deferred_engine_choice

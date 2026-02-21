@@ -1,5 +1,10 @@
 /**
  * Verifies the message size limits for pre-auth and post-auth commands are correctly enforced.
+ * @tags: [
+ *    # Certain commands issued below are not supported by ingress gRPC.
+ *    grpc_incompatible,
+ *    requires_auth,
+ * ]
  */
 
 import {ReplSetTest} from "jstests/libs/replsettest.js";

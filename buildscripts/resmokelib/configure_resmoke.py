@@ -16,7 +16,7 @@ import textwrap
 import traceback
 from functools import cache
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Optional
 
 import git
 import pymongo.uri_parser
@@ -299,8 +299,8 @@ def _set_up_tracing(
     otel_collector_dir: Optional[str],
     trace_id: Optional[str],
     parent_span_id: Optional[str],
-    extra_context: Dict[str, object],
-    suite_files: Optional[List[str]] = None,
+    extra_context: dict[str, object],
+    suite_files: Optional[list[str]] = None,
     shard_index: Optional[int] = None,
 ) -> bool:
     """Try to set up otel tracing. On success return True. On failure return False.

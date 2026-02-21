@@ -3241,6 +3241,25 @@ tasks:
           suite: disagg_concurrency_sharded_causal_consistency_with_balancer
           use_large_distro: "true"
 
+  - <<: *gen_task_template
+    name: disagg_sharded_multi_stmt_txn_jscore_passthrough_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_cluster_scalability",
+        "default",
+        "sharding",
+        "jscore",
+        "multi_stmt",
+        "large",
+        "requires_extra_system_deps",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          suite: disagg_sharded_multi_stmt_txn_jscore_passthrough
+          use_large_distro: "true"
+          resmoke_jobs_max: 2
+
 ################################################
 #                 Task Groups                  #
 ################################################

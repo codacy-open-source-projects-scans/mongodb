@@ -108,19 +108,12 @@ export var TimeseriesTest = class {
     }
 
     static bucketsMayHaveMixedSchemaData(coll) {
-        const catalog = getTimeseriesCollForDDLOps(coll.getDB(), coll)
-            .aggregate([{$listCatalog: {}}])
-            .toArray()[0];
+        const metadata = coll.getMetadata();
         const tsMixedSchemaOptionNewFormat =
-            catalog.md.options.storageEngine &&
-            catalog.md.options.storageEngine.wiredTiger &&
-            catalog.md.options.storageEngine.wiredTiger.configString;
-        // TODO SERVER-92533 Simplify once SERVER-91195 is backported to all supported branches
-        if (tsMixedSchemaOptionNewFormat !== undefined) {
-            return tsMixedSchemaOptionNewFormat == "app_metadata=(timeseriesBucketsMayHaveMixedSchemaData=true)";
-        } else {
-            return catalog.md.timeseriesBucketsMayHaveMixedSchemaData;
-        }
+            metadata.options.storageEngine &&
+            metadata.options.storageEngine.wiredTiger &&
+            metadata.options.storageEngine.wiredTiger.configString;
+        return tsMixedSchemaOptionNewFormat == "app_metadata=(timeseriesBucketsMayHaveMixedSchemaData=true)";
     }
 
     // TODO SERVER-68058 remove this helper.

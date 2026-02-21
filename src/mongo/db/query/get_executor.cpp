@@ -434,8 +434,9 @@ public:
                                                  getCollections(),
                                                  makePlannerData(),
                                                  usingClassic());
-        if (rankerResult.isOK() && rankerResult.getValue().solutions.size() == 1) {
-            // The plan ranker returns a single solution when CBR is used to pick the best plan.
+        if (_plannerParams->cbrEnabled && rankerResult.isOK() &&
+            !rankerResult.getValue().solutions.empty()) {
+            // The plan ranker will place the best plan at index 0.
             captureCardinalityEstimationMethodForQueryStats(
                 rankerResult.getValue().maybeExplainData,
                 rankerResult.getValue().solutions[0].get());
@@ -495,7 +496,7 @@ public:
      * If so, a ResultType can be returned to skip re-building a planner from zero.
      */
     virtual std::unique_ptr<ResultType> maybePlannerFromRankerResult(
-        StatusWith<plan_ranking::PlanRankingResult>& rankerResult, CanonicalQuery& cq) {
+        StatusWith<PlanRankingResult>& rankerResult, CanonicalQuery& cq) {
         return nullptr;
     }
 
@@ -503,7 +504,7 @@ public:
         return *_plannerParams.get();
     }
 
-    bool shouldMultiPlanForSingleSolution(const plan_ranking::PlanRankingResult& rankerResult,
+    bool shouldMultiPlanForSingleSolution(const PlanRankingResult& rankerResult,
                                           const CanonicalQuery* cq) {
         auto expCtx = _cq->getExpCtxRaw();
 
@@ -704,7 +705,7 @@ private:
     }
 
     std::unique_ptr<ClassicRuntimePlannerResult> maybePlannerFromRankerResult(
-        StatusWith<plan_ranking::PlanRankingResult>& rankerResult, CanonicalQuery& cq) override {
+        StatusWith<PlanRankingResult>& rankerResult, CanonicalQuery& cq) override {
         if (!rankerResult.isOK()) {
             // Ranking failed
             return nullptr;

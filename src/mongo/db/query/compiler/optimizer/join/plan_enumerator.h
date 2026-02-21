@@ -257,7 +257,7 @@ private:
     EnumerationStrategy _strategy;
 
     // Variable tracking current enumeration mode during enumeration.
-    PlanEnumerationMode _mode;
+    PlanEnumerationMode _mode = PlanEnumerationMode::CHEAPEST;
 
     // Hold intermediate results of the enumeration algorithm. The index into the outer vector
     // represents the "level". The i'th level contains solutions for the optimal way to join all

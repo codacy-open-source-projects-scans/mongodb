@@ -99,7 +99,7 @@ public:
             collCards.push_back(makeCard(i * 1000.0 + 10.0));
             subsetCards.emplace(makeNodeSet((NodeId)i), collCards[i]);
             catStats.collStats[nss] =
-                CollectionStats{.allocatedDataPageBytes = collCards[i].toDouble() * 420.0};
+                CollectionStats{.logicalDataSizeBytes = collCards[i].toDouble() * 420.0};
 
             auto cq = makeCanonicalQuery(nss, filterBSON);
             cbrCqQsns.emplace(cq.get(),

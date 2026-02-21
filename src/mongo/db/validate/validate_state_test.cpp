@@ -44,6 +44,10 @@ const NamespaceString kNss = NamespaceString::createNamespaceString_forTest("tes
 const ValidationOptions kValidationOptions(ValidateMode::kForeground,
                                            RepairMode::kNone,
                                            /*logDiagnostics=*/false);
+const ValidationOptions kValidationOptionsEnforceFastCount(
+    ValidateMode::kForegroundFullEnforceFastCount,
+    RepairMode::kNone,
+    /*logDiagnostics=*/false);
 
 class ValidateStateTest : public CatalogTestFixture {};
 
@@ -104,6 +108,37 @@ TEST(FastCountTypeToStringTest, Works) {
     EXPECT_EQ(toString(FastCountType::replicated), "replicated");
     EXPECT_EQ(toString(FastCountType::both), "both");
     EXPECT_EQ(toString(FastCountType::neither), "neither");
+}
+
+TEST_F(ValidateStateTest, EnforceOnNamespaceIfReplicatedFastCountFFOff) {
+    std::vector<StringData> dbNames{"config", "local", "admin", "test"};
+
+    for (auto& dbName : dbNames) {
+        const NamespaceString nss =
+            NamespaceString::createNamespaceString_forTest(dbName + ".validateState");
+        ValidateState validateState(operationContext(), nss, kValidationOptionsEnforceFastCount);
+        EXPECT_EQ(validateState.shouldEnforceFastCount(operationContext()), true);
+    }
+}
+
+TEST_F(ValidateStateTest, EnforceOnNonInternalNamespaceReplicatedFastCountFeatureFlagOn) {
+    RAIIServerParameterControllerForTest featureFlag("featureFlagReplicatedFastCount", true);
+    const NamespaceString nss =
+        NamespaceString::createNamespaceString_forTest("test.validateState");
+    ValidateState validateState(operationContext(), nss, kValidationOptionsEnforceFastCount);
+    EXPECT_EQ(validateState.shouldEnforceFastCount(operationContext()), true);
+}
+
+TEST_F(ValidateStateTest, DoNotEnforceOnInternalNamespaceReplicatedFastCountFeatureFlagOn) {
+    RAIIServerParameterControllerForTest featureFlag("featureFlagReplicatedFastCount", true);
+    std::vector<StringData> dbNames{"config", "local", "admin"};
+
+    for (auto& dbName : dbNames) {
+        const NamespaceString nss =
+            NamespaceString::createNamespaceString_forTest(dbName + ".validateState");
+        ValidateState validateState(operationContext(), nss, kValidationOptionsEnforceFastCount);
+        EXPECT_EQ(validateState.shouldEnforceFastCount(operationContext()), false);
+    }
 }
 
 DEATH_TEST(FastCountToStringDeathTest, DiesOnBadFastCountType, "11853100") {

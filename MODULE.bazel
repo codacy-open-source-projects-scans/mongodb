@@ -286,6 +286,12 @@ setup_bolt_data = use_repo_rule("//bazel/repository_rules:bolt_data.bzl", "setup
 
 setup_bolt_data(name = "bolt_data")
 
+mothra_repository = use_repo_rule("//bazel/repository_rules:mothra.bzl", "mothra_repository")
+
+# This repository is created in CI setup or by manually cloning the 10gen/mothra repo to ./mothra.
+# If the directory doesn't exist, a stub with empty teams will be created.
+mothra_repository(name = "mothra")
+
 setup_mongo_windows_toolchains_extension = use_extension("//bazel/toolchains/cc/mongo_windows:mongo_toolchain.bzl", "setup_mongo_windows_toolchain_extension")
 use_repo(setup_mongo_windows_toolchains_extension, "mongo_windows_toolchain")
 

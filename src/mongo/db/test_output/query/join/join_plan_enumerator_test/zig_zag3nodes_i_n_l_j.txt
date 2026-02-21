@@ -7,9 +7,9 @@ Level 2:
 111
 
 Output plans (best plan 7):
-0.(206101)[111] INLJ
+0.(79.7313)[111] INLJ
  -> left:
-    (1030.22)[011] INLJ
+    (13.1644)[011] INLJ
      -> left:
         (0.0148174)[001][test.nss0] COLLSCAN
      -> right:
@@ -17,7 +17,7 @@ Output plans (best plan 7):
  -> right:
     [100][test.nss2] INDEX_PROBE { a2: -1 }
 
-1.(205073)[111] INLJ
+1.(68.2813)[111] INLJ
  -> left:
     (1.71437)[011] HJ
      -> left:
@@ -27,7 +27,7 @@ Output plans (best plan 7):
  -> right:
     [100][test.nss2] INDEX_PROBE { a2: -1 }
 
-2.(205087)[111] INLJ
+2.(82.6583)[111] INLJ
  -> left:
     (16.0914)[011] NLJ
      -> left:
@@ -37,9 +37,9 @@ Output plans (best plan 7):
  -> right:
     [100][test.nss2] INDEX_PROBE { a2: -1 }
 
-3.(208103)[111] INLJ
+3.(68.5957)[111] INLJ
  -> left:
-    (3031.9)[011] INLJ
+    (2.02873)[011] INLJ
      -> left:
         (1.49656)[010][test.nss1] COLLSCAN
      -> right:
@@ -47,7 +47,7 @@ Output plans (best plan 7):
  -> right:
     [100][test.nss2] INDEX_PROBE { a2: -1 }
 
-4.(205073)[111] INLJ
+4.(68.2813)[111] INLJ
  -> left:
     (1.71437)[011] HJ
      -> left:
@@ -57,7 +57,7 @@ Output plans (best plan 7):
  -> right:
     [100][test.nss2] INDEX_PROBE { a2: -1 }
 
-5.(205088)[111] INLJ
+5.(84.1401)[111] INLJ
  -> left:
     (17.5731)[011] NLJ
      -> left:
@@ -67,9 +67,9 @@ Output plans (best plan 7):
  -> right:
     [100][test.nss2] INDEX_PROBE { a2: -1 }
 
-6.(1053.8)[111] HJ
+6.(36.7457)[111] HJ
  -> left:
-    (1030.22)[011] INLJ
+    (13.1644)[011] INLJ
      -> left:
         (0.0148174)[001][test.nss0] COLLSCAN
      -> right:
@@ -97,9 +97,9 @@ Output plans (best plan 7):
  -> right:
     (2.97829)[100][test.nss2] COLLSCAN
 
-9.(3055.48)[111] HJ
+9.(25.61)[111] HJ
  -> left:
-    (3031.9)[011] INLJ
+    (2.02873)[011] INLJ
      -> left:
         (1.49656)[010][test.nss1] COLLSCAN
      -> right:
@@ -127,9 +127,9 @@ Output plans (best plan 7):
  -> right:
     (2.97829)[100][test.nss2] COLLSCAN
 
-12.(4261.61)[111] NLJ
+12.(3244.55)[111] NLJ
  -> left:
-    (1030.22)[011] INLJ
+    (13.1644)[011] INLJ
      -> left:
         (0.0148174)[001][test.nss0] COLLSCAN
      -> right:
@@ -157,9 +157,9 @@ Output plans (best plan 7):
  -> right:
     (2.97829)[100][test.nss2] COLLSCAN
 
-15.(6263.29)[111] NLJ
+15.(3233.42)[111] NLJ
  -> left:
-    (3031.9)[011] INLJ
+    (2.02873)[011] INLJ
      -> left:
         (1.49656)[010][test.nss1] COLLSCAN
      -> right:
@@ -187,11 +187,11 @@ Output plans (best plan 7):
  -> right:
     (2.97829)[100][test.nss2] COLLSCAN
 
-18.(1053.8)[111] HJ
+18.(36.7457)[111] HJ
  -> left:
     (2.97829)[100][test.nss2] COLLSCAN
  -> right:
-    (1030.22)[011] INLJ
+    (13.1644)[011] INLJ
      -> left:
         (0.0148174)[001][test.nss0] COLLSCAN
      -> right:
@@ -217,11 +217,11 @@ Output plans (best plan 7):
      -> right:
         (1.49656)[010][test.nss1] COLLSCAN
 
-21.(3055.48)[111] HJ
+21.(25.61)[111] HJ
  -> left:
     (2.97829)[100][test.nss2] COLLSCAN
  -> right:
-    (3031.9)[011] INLJ
+    (2.02873)[011] INLJ
      -> left:
         (1.49656)[010][test.nss1] COLLSCAN
      -> right:
@@ -247,9 +247,9 @@ Output plans (best plan 7):
      -> right:
         (0.0148174)[001][test.nss0] COLLSCAN
 
-24.(209101)[111] INLJ
+24.(80.1313)[111] INLJ
  -> left:
-    (2030.42)[101] INLJ
+    (26.1818)[101] INLJ
      -> left:
         (0.0148174)[001][test.nss0] COLLSCAN
      -> right:
@@ -257,7 +257,7 @@ Output plans (best plan 7):
  -> right:
     [010][test.nss1] INDEX_PROBE { a1: 1 }
 
-25.(207074)[111] INLJ
+25.(57.3457)[111] INLJ
  -> left:
     (3.39611)[101] HJ
      -> left:
@@ -267,7 +267,7 @@ Output plans (best plan 7):
  -> right:
     [010][test.nss1] INDEX_PROBE { a1: 1 }
 
-26.(207103)[111] INLJ
+26.(85.9583)[111] INLJ
  -> left:
     (32.0088)[101] NLJ
      -> left:
@@ -277,9 +277,9 @@ Output plans (best plan 7):
  -> right:
     [010][test.nss1] INDEX_PROBE { a1: 1 }
 
-27.(213105)[111] INLJ
+27.(57.86)[111] INLJ
  -> left:
-    (6033.78)[101] INLJ
+    (3.91047)[101] INLJ
      -> left:
         (2.97829)[100][test.nss2] COLLSCAN
      -> right:
@@ -287,7 +287,7 @@ Output plans (best plan 7):
  -> right:
     [010][test.nss1] INDEX_PROBE { a1: 1 }
 
-28.(207074)[111] INLJ
+28.(57.3457)[111] INLJ
  -> left:
     (3.39611)[101] HJ
      -> left:
@@ -297,7 +297,7 @@ Output plans (best plan 7):
  -> right:
     [010][test.nss1] INDEX_PROBE { a1: 1 }
 
-29.(207106)[111] INLJ
+29.(88.9218)[111] INLJ
  -> left:
     (34.9722)[101] NLJ
      -> left:
@@ -307,9 +307,9 @@ Output plans (best plan 7):
  -> right:
     [010][test.nss1] INDEX_PROBE { a1: 1 }
 
-30.(2052.52)[111] HJ
+30.(48.2813)[111] HJ
  -> left:
-    (2030.42)[101] INLJ
+    (26.1818)[101] INLJ
      -> left:
         (0.0148174)[001][test.nss0] COLLSCAN
      -> right:
@@ -337,9 +337,9 @@ Output plans (best plan 7):
  -> right:
     (1.49656)[010][test.nss1] COLLSCAN
 
-33.(6055.88)[111] HJ
+33.(26.01)[111] HJ
  -> left:
-    (6033.78)[101] INLJ
+    (3.91047)[101] INLJ
      -> left:
         (2.97829)[100][test.nss2] COLLSCAN
      -> right:
@@ -367,9 +367,9 @@ Output plans (best plan 7):
  -> right:
     (1.49656)[010][test.nss1] COLLSCAN
 
-36.(5261.81)[111] NLJ
+36.(3257.57)[111] NLJ
  -> left:
-    (2030.42)[101] INLJ
+    (26.1818)[101] INLJ
      -> left:
         (0.0148174)[001][test.nss0] COLLSCAN
      -> right:
@@ -397,9 +397,9 @@ Output plans (best plan 7):
  -> right:
     (1.49656)[010][test.nss1] COLLSCAN
 
-39.(9265.17)[111] NLJ
+39.(3235.3)[111] NLJ
  -> left:
-    (6033.78)[101] INLJ
+    (3.91047)[101] INLJ
      -> left:
         (2.97829)[100][test.nss2] COLLSCAN
      -> right:
@@ -427,11 +427,11 @@ Output plans (best plan 7):
  -> right:
     (1.49656)[010][test.nss1] COLLSCAN
 
-42.(2052.52)[111] HJ
+42.(48.2813)[111] HJ
  -> left:
     (1.49656)[010][test.nss1] COLLSCAN
  -> right:
-    (2030.42)[101] INLJ
+    (26.1818)[101] INLJ
      -> left:
         (0.0148174)[001][test.nss0] COLLSCAN
      -> right:
@@ -457,11 +457,11 @@ Output plans (best plan 7):
      -> right:
         (2.97829)[100][test.nss2] COLLSCAN
 
-45.(6055.88)[111] HJ
+45.(26.01)[111] HJ
  -> left:
     (1.49656)[010][test.nss1] COLLSCAN
  -> right:
-    (6033.78)[101] INLJ
+    (3.91047)[101] INLJ
      -> left:
         (2.97829)[100][test.nss2] COLLSCAN
      -> right:
@@ -487,9 +487,9 @@ Output plans (best plan 7):
      -> right:
         (0.0148174)[001][test.nss0] COLLSCAN
 
-48.(814184)[111] INLJ
+48.(149.396)[111] INLJ
  -> left:
-    (205072)[110] INLJ
+    (68.0635)[110] INLJ
      -> left:
         (1.49656)[010][test.nss1] COLLSCAN
      -> right:
@@ -497,7 +497,7 @@ Output plans (best plan 7):
  -> right:
     [001][test.nss0] INDEX_PROBE { a0: -1 }
 
-49.(609136)[111] INLJ
+49.(106.41)[111] INLJ
  -> left:
     (25.0778)[110] HJ
      -> left:
@@ -507,7 +507,7 @@ Output plans (best plan 7):
  -> right:
     [001][test.nss0] INDEX_PROBE { a0: -1 }
 
-50.(612344)[111] INLJ
+50.(3314.22)[111] INLJ
  -> left:
     (3232.88)[110] NLJ
      -> left:
@@ -517,9 +517,9 @@ Output plans (best plan 7):
  -> right:
     [001][test.nss0] INDEX_PROBE { a0: -1 }
 
-51.(816185)[111] INLJ
+51.(138.26)[111] INLJ
  -> left:
-    (207074)[110] INLJ
+    (56.9279)[110] INLJ
      -> left:
         (2.97829)[100][test.nss2] COLLSCAN
      -> right:
@@ -527,7 +527,7 @@ Output plans (best plan 7):
  -> right:
     [001][test.nss0] INDEX_PROBE { a0: -1 }
 
-52.(609136)[111] INLJ
+52.(106.41)[111] INLJ
  -> left:
     (25.0778)[110] HJ
      -> left:
@@ -537,7 +537,7 @@ Output plans (best plan 7):
  -> right:
     [001][test.nss0] INDEX_PROBE { a0: -1 }
 
-53.(612346)[111] INLJ
+53.(3315.7)[111] INLJ
  -> left:
     (3234.37)[110] NLJ
      -> left:
@@ -547,9 +547,9 @@ Output plans (best plan 7):
  -> right:
     [001][test.nss0] INDEX_PROBE { a0: -1 }
 
-54.(205522)[111] HJ
+54.(517.332)[111] HJ
  -> left:
-    (205072)[110] INLJ
+    (68.0635)[110] INLJ
      -> left:
         (1.49656)[010][test.nss1] COLLSCAN
      -> right:
@@ -577,9 +577,9 @@ Output plans (best plan 7):
  -> right:
     (0.0148174)[001][test.nss0] COLLSCAN
 
-57.(207523)[111] HJ
+57.(506.197)[111] HJ
  -> left:
-    (207074)[110] INLJ
+    (56.9279)[110] INLJ
      -> left:
         (2.97829)[100][test.nss2] COLLSCAN
      -> right:
@@ -607,9 +607,9 @@ Output plans (best plan 7):
  -> right:
     (0.0148174)[001][test.nss0] COLLSCAN
 
-60.(208304)[111] NLJ
+60.(3299.45)[111] NLJ
  -> left:
-    (205072)[110] INLJ
+    (68.0635)[110] INLJ
      -> left:
         (1.49656)[010][test.nss1] COLLSCAN
      -> right:
@@ -637,9 +637,9 @@ Output plans (best plan 7):
  -> right:
     (0.0148174)[001][test.nss0] COLLSCAN
 
-63.(210305)[111] NLJ
+63.(3288.32)[111] NLJ
  -> left:
-    (207074)[110] INLJ
+    (56.9279)[110] INLJ
      -> left:
         (2.97829)[100][test.nss2] COLLSCAN
      -> right:
@@ -667,11 +667,11 @@ Output plans (best plan 7):
  -> right:
     (0.0148174)[001][test.nss0] COLLSCAN
 
-66.(205113)[111] HJ
+66.(108.681)[111] HJ
  -> left:
     (0.0148174)[001][test.nss0] COLLSCAN
  -> right:
-    (205072)[110] INLJ
+    (68.0635)[110] INLJ
      -> left:
         (1.49656)[010][test.nss1] COLLSCAN
      -> right:
@@ -697,11 +697,11 @@ Output plans (best plan 7):
      -> right:
         (2.97829)[100][test.nss2] COLLSCAN
 
-69.(207115)[111] HJ
+69.(97.5457)[111] HJ
  -> left:
     (0.0148174)[001][test.nss0] COLLSCAN
  -> right:
-    (207074)[110] INLJ
+    (56.9279)[110] INLJ
      -> left:
         (2.97829)[100][test.nss2] COLLSCAN
      -> right:

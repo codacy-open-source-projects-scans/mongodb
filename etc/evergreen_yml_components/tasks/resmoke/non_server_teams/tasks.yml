@@ -600,6 +600,17 @@ task_groups:
           optional: true
           aws_key: ${aws_key}
           aws_secret: ${aws_secret}
+          local_file: src/generated_tasks.json
+          remote_file: ${project}/${version_id}/${build_variant}/${task_name}/generated_tasks.json
+          bucket: mciuploads
+          permissions: private
+          visibility: signed
+          content_type: application/json
+      - command: s3.put
+        params:
+          optional: true
+          aws_key: ${aws_key}
+          aws_secret: ${aws_secret}
           local_file: src/build_events.json
           remote_file: ${project}/${version_id}/${build_variant}/${task_name}/build_events.json
           bucket: mciuploads

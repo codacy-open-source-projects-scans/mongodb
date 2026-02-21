@@ -1905,7 +1905,13 @@ retry:
             continue;
         }
 
-        if (F_ISSET(btree, WT_BTREE_IN_MEMORY) && !F_ISSET(evict, WT_EVICT_CACHE_DIRTY)) {
+        /*
+         * For in-memory btrees, if we are not evicting dirty pages or pages with active updates,
+         * walking them serves no purpose. Such pages are not eligible for clean eviction, making
+         * the operation unnecessary.
+         */
+        if (F_ISSET(btree, WT_BTREE_IN_MEMORY) &&
+          !F_ISSET(evict, WT_EVICT_CACHE_DIRTY | WT_EVICT_CACHE_UPDATES)) {
             __evict_disagg_btree_skip_count(session, btree);
             continue;
         }
@@ -2303,8 +2309,8 @@ __evict_get_min_pages(WT_SESSION_IMPL *session, uint32_t target_pages)
 
 /*
  * __evict_try_restore_walk_position --
- *     Try to restore the walk position from saved soft pos. Returns true if the walk position is
- *     restored.
+ *     Try to restore the eviction walk position from saved soft pos. If we can't restore a saved
+ *     position, clear the eviction walk position instead.
  */
 static WT_INLINE int
 __evict_try_restore_walk_position(WT_SESSION_IMPL *session, WT_BTREE *btree, uint32_t walk_flags)
@@ -2557,8 +2563,7 @@ __evict_try_queue_page(WT_SESSION_IMPL *session, WTI_EVICT_QUEUE *queue, WT_REF 
     want_page =
       (F_ISSET(evict, WT_EVICT_CACHE_CLEAN) && !F_ISSET(btree, WT_BTREE_IN_MEMORY) && !modified) ||
       (F_ISSET(evict, WT_EVICT_CACHE_DIRTY) && modified) ||
-      (F_ISSET(evict, WT_EVICT_CACHE_UPDATES) && !F_ISSET(btree, WT_BTREE_IN_MEMORY) &&
-        page->modify != NULL);
+      (F_ISSET(evict, WT_EVICT_CACHE_UPDATES) && page->modify != NULL);
     if (!want_page) {
         WT_STAT_CONN_INCR(session, eviction_server_skip_unwanted_pages);
         return;

@@ -598,6 +598,7 @@ common:fission --fission=yes
 common:fission --remote_download_regex=.*\.dwo$
 
 --config=fuzztest
+common:fuzztest --no@fuzztest//fuzztest:use_riegeli
 common:fuzztest --@fuzztest//fuzztest:centipede_integration=True
 
 # Avoid failing builds when BES metadata fails to upload.

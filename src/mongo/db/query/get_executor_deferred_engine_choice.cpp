@@ -38,156 +38,35 @@
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
-#include "mongo/base/error_codes.h"
-#include "mongo/base/status.h"
 #include "mongo/db/client.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/exec/classic/cached_plan.h"
 #include "mongo/db/exec/classic/delete_stage.h"
 #include "mongo/db/exec/classic/plan_stage.h"
-#include "mongo/db/exec/classic/sort_key_generator.h"
 #include "mongo/db/exec/classic/subplan.h"
-#include "mongo/db/exec/runtime_planners/exec_deferred_engine_choice_runtime_planner/planner_interface.h"
 #include "mongo/db/matcher/extensions_callback_real.h"
-#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/sbe_pushdown.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/collection_query_info.h"
 #include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
-#include "mongo/db/query/find_command.h"
-#include "mongo/db/query/get_executor_fast_paths.h"
+#include "mongo/db/query/get_executor_deferred_engine_choice_lowering.h"
+#include "mongo/db/query/get_executor_deferred_engine_choice_planning.h"
 #include "mongo/db/query/get_executor_helpers.h"
 #include "mongo/db/query/internal_plans.h"
-#include "mongo/db/query/plan_cache/plan_cache_key_factory.h"
-#include "mongo/db/query/plan_ranking/plan_ranker.h"
-#include "mongo/db/query/planner_analysis.h"
-#include "mongo/db/query/query_planner.h"
-#include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/wildcard_multikey_paths.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_parameter.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
 #include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
-#include "mongo/db/stats/counters.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/update/update_driver.h"
-#include "mongo/logv2/log.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/str.h"
 
 #include <utility>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo::exec_deferred_engine_choice {
-
-StatusWith<std::unique_ptr<PlannerInterface>> preparePlanner(
-    OperationContext* opCtx,
-    CanonicalQuery* cq,
-    std::shared_ptr<QueryPlannerParams> plannerParams,
-    PlanYieldPolicy::YieldPolicy yieldPolicy,
-    const MultipleCollectionAccessor& collections,
-    Pipeline* pipeline) {
-    auto ws = std::make_unique<WorkingSet>();
-    auto makePlannerData = [&](boost::optional<size_t> cachedPlanHash) {
-        return PlannerData{
-            opCtx, cq, std::move(ws), collections, plannerParams, yieldPolicy, cachedPlanHash};
-    };
-    auto buildSingleSolutionPlanner = [&](std::unique_ptr<QuerySolution> solution,
-                                          boost::optional<size_t> cachedPlanHash) {
-        return std::make_unique<SingleSolutionPassthroughPlanner>(makePlannerData(cachedPlanHash),
-                                                                  std::move(solution));
-    };
-
-    const auto& mainColl = collections.getMainCollection();
-    if (!mainColl) {
-        LOGV2_DEBUG(11742304,
-                    2,
-                    "Collection does not exist. Using EOF plan",
-                    logAttrs(cq->nss()),
-                    "canonicalQuery"_attr = redact(cq->toStringShort()));
-        planCacheCounters.incrementClassicSkippedCounter();
-        auto solution = std::make_unique<QuerySolution>();
-        solution->setRoot(std::make_unique<EofNode>(eof_node::EOFType::NonExistentNamespace));
-        return buildSingleSolutionPlanner(std::move(solution), boost::none /*cachedPlanHash*/);
-    }
-
-    if (cq->getFindCommandRequest().getTailable() && !mainColl->isCapped()) {
-        return Status(ErrorCodes::BadValue,
-                      str::stream() << "error processing query: " << cq->toStringForErrorMsg()
-                                    << " tailable cursor requested on non capped collection");
-    }
-
-    // If the canonical query does not have a user-specified collation and no one has given the
-    // CanonicalQuery a collation already, set it from the collection default.
-    if (cq->getFindCommandRequest().getCollation().isEmpty() && cq->getCollator() == nullptr &&
-        mainColl->getDefaultCollator()) {
-        cq->setCollator(mainColl->getDefaultCollator()->clone());
-    }
-
-    if (auto idHackPlan = tryIdHack(opCtx, collections, cq, [&]() {
-            return makePlannerData(boost::none /*cachedPlanHash*/);
-        })) {
-        uassertStatusOK(idHackPlan->plan());
-        return {{std::move(idHackPlan)}};
-    }
-
-    auto planCacheKey =
-        plan_cache_key_factory::make<PlanCacheKey>(*cq, collections.getMainCollectionAcquisition());
-    PlanCacheInfo planCacheInfo{planCacheKey.planCacheKeyHash(), planCacheKey.planCacheShapeHash()};
-    setOpDebugPlanCacheInfo(opCtx, planCacheInfo);
-
-    boost::optional<size_t> cachedPlanHash = boost::none;
-    if (auto cs = CollectionQueryInfo::get(collections.getMainCollection())
-                      .getPlanCache()
-                      ->getCacheEntryIfActive(planCacheKey)) {
-        // TODO SERVER-117566 Implement plan cache lookup.
-        cachedPlanHash = cs->cachedPlan->solutionHash;
-    }
-
-    if (SubplanStage::needsSubplanning(*cq)) {
-        return std::make_unique<SubPlanner>(makePlannerData(cachedPlanHash));
-    }
-
-    auto solutions = uassertStatusOK(QueryPlanner::plan(*cq, *plannerParams));
-    // The planner should have returned an error status if there are no solutions.
-    tassert(11742305, "Expected at least one solution to answer query", !solutions.empty());
-
-    // If there is a single solution, we can return that plan.
-    // Force multiplanning (and therefore caching) if forcePlanCache is set. We could
-    // manually update the plan cache instead without multiplanning but this is simpler.
-    if (1 == solutions.size() && !cq->getExpCtxRaw()->getForcePlanCache() &&
-        !cq->getExpCtxRaw()->getQueryKnobConfiguration().getUseMultiplannerForSingleSolutions()) {
-        // Only one possible plan. Build the stages from the solution.
-        solutions[0]->indexFilterApplied = plannerParams->indexFiltersApplied;
-        return buildSingleSolutionPlanner(std::move(solutions[0]), cachedPlanHash);
-    }
-    return std::make_unique<MultiPlanner>(makePlannerData(cachedPlanHash), std::move(solutions));
-}
-
-std::unique_ptr<PlannerInterface> getPlanner(
-    OperationContext* opCtx,
-    const MultipleCollectionAccessor& collections,
-    CanonicalQuery* canonicalQuery,
-    PlanYieldPolicy::YieldPolicy yieldPolicy,
-    std::size_t plannerOptions,
-    Pipeline* pipeline,
-    const MakePlannerParamsFn& makeQueryPlannerParams,
-    std::unique_ptr<QueryPlannerParams> paramsForSingleCollectionQuery) {
-    auto makePlannerHelper = [&](std::unique_ptr<QueryPlannerParams> plannerParams) {
-        return uassertStatusOK(preparePlanner(
-            opCtx, canonicalQuery, std::move(plannerParams), yieldPolicy, collections, pipeline));
-    };
-    canonicalQuery->setUsingSbePlanCache(false);
-    return retryMakePlanner(std::move(paramsForSingleCollectionQuery),
-                            makeQueryPlannerParams,
-                            makePlannerHelper,
-                            canonicalQuery,
-                            plannerOptions,
-                            pipeline);
-}
 
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>>
 getExecutorFindDeferredEngineChoice(OperationContext* opCtx,
@@ -197,22 +76,22 @@ getExecutorFindDeferredEngineChoice(OperationContext* opCtx,
                                     const MakePlannerParamsFn& makeQueryPlannerParams,
                                     std::size_t plannerOptions,
                                     Pipeline* pipeline) {
-    auto expressResult =
-        tryExpress(opCtx, collections, canonicalQuery, plannerOptions, makeQueryPlannerParams);
-    if (expressResult.executor) {
-        return std::move(expressResult.executor);
+    PlanRankingResult rankerResult = planRanking(opCtx,
+                                                 collections,
+                                                 canonicalQuery,
+                                                 yieldPolicy,
+                                                 plannerOptions,
+                                                 pipeline,
+                                                 makeQueryPlannerParams);
+    if (rankerResult.expressExecutor) {
+        return {std::move(rankerResult.expressExecutor)};
     }
-
-    auto planner = getPlanner(opCtx,
-                              collections,
-                              canonicalQuery.get(),
-                              yieldPolicy,
-                              plannerOptions,
-                              pipeline,
-                              makeQueryPlannerParams,
-                              // Reuse planner params created during failed express path check.
-                              std::move(expressResult.plannerParams));
-    return planner->makeExecutor(std::move(canonicalQuery), pipeline);
+    return lowerPlanRankingResult(std::move(canonicalQuery),
+                                  std::move(rankerResult),
+                                  opCtx,
+                                  collections,
+                                  yieldPolicy,
+                                  pipeline);
 }
 
 }  // namespace mongo::exec_deferred_engine_choice

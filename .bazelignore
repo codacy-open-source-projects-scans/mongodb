@@ -27,3 +27,6 @@ venv
 
 .ijwb
 .git
+
+# This is not run by bazel at the moment
+monguard

@@ -141,7 +141,7 @@ auto& oplogFetcherLagSeconds =
     *MetricBuilder<Atomic64Metric>{"repl.network.oplogFetcherLagSeconds"};
 // highest OpTime obtained in the most recent batch
 auto& oplogFetcherHighestFetchedOptime =
-    *MetricBuilder<BSONObj>{"repl.network.oplogFetcherHighestFetchedOptime"};
+    *MetricBuilder<synchronized_value<BSONObj>>{"repl.network.oplogFetcherHighestFetchedOptime"};
 
 const Milliseconds maximumAwaitDataTimeoutMS = Seconds{30};
 

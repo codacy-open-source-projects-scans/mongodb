@@ -380,6 +380,8 @@ TEST_F(ApplyOpsInsertEnabledSteadyStateConstraintsTest,
 DEATH_TEST_F(ApplyOpsInsertEnabledSteadyStateConstraintsDeathTest,
              InsertByRecordId_ExistsDocumentAtRecordId_NonMatchingId_Fails,
              "8830901") {
+    RAIIServerParameterControllerForTest _featureFlagReplRidController{
+        "featureFlagRecordIdsReplicated", true};
     // Insert multiple documents.
     const RecordId rid1(1);
     const RecordId rid2(2);
@@ -406,6 +408,8 @@ DEATH_TEST_F(ApplyOpsInsertEnabledSteadyStateConstraintsDeathTest,
 DEATH_TEST_F(ApplyOpsInsertDisabledSteadyStateConstraintsDeathTest,
              InsertByRecordId_ExistsDocumentAtRecordId_NonMatchingId_Fails,
              "8830901") {
+    RAIIServerParameterControllerForTest _featureFlagReplRidController{
+        "featureFlagRecordIdsReplicated", true};
     // Insert multiple documents.
     const RecordId rid1(1);
     const RecordId rid2(2);

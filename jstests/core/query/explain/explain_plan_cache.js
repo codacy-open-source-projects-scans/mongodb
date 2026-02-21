@@ -31,10 +31,10 @@ import {
 } from "jstests/libs/query/analyze_plan.js";
 import {ClusteredCollectionUtil} from "jstests/libs/clustered_collections/clustered_collection_util.js";
 import {getPlanRankerMode} from "jstests/libs/query/cbr_utils.js";
-import {checkSbeFullFeatureFlagEnabled, checkSbeFullyEnabled} from "jstests/libs/query/sbe_util.js";
+import {sbePlanCacheEnabled, checkSbeFullyEnabled} from "jstests/libs/query/sbe_util.js";
 
 const shouldGenerateSbePlan = checkSbeFullyEnabled(db);
-const isUsingSbePlanCache = checkSbeFullFeatureFlagEnabled(db);
+const isUsingSbePlanCache = sbePlanCacheEnabled(db);
 const coll = db.explain_plan_cache;
 
 // Assert the winning plan is cached and rejected are not.

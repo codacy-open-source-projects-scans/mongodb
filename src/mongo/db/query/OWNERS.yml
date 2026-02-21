@@ -89,7 +89,7 @@ filters:
       - 10gen/query-optimization
       - 10gen/query-execution
   # TODO SERVER-119034 change ownership to be shared with QO.
-  - "get_executor_deferred_engine_choice.*":
+  - "get_executor_deferred_engine_choice*":
     approvers:
       - 10gen/query-execution
   - "getmore_request_test.cpp":

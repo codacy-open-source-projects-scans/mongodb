@@ -29,50 +29,12 @@
 
 #pragma once
 
-#include "mongo/db/operation_context.h"
+#include "mongo/db/exec/runtime_planners/planner_types.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/plan_executor.h"
-#include "mongo/db/query/query_planner_params.h"
 #include "mongo/util/modules.h"
 
 namespace mongo {
-
-/**
- * Data that any runtime planner needs to perform the planning.
- */
-struct PlannerData {
-    PlannerData(OperationContext* opCtx,
-                CanonicalQuery* cq,
-                std::unique_ptr<WorkingSet> workingSet,
-                const MultipleCollectionAccessor& collections,
-                std::shared_ptr<QueryPlannerParams> plannerParams,
-                PlanYieldPolicy::YieldPolicy yieldPolicy,
-                boost::optional<size_t> cachedPlanHash)
-        : opCtx(opCtx),
-          cq(cq),
-          workingSet(std::move(workingSet)),
-          collections(collections),
-          plannerParams(std::move(plannerParams)),
-          yieldPolicy(yieldPolicy),
-          cachedPlanHash(cachedPlanHash) {}
-
-    PlannerData(const PlannerData&) = delete;
-    PlannerData& operator=(const PlannerData&) = delete;
-    PlannerData(PlannerData&&) = default;
-    PlannerData& operator=(PlannerData&&) = default;
-
-    virtual ~PlannerData() = default;
-
-    OperationContext* opCtx;
-    CanonicalQuery* cq;
-    std::unique_ptr<WorkingSet> workingSet;
-    const MultipleCollectionAccessor& collections;
-    // Shared pointer since this is shared across all instances of this type and also
-    // prepare helper functions that indeed create this objects.
-    std::shared_ptr<QueryPlannerParams> plannerParams;
-    PlanYieldPolicy::YieldPolicy yieldPolicy;
-    boost::optional<size_t> cachedPlanHash;
-};
 
 /*
  *  Common interface for planner implementations.
@@ -84,10 +46,21 @@ public:
     /**
      * Function that creates a PlanExecutor for the selected plan. Can be called only once, as it
      * may transfer ownership of some data to returned PlanExecutor.
-     * When get_executor_deferred_engine_choice is used, the `pipeline` argument may be mutated in
-     * case document source stages are pushed down to SBE.
+     * TODO SERVER-119971 remove this function and its different implementations.
      */
     virtual std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> makeExecutor(
-        std::unique_ptr<CanonicalQuery> canonicalQuery, Pipeline* pipeline = nullptr) = 0;
+        std::unique_ptr<CanonicalQuery> canonicalQuery) {
+        MONGO_UNREACHABLE_TASSERT(11974307);
+    }
+
+    /**
+     * Extracts a `PlanRankingResult` which summarizes all information from the planning phase.
+     * Only called when `featureFlagGetExecutorDeferredEngineChoice` is enabled.
+     * TODO SERVER-119036 when the legacy get_executor is deleted, this function can be pure
+     * virtual.
+     */
+    virtual PlanRankingResult extractPlanRankingResult() {
+        MONGO_UNREACHABLE_TASSERT(11974308);
+    }
 };
 }  // namespace mongo

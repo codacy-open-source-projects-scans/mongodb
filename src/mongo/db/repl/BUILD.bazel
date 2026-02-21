@@ -1126,6 +1126,7 @@ mongo_cc_library(
         ":replication_auth",
         ":replication_metrics",
         ":storage_interface",
+        "//src/mongo/crypto:oplog_key_entry_handler",
         "//src/mongo/db:curop_metrics",
         "//src/mongo/db:query_exec",
         "//src/mongo/db/auth:authorization_manager_global",

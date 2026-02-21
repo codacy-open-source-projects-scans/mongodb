@@ -1,5 +1,5 @@
 load("@poetry//:dependencies.bzl", "dependency")
-load("//bazel:mongo_src_rules.bzl", "idl_generator", "mongo_cc_benchmark", "mongo_cc_binary", "mongo_cc_fuzzer_test", "mongo_cc_integration_test", "mongo_cc_library", "mongo_cc_unit_test", "mongo_idl_library", "windows_rc")
+load("//bazel:mongo_src_rules.bzl", "idl_generator", "mongo_cc_benchmark", "mongo_cc_binary", "mongo_cc_fuzzer_test_deprecated", "mongo_cc_integration_test", "mongo_cc_library", "mongo_cc_unit_test", "mongo_idl_library", "windows_rc")
 load("//bazel/config:render_template.bzl", "render_template")
 
 package(default_visibility = ["//visibility:public"])
@@ -876,10 +876,13 @@ mongo_cc_library(
         "//src/mongo/db/pipeline:sbe_pushdown.cpp",
         "//src/mongo/db/query:all_indices_required_checker.cpp",
         "//src/mongo/db/query:engine_selection.cpp",
+        "//src/mongo/db/query:engine_selection_plan.cpp",
         "//src/mongo/db/query:explain.cpp",
         "//src/mongo/db/query:find.cpp",
         "//src/mongo/db/query:get_executor.cpp",
         "//src/mongo/db/query:get_executor_deferred_engine_choice.cpp",
+        "//src/mongo/db/query:get_executor_deferred_engine_choice_lowering.cpp",
+        "//src/mongo/db/query:get_executor_deferred_engine_choice_planning.cpp",
         "//src/mongo/db/query:get_executor_fast_paths.cpp",
         "//src/mongo/db/query:get_executor_helpers.cpp",
         "//src/mongo/db/query:internal_plans.cpp",
@@ -3482,7 +3485,7 @@ mongo_cc_library(
     deps = ["//src/mongo:base"],
 )
 
-mongo_cc_fuzzer_test(
+mongo_cc_fuzzer_test_deprecated(
     name = "op_msg_fuzzer_shard",
     srcs = [
         "op_msg_fuzzer_shard.cpp",
@@ -3493,7 +3496,7 @@ mongo_cc_fuzzer_test(
     ],
 )
 
-mongo_cc_fuzzer_test(
+mongo_cc_fuzzer_test_deprecated(
     name = "op_msg_fuzzer_router",
     srcs = [
         "op_msg_fuzzer_router.cpp",

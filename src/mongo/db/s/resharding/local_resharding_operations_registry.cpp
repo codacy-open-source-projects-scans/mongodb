@@ -29,12 +29,33 @@
 
 #include "mongo/db/s/resharding/local_resharding_operations_registry.h"
 
+#include "mongo/db/persistent_task_store.h"
+#include "mongo/db/s/resharding/resharding_metrics_helpers.h"
+#include "mongo/util/assert_util.h"
+
 namespace mongo {
 
 namespace {
 const auto registryDecoration =
     ServiceContext::declareDecoration<LocalReshardingOperationsRegistry>();
+
+template <typename Document>
+void updateFromNamespace(OperationContext* opCtx,
+                         const NamespaceString& nss,
+                         LocalReshardingOperationsRegistry& registry) {
+    PersistentTaskStore<Document> store(nss);
+    auto role = resharding_metrics::getRoleForStateDocument<Document>();
+    store.forEach(opCtx, {}, [&](const Document& doc) {
+        if constexpr (std::is_same_v<Document, ReshardingCoordinatorDocument>) {
+            if (doc.getState() == CoordinatorStateEnum::kQuiesced) {
+                return true;
+            }
+        }
+        registry.registerOperation(role, doc.getCommonReshardingMetadata());
+        return true;
+    });
 }
+}  // namespace
 
 LocalReshardingOperationsRegistry& LocalReshardingOperationsRegistry::get() {
     return registryDecoration(getGlobalServiceContext());
@@ -43,46 +64,72 @@ LocalReshardingOperationsRegistry& LocalReshardingOperationsRegistry::get() {
 void LocalReshardingOperationsRegistry::registerOperation(
     Role role, const CommonReshardingMetadata& metadata) {
     std::unique_lock lock(_mutex);
-    auto it = _operations.find(metadata.getSourceNss());
-    if (it == _operations.end()) {
-        _operations.emplace(metadata.getSourceNss(), Operation{metadata, {role}});
+
+    auto namespaceIt = _namespaceToOperations.find(metadata.getSourceNss());
+    if (namespaceIt == _namespaceToOperations.end()) {
+        _namespaceToOperations.emplace(
+            metadata.getSourceNss(),
+            UuidToOperation{{metadata.getReshardingUUID(), Operation{metadata, {role}}}});
         return;
     }
-    auto& existingOperation = it->second;
-    uassert(
-        ErrorCodes::ConflictingOperationInProgress,
-        fmt::format("Unable to register new resharding operation for namespace {} because another "
-                    "operation with different parameters is already in progress for that namespace",
-                    metadata.getSourceNss().toStringForErrorMsg()),
-        metadata == existingOperation.metadata);
+    auto& operations = namespaceIt->second;
+    auto operationIt = operations.find(metadata.getReshardingUUID());
+    if (operationIt == operations.end()) {
+        operations.emplace(metadata.getReshardingUUID(), Operation{metadata, {role}});
+        return;
+    }
+    auto& existingOperation = operationIt->second;
     existingOperation.roles.insert(role);
 }
 
 void LocalReshardingOperationsRegistry::unregisterOperation(
     Role role, const CommonReshardingMetadata& metadata) {
     std::unique_lock lock(_mutex);
-    auto it = _operations.find(metadata.getSourceNss());
-    if (it == _operations.end()) {
+    auto namespaceIt = _namespaceToOperations.find(metadata.getSourceNss());
+    if (namespaceIt == _namespaceToOperations.end()) {
         return;
     }
-    auto& existingOperation = it->second;
-    if (metadata != existingOperation.metadata) {
+    auto& operations = namespaceIt->second;
+    auto operationIt = operations.find(metadata.getReshardingUUID());
+    if (operationIt == operations.end()) {
         return;
     }
+    auto& existingOperation = operationIt->second;
     existingOperation.roles.erase(role);
     if (existingOperation.roles.empty()) {
-        _operations.erase(it);
+        operations.erase(operationIt);
+        if (operations.empty()) {
+            _namespaceToOperations.erase(namespaceIt);
+        }
     }
 }
 
 boost::optional<LocalReshardingOperationsRegistry::Operation>
 LocalReshardingOperationsRegistry::getOperation(const NamespaceString& nss) const {
     std::shared_lock lock(_mutex);
-    auto it = _operations.find(nss);
-    if (it == _operations.end()) {
+    auto namespaceIt = _namespaceToOperations.find(nss);
+    if (namespaceIt == _namespaceToOperations.end()) {
         return boost::none;
     }
-    return it->second;
+    auto& operations = namespaceIt->second;
+    uassert(ErrorCodes::PrimarySteppedDown,
+            fmt::format("Resharding operation registry transiently contains multiple operations "
+                        "for namespace {}; this can occur if this node is running as a secondary",
+                        nss.toStringForErrorMsg()),
+            operations.size() == 1);
+    return operations.begin()->second;
+}
+
+void LocalReshardingOperationsRegistry::resyncFromDisk(OperationContext* opCtx) {
+    LocalReshardingOperationsRegistry resyncedRegistry;
+    updateFromNamespace<ReshardingCoordinatorDocument>(
+        opCtx, NamespaceString::kConfigReshardingOperationsNamespace, resyncedRegistry);
+    updateFromNamespace<ReshardingDonorDocument>(
+        opCtx, NamespaceString::kDonorReshardingOperationsNamespace, resyncedRegistry);
+    updateFromNamespace<ReshardingRecipientDocument>(
+        opCtx, NamespaceString::kRecipientReshardingOperationsNamespace, resyncedRegistry);
+    std::unique_lock lock(_mutex);
+    _namespaceToOperations.swap(resyncedRegistry._namespaceToOperations);
 }
 
 }  // namespace mongo

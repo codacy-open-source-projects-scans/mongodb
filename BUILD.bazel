@@ -34,6 +34,7 @@ mongo_js_library(
         ":node_modules/@eslint/js",
         ":node_modules/eslint-plugin-mongodb",
         ":node_modules/globals",
+        "//src/mongo/shell/debugger/vscode:eslint",
     ],
 )
 

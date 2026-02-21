@@ -54,6 +54,7 @@
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/storage/storage_repair_observer.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_cache_eviction_opt_out_guard.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_cache_pressure_monitor.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_connection.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_cursor.h"
@@ -458,7 +459,7 @@ std::string generateWTOpenConfigString(const WiredTigerKVEngineBase::WiredTigerC
         ss << "timing_stress_for_test=[history_store_checkpoint_delay,checkpoint_slow],";
     }
 
-    if (wtConfig.prefetchEnabled && gFeatureFlagPrefetch.isEnabled() && !wtConfig.inMemory) {
+    if (wtConfig.prefetchEnabled && !wtConfig.inMemory) {
         ss << "prefetch=(available=true,default=false),";
     }
 
@@ -1158,7 +1159,7 @@ void WiredTigerKVEngine::flushAllFiles(OperationContext* opCtx, bool callerHolds
                 VersionContext::getDecoration(opCtx),
                 serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
             // TODO(SERVER-101413): Remove this once checkpointing and recovery is functional.
-            ReplicatedFastCountManager::get(opCtx->getServiceContext()).flush(opCtx);
+            ReplicatedFastCountManager::get(opCtx->getServiceContext()).flushAsync(opCtx);
         }
     }
     syncSizeInfo(true);
@@ -2915,6 +2916,10 @@ bool WiredTigerKVEngine::waitUntilUnjournaledWritesDurable(OperationContext* opC
 void WiredTigerKVEngine::waitUntilDurable(OperationContext* opCtx,
                                           Fsync syncType,
                                           UseJournalListener useListener) {
+
+    // Opt out of cache eviction when updating the oplog timestamp.
+    CacheEvictionOptOutGuard guard(*shard_role_details::getRecoveryUnit(opCtx));
+
     // For ephemeral storage engines, the data is "as durable as it's going to get".
     // That is, a restart is equivalent to a complete node failure.
     if (isEphemeral()) {
@@ -2992,7 +2997,9 @@ void WiredTigerKVEngine::waitUntilDurable(OperationContext* opCtx,
 
     // Initialize on first use.
     if (!_waitUntilDurableSession) {
-        _waitUntilDurableSession = std::make_unique<WiredTigerSession>(_connection.get());
+        // Open the session configured to opt out of cache eviction.
+        _waitUntilDurableSession =
+            std::make_unique<WiredTigerSession>(_connection.get(), nullptr, "cache_max_wait_ms=1");
     }
 
     // Flush the journal.
@@ -3263,6 +3270,16 @@ WiredTigerKVEngineBase::WiredTigerConfig getWiredTigerConfigFromStartupOptions(
                       "The session cache max is derived from the session_max value "
                       "provided as a server parameter. Please use the wiredTigerSessionMax server "
                       "parameter to set this value.");
+    }
+
+    if (wtConfig.extraOpenOptions.find("checkpoint=") != std::string::npos) {
+        LOGV2_WARNING(
+            10781300,
+            "WiredTiger internal checkpointing is configured via the WiredTiger engine "
+            "configuration string. mongod runs its own periodic checkpointing thread, and "
+            "configuring `checkpoint=` in the WiredTiger config may result in two "
+            "independent checkpointing loops. Please remove `checkpoint=` from the "
+            "WiredTiger engine config string.");
     }
 
     return wtConfig;

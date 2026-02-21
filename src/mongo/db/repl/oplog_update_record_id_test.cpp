@@ -149,8 +149,7 @@ TEST_F(UpdateWithRecordIdTestEnableSteadyStateConstraints,
     ASSERT_BSONOBJ_EQ(BSON("_id" << 2 << "keep" << 1), updatedDoc.value());
 }
 
-TEST_F(UpdateWithRecordIdTestDisableSteadyStateConstraints,
-       RecordIdNotFoundInSecondaryModeSucceeds) {
+TEST_F(UpdateWithRecordIdTestDisableSteadyStateConstraints, RecordIdNotFoundInSecondaryModeFails) {
     // Create a recordId that doesn't exist in the collection.
     const RecordId nonExistentRid(999);
 
@@ -163,7 +162,7 @@ TEST_F(UpdateWithRecordIdTestDisableSteadyStateConstraints,
     // alwaysUpsert:true.
     auto op = makeUpdateOplogEntryWithRecordId(
         nextOpTime(), _nss, BSON("_id" << 999), BSON("$set" << BSON("a" << 1)), nonExistentRid);
-    ASSERT_EQ(runOpSteadyState(op), ErrorCodes::UpdateOperationFailed);
+    ASSERT_EQ(runOpSteadyState(op).code(), 11902401);
 }
 
 TEST_F(UpdateWithRecordIdTestEnableSteadyStateConstraints, RecordIdNotFoundInSecondaryModeFails) {
@@ -495,6 +494,8 @@ TEST_F(ApplyOpsUpdateTest, ApplyOpsUpdateWithUpsertSucceeds) {
 
 using ApplyOpsUpdateDeathTest = ApplyOpsUpdateTest;
 DEATH_TEST_F(ApplyOpsUpdateDeathTest, ApplyOpsUpdateWithUpsertAndRecordIdFails, "7834905") {
+    RAIIServerParameterControllerForTest _featureFlagReplRidController{
+        "featureFlagRecordIdsReplicated", true};
     // Insert a document at a known recordId.
     const RecordId rid(1);
     const BSONObj doc = BSON("_id" << 1 << "x" << 100);
@@ -512,6 +513,8 @@ DEATH_TEST_F(ApplyOpsUpdateDeathTest, ApplyOpsUpdateWithUpsertAndRecordIdFails, 
 }
 
 DEATH_TEST_F(ApplyOpsUpdateDeathTest, ApplyOpsUpdateByNullRecordId, "7835000") {
+    RAIIServerParameterControllerForTest _featureFlagReplRidController{
+        "featureFlagRecordIdsReplicated", true};
     // Insert a document at a known recordId.
     const RecordId rid(1);
     insertDocumentAtRecordId(_opCtx.get(), _nss, BSON("_id" << 1 << "x" << 100), rid);
@@ -619,6 +622,109 @@ DEATH_TEST_F(UpdateWithRecordIdAndPreImagesDeathTest,
     // Apply the update oplog entry in secondary mode. Since change stream pre-images are enabled
     // and the document doesn't exist, we cannot retrieve the pre-image and the invariant will fail.
     std::ignore = runOpSteadyState(op);
+}
+
+// =============================================================================
+// Tests for capped collections with recordIdsReplicated
+// =============================================================================
+
+/**
+ * Test fixture for update oplog entries with recordId on capped collections.
+ */
+class CappedUpdateWithRecordIdTest : public OplogApplierImplTest {
+protected:
+    void setUp() override {
+        OplogApplierImplTest::setUp();
+        _nss = NamespaceString::createNamespaceString_forTest("test.cappedUpdateRecordId");
+        createCappedCollection(_opCtx.get(), _nss);
+        _uuid = getCollectionUUID(_opCtx.get(), _nss);
+    }
+
+    NamespaceString _nss;
+    UUID _uuid = UUID::gen();
+    RAIIServerParameterControllerForTest featureFlagController =
+        RAIIServerParameterControllerForTest("featureFlagRecordIdsReplicated", true);
+};
+
+typedef SetSteadyStateConstraints<CappedUpdateWithRecordIdTest, false>
+    CappedUpdateWithRecordIdTestDisableSteadyStateConstraints;
+typedef SetSteadyStateConstraints<CappedUpdateWithRecordIdTest, true>
+    CappedUpdateWithRecordIdTestEnableSteadyStateConstraints;
+
+TEST_F(CappedUpdateWithRecordIdTestDisableSteadyStateConstraints,
+       IdMismatchOnCappedCollectionFails) {
+    // Insert a document at a known recordId.
+    const RecordId rid(1);
+    const BSONObj doc = BSON("_id" << 1 << "x" << 100);
+    insertDocumentAtRecordId(_opCtx.get(), _nss, doc, rid);
+
+    // Create an update oplog entry that references the same recordId but with a different _id.
+    // On capped collections with replicatedRecordId, _id mismatch is always fatal regardless
+    // of steady state constraints.
+    auto op = makeUpdateOplogEntryWithRecordId(
+        nextOpTime(), _nss, BSON("_id" << 999), BSON("$set" << BSON("y" << 1)), rid);
+
+    ASSERT_EQ(runOpSteadyState(op).code(), 7834902);
+    // Original document should remain unchanged.
+    ASSERT_TRUE(documentExistsAtRecordId(_opCtx.get(), _nss, rid));
+    auto existingDoc = documentAtRecordId(_opCtx.get(), _nss, rid);
+    ASSERT_BSONOBJ_EQ(doc, existingDoc.value());
+}
+
+TEST_F(CappedUpdateWithRecordIdTestEnableSteadyStateConstraints,
+       IdMismatchOnCappedCollectionFails) {
+    // Insert a document at a known recordId.
+    const RecordId rid(1);
+    const BSONObj doc = BSON("_id" << 1 << "x" << 100);
+    insertDocumentAtRecordId(_opCtx.get(), _nss, doc, rid);
+
+    // Create an update oplog entry that references the same recordId but with a different _id.
+    // On capped collections with replicatedRecordId, _id mismatch is always fatal regardless
+    // of steady state constraints.
+    auto op = makeUpdateOplogEntryWithRecordId(
+        nextOpTime(), _nss, BSON("_id" << 999), BSON("$set" << BSON("y" << 1)), rid);
+
+    ASSERT_EQ(runOpSteadyState(op).code(), 7834902);
+    ASSERT_TRUE(documentExistsAtRecordId(_opCtx.get(), _nss, rid));
+    auto unchangedDoc = documentAtRecordId(_opCtx.get(), _nss, rid);
+    ASSERT_BSONOBJ_EQ(doc, unchangedDoc.value());
+}
+
+TEST_F(CappedUpdateWithRecordIdTestDisableSteadyStateConstraints,
+       UpdateDoesNothingOnCappedCollectionFails) {
+    // Create a recordId that doesn't exist in the collection.
+    const RecordId nonExistentRid(999);
+
+    // Verify the recordId doesn't have a document.
+    ASSERT_FALSE(documentExistsAtRecordId(_opCtx.get(), _nss, nonExistentRid));
+
+    // Create and apply the update oplog entry with the non-existent recordId.
+    // Unlike regular capped collections (where updates that match nothing are silently ignored
+    // because the cappedDeleter may have removed the document), capped collections with
+    // replicatedRecordId should be identical on every node, so a missing document is an error. This
+    // is a fatal error regardless of steady state constraints.
+    auto op = makeUpdateOplogEntryWithRecordId(
+        nextOpTime(), _nss, BSON("_id" << 999), BSON("$set" << BSON("a" << 1)), nonExistentRid);
+    ASSERT_EQ(runOpSteadyState(op).code(), 11902401);
+}
+
+
+TEST_F(CappedUpdateWithRecordIdTestEnableSteadyStateConstraints,
+       UpdateDoesNothingOnCappedCollectionFails) {
+    // Create a recordId that doesn't exist in the collection.
+    const RecordId nonExistentRid(999);
+
+    // Verify the recordId doesn't have a document.
+    ASSERT_FALSE(documentExistsAtRecordId(_opCtx.get(), _nss, nonExistentRid));
+
+    // Create and apply the update oplog entry with the non-existent recordId.
+    // Unlike regular capped collections (where updates that match nothing are silently ignored
+    // because the cappedDeleter may have removed the document), capped collections with
+    // replicatedRecordId should be identical on every node, so a missing document is an error. This
+    // is a fatal error regardless of steady state constraints.
+    auto op = makeUpdateOplogEntryWithRecordId(
+        nextOpTime(), _nss, BSON("_id" << 999), BSON("$set" << BSON("a" << 1)), nonExistentRid);
+    ASSERT_EQ(runOpSteadyState(op).code(), 11902401);
 }
 
 }  // namespace

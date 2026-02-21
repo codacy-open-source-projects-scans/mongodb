@@ -4742,13 +4742,9 @@ protected:
         {kChangeStreamImagesDisabled, kNotRetryable, kDontGroup, 1},
         {kChangeStreamImagesDisabled, kNotRetryable, kGroup, 1},
         {kChangeStreamImagesDisabled, kRecordInSideCollection, kDontGroup, 1},
-        // TODO (SERVER-116395): Test grouping with RetryableFindAndModify
-        // {kChangeStreamImagesDisabled, kRecordInSideCollection, kGroup, 1},
         {kChangeStreamImagesEnabled, kNotRetryable, kDontGroup, 1},
         {kChangeStreamImagesEnabled, kNotRetryable, kGroup, 1},
         {kChangeStreamImagesEnabled, kRecordInSideCollection, kDontGroup, 1},
-        // TODO (SERVER-116395): Test grouping with RetryableFindAndModify
-        // {kChangeStreamImagesEnabled, kRecordInSideCollection, kGroup, 1}
     };
 
     const NamespaceString _nss =

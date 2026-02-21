@@ -58,6 +58,7 @@ public:
             {makeNodeSet(extremelySmallNodeId), makeCard(1)},
             {makeNodeSet(smallNodeId, largeNodeId), makeCard(1)},
             {makeNodeSet(smallNodeId, unselectiveNodeId), makeCard(100'000)},
+            {makeNodeSet(largeNodeId, unselectiveNodeId), makeCard(100'000)},
         };
         NodeCardinalities collCards{
             makeCard(100'000), makeCard(2'000'000), makeCard(2'000'000), makeCard(1)};
@@ -69,13 +70,13 @@ public:
         jCtx->catStats = {
             .collStats = {
                 {smallNss,
-                 CollectionStats{.allocatedDataPageBytes =
+                 CollectionStats{.logicalDataSizeBytes =
                                      collCards[smallNodeId].toDouble() * docSizeBytes}},
                 {largeNss,
-                 CollectionStats{.allocatedDataPageBytes =
+                 CollectionStats{.logicalDataSizeBytes =
                                      collCards[largeNodeId].toDouble() * docSizeBytes}},
                 {extremelySmallNss,
-                 CollectionStats{.allocatedDataPageBytes =
+                 CollectionStats{.logicalDataSizeBytes =
                                      collCards[extremelySmallNodeId].toDouble() * docSizeBytes}},
             }};
 

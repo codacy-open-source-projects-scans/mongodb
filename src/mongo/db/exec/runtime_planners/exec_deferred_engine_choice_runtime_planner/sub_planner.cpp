@@ -29,7 +29,6 @@
 
 
 #include "mongo/db/exec/runtime_planners/exec_deferred_engine_choice_runtime_planner/planner_interface.h"
-#include "mongo/db/query/engine_selection.h"
 #include "mongo/db/query/plan_yield_policy_impl.h"
 
 namespace mongo::exec_deferred_engine_choice {
@@ -61,34 +60,21 @@ SubPlanner::SubPlanner(PlannerData plannerData)
                                        std::move(callbacks));
 }
 
-std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> SubPlanner::makeExecutor(
-    std::unique_ptr<CanonicalQuery> canonicalQuery, Pipeline* pipeline) {
+PlanRankingResult SubPlanner::extractPlanRankingResult() {
+    tassert(11974303,
+            "Expected `extractPlanRankingResult` to only be called with get executor deferred "
+            "feature flag enabled.",
+            feature_flags::gFeatureFlagGetExecutorDeferredEngineChoice.isEnabled());
+
     auto trialPeriodYieldPolicy = makeClassicYieldPolicy(
         opCtx(), cq()->nss(), static_cast<PlanStage*>(_subPlanStage.get()), yieldPolicy());
     uassertStatusOK(_subPlanStage->pickBestPlan(*plannerParams(), trialPeriodYieldPolicy.get()));
-
     auto querySolution = _subPlanStage->extractBestWholeQuerySolution();
-    const auto engine = chooseEngine(
-        opCtx(),
-        collections(),
-        canonicalQuery.get(),
-        pipeline,
-        canonicalQuery->getExpCtx()->getNeedsMerge(),
-        std::make_unique<QueryPlannerParams>(QueryPlannerParams::ArgsForPushDownStagesDecision{
-            .opCtx = opCtx(),
-            .canonicalQuery = *cq(),
-            .collections = collections(),
-            .plannerOptions = plannerOptions(),
-        }),
-        querySolution.get());
 
-    return executorFromSolution(engine,
-                                std::move(canonicalQuery),
-                                std::move(querySolution),
-                                nullptr /*MultiPlanStage*/,
-                                _plannerData.cachedPlanHash,
-                                pipeline);
+    return PlanRankingResult{
+        .solutions = makeQsnResult(std::move(querySolution)),
+        .execState = SavedExecState{.workingSet = extractWs(), .root = std::move(_subPlanStage)},
+        .plannerParams = extractPlannerParams(),
+        .cachedPlanHash = cachedPlanHash()};
 }
-
-
 }  // namespace mongo::exec_deferred_engine_choice

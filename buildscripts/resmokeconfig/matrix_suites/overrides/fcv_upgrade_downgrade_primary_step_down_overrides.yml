@@ -122,6 +122,8 @@
       - featureFlagRankFusion
       # TODO: SERVER-86544 remove feature flag for SPM-3672
       - featureFlagMongotIndexedViews
+      # TODO: SERVER-101595 remove feature flag
+      - featureFlagCreateViewlessTimeseriesCollections
       # Transactions are aborted upon fcv upgrade or downgrade.
       - uses_transactions
       # Exclude tests that require a specific fcv.
@@ -132,12 +134,6 @@
       - requires_fcv_83
       # Exclude tests that are not compatible with upgrade/downgrade.
       - cannot_run_during_upgrade_downgrade
-
-# TODO SERVER-109882 do not exclude viewless timeseries feature flag in upgrade/downgrade suites
-- name: exclude_viewless_timeseries_feature_flag
-  value:
-    exclude_with_any_tags:
-      - featureFlagCreateViewlessTimeseriesCollections
 
 - name: replica_sets_fixture
   value:

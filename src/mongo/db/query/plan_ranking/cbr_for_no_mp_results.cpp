@@ -67,7 +67,7 @@ StatusWith<PlanRankingResult> CBRForNoMPResultsStrategy::rankPlans(PlannerData& 
     if (solutions.size() == 1) {
         // TODO SERVER-115496. Make sure this short circuit logic is also taken to main plan_ranking
         // so it applies everywhere. Only one solution, no need to rank.
-        plan_ranking::PlanRankingResult out;
+        PlanRankingResult out;
         out.solutions.push_back(std::move(solutions.front()));
         return std::move(out);
     }
@@ -160,7 +160,7 @@ StatusWith<PlanRankingResult> CBRForNoMPResultsStrategy::resumeMultiPlannerAndPi
         return status;
     }
 
-    plan_ranking::PlanRankingResult result;
+    PlanRankingResult result;
     result.solutions.push_back(_multiPlanner->extractQuerySolution());
     tassert(
         11540202, "Expected multi-planner to have returned a solution!", !result.solutions.empty());

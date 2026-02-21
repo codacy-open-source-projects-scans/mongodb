@@ -137,6 +137,12 @@ struct MONGO_MOD_PUBLIC ViewInfo {
     std::vector<BSONObj> getOriginalBson() const;
 
     /**
+     * Returns the serialized LiteParsedPipeline as BSON. If the view pipeline has been desugared,
+     * the returned BSON will represent the desugared version of the pipeline.
+     */
+    std::vector<BSONObj> getSerializedViewPipeline() const;
+
+    /**
      * Returns a cloned instance of the view pipeline with all stages owning their BSON.
      */
     LiteParsedPipeline getViewPipeline() const;

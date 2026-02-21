@@ -112,9 +112,8 @@ Status ReplSetHeartbeatArgsV1::initialize(const BSONObj& argsObj) {
     if (!status.isOK())
         return status;
 
-    // Store optional $replData sub-document when present (disagg heartbeat request metadata
-    // merged into command body by OP_MSG layer). Parsing is done by the disagg replication
-    // coordinator.
+    // Store optional $replData sub-document when present (request metadata merged into
+    // command body by OP_MSG layer). Field-level parsing is done by the consumer.
     if (auto replDataElem = argsObj[rpc::kReplSetMetadataFieldName]; replDataElem.isABSONObj()) {
         _extra = replDataElem.Obj().getOwned();
     }

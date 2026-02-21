@@ -303,6 +303,10 @@ py_binary(
 py_binary(
     name = "generate_result_tasks",
     srcs = ["generate_result_tasks.py"],
+    data = [
+        "@codeowners_binary//:codeowners",
+        "@mothra//:teams",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         dependency(
@@ -311,6 +315,10 @@ py_binary(
         ),
         dependency(
             "shrub-py",
+            group = "testing",
+        ),
+        dependency(
+            "bazel-runfiles",
             group = "testing",
         ),
     ],

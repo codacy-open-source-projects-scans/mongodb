@@ -35,6 +35,7 @@
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonelement_comparator.h"
 #include "mongo/bson/bsonobj.h"
+#include "mongo/crypto/oplog_key_entry_handler.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/curop_metrics.h"
 #include "mongo/db/database_name.h"
@@ -43,6 +44,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/profile_settings.h"
 #include "mongo/db/repl/oplog_applier_utils.h"
+#include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/repl_server_parameters_gen.h"
@@ -454,6 +456,14 @@ Status OplogApplierUtils::applyOplogEntryOrGroupedInsertsCommon(
     }
 
     if (opType == OpTypeEnum::kNoop) {
+        incrementOpsAppliedStats();
+        return Status::OK();
+    } else if (opType == OpTypeEnum::kKeyMaterial) {
+        auto handler = OplogKeyEntryHandler::get(opCtx->getServiceContext());
+        auto status = handler->applyOplogEntry(opCtx, repl::OplogEntry(*op));
+        if (!status.isOK()) {
+            return status;
+        }
         incrementOpsAppliedStats();
         return Status::OK();
     } else if (DurableOplogEntry::isCrudOpType(opType)) {

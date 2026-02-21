@@ -136,6 +136,7 @@ def resmoke_suite_test(
             "//bazel/resmoke:unreleased_ifr_flags",
             "//bazel/resmoke:volatile_status",
             "//bazel/resmoke:test_runtimes",
+            "//buildscripts/resmokeconfig:common_jstest_data",
             "//buildscripts/resmokeconfig:fully_disabled_feature_flags.yml",
             "//buildscripts/resmokeconfig:resmoke_modules.yml",
             "//buildscripts/resmokeconfig/evg_task_doc:all_files",

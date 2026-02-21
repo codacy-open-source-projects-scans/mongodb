@@ -33,6 +33,7 @@
 #include "mongo/db/exec/classic/subplan.h"
 #include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/exec/runtime_planners/planner_interface.h"
+#include "mongo/db/exec/runtime_planners/planner_types.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
 #include "mongo/db/query/plan_cache/sbe_plan_cache.h"
@@ -190,7 +191,7 @@ public:
      * Builds and caches SBE plan for the given solution and returns PlanExecutor for it.
      */
     std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> makeExecutor(
-        std::unique_ptr<CanonicalQuery> canonicalQuery, Pipeline* pipeline = nullptr) override;
+        std::unique_ptr<CanonicalQuery> canonicalQuery) override;
 
 private:
     std::unique_ptr<QuerySolution> extendSolutionWithPipelineIfNeeded(
@@ -216,7 +217,7 @@ public:
      * and exit, otherwise we pick the best plan and return the SBE plan executor.
      */
     std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> makeExecutor(
-        std::unique_ptr<CanonicalQuery> canonicalQuery, Pipeline* pipeline = nullptr) override;
+        std::unique_ptr<CanonicalQuery> canonicalQuery) override;
 
 
     /**
@@ -287,7 +288,7 @@ public:
      * plan, and returns a plan executor.
      */
     std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> makeExecutor(
-        std::unique_ptr<CanonicalQuery> canonicalQuery, Pipeline* pipeline = nullptr) override;
+        std::unique_ptr<CanonicalQuery> canonicalQuery) override;
 
     /**
      * Returns the number of times that an individual $or branch was multi-planned during the

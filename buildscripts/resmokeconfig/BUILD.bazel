@@ -35,7 +35,6 @@ resmoke_suite_test(
     ],
     config = ":suites/core.yml",
     data = [
-        ":common_jstest_data",
         "//jstests/aggregation/extras:merge_helpers.js",
         "//jstests/noPassthrough/libs:server_parameter_helpers.js",
         "//jstests/noPassthrough/libs/index_builds:index_build.js",
@@ -54,9 +53,6 @@ resmoke_suite_test(
         "//jstests/core/query/query_settings:all_subpackage_javascript_files",
         # Queryable encryption is not supported on standalone.
         "//jstests/core/query/queryable_encryption:all_subpackage_javascript_files",
-    ],
-    resmoke_args = [
-        "--storageEngineCacheSizeGB=1",
     ],
     shard_count = 24,
     tags = [
@@ -80,10 +76,6 @@ resmoke_suite_test(
         "//:jstestfuzz_generated_tests",
     ],
     config = ":suites/jstestfuzz.yml",
-    data = [":common_jstest_data"],
-    resmoke_args = [
-        "--storageEngineCacheSizeGB=1",
-    ],
     tags = [
         "manual",  # exclude from expansion of target pattern wildcards (..., :*, :all, etc.)
     ],
@@ -105,13 +97,9 @@ resmoke_suite_test(
     ],
     config = ":matrix_suites/generated_suites/multiversion_sanity_check_last_continuous_new_new_old.yml",
     data = [
-        ":common_jstest_data",
         ":matrix_suites/mappings/multiversion_sanity_check_last_continuous_new_new_old.yml",
         ":matrix_suites/overrides/multiversion.yml",
         "//:multiversion_binaries",
-    ],
-    resmoke_args = [
-        "--storageEngineCacheSizeGB=1",
     ],
     shard_count = 1,
     tags = [
@@ -135,13 +123,9 @@ resmoke_suite_test(
     ],
     config = ":matrix_suites/generated_suites/multiversion_sanity_check_last_lts_new_new_old.yml",
     data = [
-        ":common_jstest_data",
         ":matrix_suites/mappings/multiversion_sanity_check_last_lts_new_new_old.yml",
         ":matrix_suites/overrides/multiversion.yml",
         "//:multiversion_binaries",
-    ],
-    resmoke_args = [
-        "--storageEngineCacheSizeGB=1",
     ],
     shard_count = 1,
     tags = [

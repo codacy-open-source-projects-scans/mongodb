@@ -44,6 +44,11 @@ public:
 };
 ```
 
+When working on a module with metrics that should be internal-only, a module-specific "MetricNames"
+class (e.g. `MyModuleMetricNames`) in a different file may be used, as long as N&O team has
+ownership over the file defining the metric names. This additionally requires adding some code to
+metric_names.h.
+
 ### Naming Conventions
 
 Follow

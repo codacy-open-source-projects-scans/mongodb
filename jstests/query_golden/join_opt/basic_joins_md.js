@@ -6,9 +6,9 @@
  *   requires_sbe
  * ]
  */
-import {section, subSection} from "jstests/libs/query/pretty_md.js";
-import {outputAggregationPlanAndResults} from "jstests/libs/query/golden_test_utils.js";
+import {code, section, subSection} from "jstests/libs/query/pretty_md.js";
 import {runJoinTestAndCompare, joinTestWrapper} from "jstests/query_golden/libs/join_opt.js";
+import {normalizeArray} from "jstests/libs/golden_test.js";
 import {joinOptUsed} from "jstests/libs/query/join_utils.js";
 
 const coll = db[jsTestName()];
@@ -49,10 +49,16 @@ assert.commandWorked(
 function runBasicJoinTest(pipeline) {
     subSection("No join opt");
     assert.commandWorked(db.adminCommand({setParameter: 1, internalEnableJoinOptimization: false}));
-    outputAggregationPlanAndResults(coll, pipeline, {}, true, false, false /* noLineBreak*/);
-    const noJoinExplain = coll.explain().aggregate(pipeline);
+
+    subSection("Pipeline");
+    code(tojson(pipeline));
+
     const noJoinOptResults = coll.aggregate(pipeline).toArray();
-    assert(!joinOptUsed(noJoinExplain), "Join optimizer was not used as expected: " + tojson(noJoinExplain));
+    subSection("Results");
+    code(normalizeArray(noJoinOptResults));
+
+    const noJoinExplain = coll.explain().aggregate(pipeline);
+    assert(!joinOptUsed(noJoinExplain), "Join optimizer was used unexpectedly: " + tojson(noJoinExplain));
 
     runJoinTestAndCompare(
         "With bottom-up plan enumeration (left-deep)",

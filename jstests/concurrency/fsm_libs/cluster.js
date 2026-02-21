@@ -509,7 +509,11 @@ export const Cluster = function (clusterOptions, sessionOptions) {
             let res = db.adminCommand({listDatabases: 1});
             assert.commandWorked(res);
             res.databases.forEach((dbInfo) => {
-                const validateOptions = {full: true, enforceFastCount: true};
+                const validateOptions = {
+                    full: true,
+                    enforceFastCount: true,
+                    enforceFastSize: !TestData.allowUncleanShutdowns && TestData.enforceFastSizeOnValidate,
+                };
                 // TODO (SERVER-24266): Once fast counts are tolerant to unclean shutdowns, remove
                 // the check for TestData.allowUncleanShutdowns.
                 if (TestData.skipEnforceFastCountOnValidate || TestData.allowUncleanShutdowns) {

@@ -152,8 +152,7 @@ public:
 
     /**
      * Gets the extra metadata BSON ($replData), if present in the heartbeat request.
-     * Contains sender's optimes for standby lag tracking. Parsing is done by the disagg
-     * replication coordinator.
+     * Contains sender's optimes for standby lag tracking.
      */
     boost::optional<BSONObj> getExtra() const {
         return _extra;
@@ -197,8 +196,8 @@ private:
     std::string _setName;
     HostAndPort _senderHost;
 
-    // Optional $replData from heartbeat request metadata. Contains sender's optimes for
-    // standby lag tracking. Raw BSON stored here; parsing done by disagg replication coordinator.
+    // Optional $replData from heartbeat request metadata. Raw BSON stored here;
+    // field-level parsing is done by the consumer.
     boost::optional<BSONObj> _extra;
 };
 

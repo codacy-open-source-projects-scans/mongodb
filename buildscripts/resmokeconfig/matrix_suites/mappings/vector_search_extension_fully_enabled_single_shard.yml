@@ -6,4 +6,4 @@ base_suite: mongot_e2e_single_shard
 overrides:
   - vector_search_extension.exclude_fully_enabled_incompatible_tests
   - vector_search_extension.load_extension_sharded
-  - vector_search_extension.extension_fully_enabled_sharded
+  - vector_search_extension.extension_fully_enabled_sharded_non_community

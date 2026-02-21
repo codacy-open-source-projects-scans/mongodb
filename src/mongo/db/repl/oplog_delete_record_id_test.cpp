@@ -95,8 +95,7 @@ TEST_F(DeleteWithRecordIdTestDisableSteadyStateConstraints, SuccessInSecondaryMo
     ASSERT_FALSE(documentExistsAtRecordId(_opCtx.get(), _nss, rid));
 }
 
-TEST_F(DeleteWithRecordIdTestDisableSteadyStateConstraints,
-       RecordIdNotFoundInSecondaryModeSucceeds) {
+TEST_F(DeleteWithRecordIdTestDisableSteadyStateConstraints, RecordIdNotFoundInSecondaryModeFails) {
     // Create a recordId that doesn't exist in the collection.
     const RecordId nonExistentRid(999);
 
@@ -107,7 +106,7 @@ TEST_F(DeleteWithRecordIdTestDisableSteadyStateConstraints,
     // With constraints disabled, this should succeed (noop).
     auto op = makeDeleteOplogEntryWithRecordId(
         nextOpTime(), _nss, _uuid, BSON("_id" << 999), nonExistentRid);
-    ASSERT_OK(runOpSteadyState(op));
+    ASSERT_EQ(runOpSteadyState(op).code(), 11902400);
 }
 
 TEST_F(DeleteWithRecordIdTestEnableSteadyStateConstraints, RecordIdNotFoundInSecondaryModeFails) {
@@ -121,7 +120,7 @@ TEST_F(DeleteWithRecordIdTestEnableSteadyStateConstraints, RecordIdNotFoundInSec
     // With constraints disabled, this should succeed (noop).
     auto op = makeDeleteOplogEntryWithRecordId(
         nextOpTime(), _nss, _uuid, BSON("_id" << 999), nonExistentRid);
-    ASSERT_NOT_OK(runOpSteadyState(op));
+    ASSERT_EQ(runOpSteadyState(op).code(), 11902400);
 }
 
 TEST_F(DeleteWithRecordIdTestDisableSteadyStateConstraints, IdMismatchFails) {
@@ -335,6 +334,8 @@ TEST_F(ApplyOpsDeleteTest, ApplyOpsDeleteByIdDocumentNotFoundSucceeds) {
 
 using ApplyOpsDeleteDeathTest = ApplyOpsDeleteTest;
 DEATH_TEST_F(ApplyOpsDeleteDeathTest, ApplyOpsDeleteByNullRecordId, "7835000") {
+    RAIIServerParameterControllerForTest _featureFlagReplRidController{
+        "featureFlagRecordIdsReplicated", true};
     // Insert a document at a known recordId.
     const RecordId rid(1);
     insertDocumentAtRecordId(_opCtx.get(), _nss, BSON("_id" << 1 << "x" << 100), rid);
@@ -413,6 +414,128 @@ TEST_F(DeleteWithRecordIdAndPreImagesTest,
         ChangeStreamPreImage::parse(preImageLoadResult.getValue(), IDLParserContext{"test"});
     ASSERT_BSONOBJ_EQ(preImageDocument.getPreImage(), document);
     ASSERT_EQUALS(preImageDocument.getOperationTime(), op.getWallClockTime());
+}
+
+using DeleteWithRecordIdAndPreImagesDeathTest = DeleteWithRecordIdAndPreImagesTest;
+DEATH_TEST_F(DeleteWithRecordIdAndPreImagesDeathTest,
+             WithPreImagesDocumentNotFoundDies,
+             "invariant") {
+    // Do NOT insert a document at the target recordId - it should not exist.
+    const RecordId nonExistentRid(999);
+
+    // Verify the recordId doesn't have a document.
+    ASSERT_FALSE(documentExistsAtRecordId(_opCtx.get(), _nss, nonExistentRid));
+
+    // Create an update oplog entry with the non-existent recordId.
+    OpTime opTime = [opCtx = _opCtx.get()] {
+        WriteUnitOfWork wuow{opCtx};
+        ScopeGuard guard{[&wuow] {
+            wuow.commit();
+        }};
+        return repl::getNextOpTime(opCtx);
+    }();
+    auto op =
+        makeDeleteOplogEntryWithRecordId(opTime, _nss, _uuid, BSON("_id" << 999), nonExistentRid);
+
+    // Apply the update oplog entry in secondary mode. Since change stream pre-images are enabled
+    // and the document doesn't exist, we cannot retrieve the pre-image and the invariant will fail.
+    std::ignore = runOpSteadyState(op);
+}
+
+// =============================================================================
+// Tests for capped collections with recordIdsReplicated
+// =============================================================================
+
+/**
+ * Test fixture for delete oplog entries with recordId on capped collections.
+ */
+class CappedDeleteWithRecordIdTest : public OplogApplierImplTest {
+protected:
+    void setUp() override {
+        OplogApplierImplTest::setUp();
+        _nss = NamespaceString::createNamespaceString_forTest("test.cappedDeleteRecordId");
+        createCappedCollection(_opCtx.get(), _nss);
+        _uuid = getCollectionUUID(_opCtx.get(), _nss);
+    }
+
+    NamespaceString _nss;
+    UUID _uuid = UUID::gen();
+    RAIIServerParameterControllerForTest featureFlagController =
+        RAIIServerParameterControllerForTest("featureFlagRecordIdsReplicated", true);
+};
+
+typedef SetSteadyStateConstraints<CappedDeleteWithRecordIdTest, false>
+    CappedDeleteWithRecordIdTestDisableSteadyStateConstraints;
+typedef SetSteadyStateConstraints<CappedDeleteWithRecordIdTest, true>
+    CappedDeleteWithRecordIdTestEnableSteadyStateConstraints;
+
+TEST_F(CappedDeleteWithRecordIdTestDisableSteadyStateConstraints,
+       IdMismatchOnCappedCollectionFails) {
+    // Insert a document at a known recordId.
+    const RecordId rid(1);
+    const BSONObj doc = BSON("_id" << 1 << "x" << 100);
+    insertDocumentAtRecordId(_opCtx.get(), _nss, doc, rid);
+
+    // Create a delete oplog entry that references the same recordId but with a different _id.
+    // On capped collections with replicatedRecordId, _id mismatch is always fatal regardless
+    // of steady state constraints.
+    auto op = makeDeleteOplogEntryWithRecordId(nextOpTime(), _nss, _uuid, BSON("_id" << 999), rid);
+
+    ASSERT_EQ(runOpSteadyState(op).code(), 7835001);
+    // Original document should remain unchanged.
+    ASSERT_TRUE(documentExistsAtRecordId(_opCtx.get(), _nss, rid));
+}
+
+TEST_F(CappedDeleteWithRecordIdTestEnableSteadyStateConstraints,
+       IdMismatchOnCappedCollectionFails) {
+    // Insert a document at a known recordId.
+    const RecordId rid(1);
+    const BSONObj doc = BSON("_id" << 1 << "x" << 100);
+    insertDocumentAtRecordId(_opCtx.get(), _nss, doc, rid);
+
+    // Create a delete oplog entry that references the same recordId but with a different _id.
+    // On capped collections with replicatedRecordId, _id mismatch is always fatal regardless
+    // of steady state constraints.
+    auto op = makeDeleteOplogEntryWithRecordId(nextOpTime(), _nss, _uuid, BSON("_id" << 999), rid);
+
+    ASSERT_NOT_OK(runOpSteadyState(op));
+    ASSERT_TRUE(documentExistsAtRecordId(_opCtx.get(), _nss, rid));
+}
+
+TEST_F(CappedDeleteWithRecordIdTestDisableSteadyStateConstraints,
+       DeleteDoesNothingOnCappedCollectionFails) {
+    // Create a recordId that doesn't exist in the collection.
+    const RecordId nonExistentRid(999);
+
+    // Verify the recordId doesn't have a document.
+    ASSERT_FALSE(documentExistsAtRecordId(_opCtx.get(), _nss, nonExistentRid));
+
+    // Create and apply the delete oplog entry with the non-existent recordId.
+    // Unlike regular capped collections (where deletes that match nothing are silently ignored
+    // because the cappedDeleter may have removed the document), capped collections with
+    // replicatedRecordId should be identical on every node, so a missing document is an error. This
+    // is a fatal error regardless of steady state constraints.
+    auto op = makeDeleteOplogEntryWithRecordId(
+        nextOpTime(), _nss, _uuid, BSON("_id" << 999), nonExistentRid);
+    ASSERT_EQ(runOpSteadyState(op).code(), 11902400);
+}
+
+TEST_F(CappedDeleteWithRecordIdTestEnableSteadyStateConstraints,
+       DeleteDoesNothingOnCappedCollectionFails) {
+    // Create a recordId that doesn't exist in the collection.
+    const RecordId nonExistentRid(999);
+
+    // Verify the recordId doesn't have a document.
+    ASSERT_FALSE(documentExistsAtRecordId(_opCtx.get(), _nss, nonExistentRid));
+
+    // Create and apply the delete oplog entry with the non-existent recordId.
+    // Unlike regular capped collections (where deletes that match nothing are silently ignored
+    // because the cappedDeleter may have removed the document), capped collections with
+    // replicatedRecordId should be identical on every node, so a missing document is an error. This
+    // is a fatal error regardless of steady state constraints.
+    auto op = makeDeleteOplogEntryWithRecordId(
+        nextOpTime(), _nss, _uuid, BSON("_id" << 999), nonExistentRid);
+    ASSERT_EQ(runOpSteadyState(op).code(), 11902400);
 }
 
 }  // namespace

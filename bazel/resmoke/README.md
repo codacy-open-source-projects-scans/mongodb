@@ -74,12 +74,27 @@ bazel-testlogs/buildscripts/resmokeconfig/core/
 │               └── diagnostic.data/
 ```
 
-### Tips and Tricks
+### Useful commands
 
 #### Run a single test from a suite:
 
 ```
 bazel test //buildscripts/resmokeconfig:core --test_sharding_strategy=disabled --test_arg=jstests/core/js/jssymbol.js
+```
+
+#### Run with additional resmoke flags:
+
+Any `--test_arg` in the bazel command will be propagated as a flag to resmoke.py. To modify the resmoke invocation with any of resmoke's flags, add them as `--test_arg`s.
+
+```
+# Runs all tests from the core suite with timeseries in their name, twice, with all feature flags enabled.
+
+bazel test //buildscripts/resmokeconfig:core \
+--test_sharding_strategy=disabled \
+--test_arg=--repeatTests=2 \
+--test_arg=--runAllFeatureFlagTests \
+--test_arg=--skipExcludedTests \
+`fdfind -t f --full-path ".timeseries\.js$" jstests/core | awk '{print "--test_arg=" $0}'`
 ```
 
 #### Run resmoke.py outside of bazel with the suite's config:

@@ -157,7 +157,23 @@ mongo_cc_library(
     srcs = [
         "//src/mongo/db/s/resharding:local_resharding_operations_registry.cpp",
     ],
-    deps = ["//src/mongo/s:common_s"],
+    deps = [
+        "//src/mongo/db:dbdirectclient",
+        "//src/mongo/db/s/resharding:resharding_metrics_common",
+        "//src/mongo/db/s/resharding:resharding_state_documents",
+        "//src/mongo/s:common_s",
+    ],
+)
+
+mongo_cc_library(
+    name = "resharding_replica_set_aware_service",
+    srcs = [
+        "//src/mongo/db/s/resharding:resharding_replica_set_aware_service.cpp",
+    ],
+    deps = [
+        ":local_resharding_operations_registry",
+        "//src/mongo/db/repl:replica_set_aware_service",
+    ],
 )
 
 mongo_cc_library(
@@ -232,9 +248,6 @@ mongo_cc_library(
     name = "sharding_coord_d",
     srcs = [
         "migration_recipient_recovery_document_gen",
-        "//src/mongo/db/s/resharding:coordinator_document_gen",
-        "//src/mongo/db/s/resharding:donor_document_gen",
-        "//src/mongo/db/s/resharding:recipient_document_gen",
         "//src/mongo/db/s/resharding:recipient_resume_document_gen",
         "//src/mongo/db/s/resharding:resharding_change_event_o2_field_gen",
         "//src/mongo/db/s/resharding:resharding_coordinator.inl",
@@ -257,6 +270,7 @@ mongo_cc_library(
         ":forwardable_operation_metadata",
         ":query_analysis_writer",
         ":range_deleter_service_impl",
+        ":resharding_replica_set_aware_service",
         ":resharding_server_parameters_idl",
         ":transaction_coordinator",
         "//src/mongo/client:clientdriver_minimal",
@@ -414,7 +428,6 @@ mongo_cc_library(
         "//src/mongo/db/s/resharding:resharding_iterate_transaction_stage.cpp",
         "//src/mongo/db/s/resharding:resharding_manual_cleanup.cpp",
         "//src/mongo/db/s/resharding:resharding_metrics.cpp",
-        "//src/mongo/db/s/resharding:resharding_metrics_common.cpp",
         "//src/mongo/db/s/resharding:resharding_metrics_helpers.cpp",
         "//src/mongo/db/s/resharding:resharding_metrics_observer_impl.cpp",
         "//src/mongo/db/s/resharding:resharding_op_observer.cpp",
@@ -453,6 +466,7 @@ mongo_cc_library(
         ":analyze_shard_key_util",
         ":balancer_stats_registry",
         ":forwardable_operation_metadata",
+        ":local_resharding_operations_registry",
         ":query_analysis_writer",
         ":range_deletion_task",
         ":resharding_server_parameters_idl",
@@ -494,6 +508,7 @@ mongo_cc_library(
         "//src/mongo/db/repl:primary_only_service",
         "//src/mongo/db/repl:replica_set_aware_service",
         "//src/mongo/db/repl:wait_for_majority_service",
+        "//src/mongo/db/s/resharding:resharding_metrics_common",
         "//src/mongo/db/session:session_catalog_mongod",
         "//src/mongo/db/shard_role",
         "//src/mongo/db/shard_role/ddl:coll_mod_command_idl",
@@ -998,6 +1013,7 @@ mongo_cc_unit_test(
     name = "db_s_resharding_part3_test",
     srcs = [
         "//src/mongo/db/s/resharding:local_resharding_operations_registry_test.cpp",
+        "//src/mongo/db/s/resharding:resharding_op_observer_test.cpp",
         "//src/mongo/db/s/resharding:resharding_recipient_service_external_state_test.cpp",
         "//src/mongo/db/s/resharding:resharding_recipient_service_test.cpp",
         "//src/mongo/db/s/resharding:resharding_txn_cloner_test.cpp",

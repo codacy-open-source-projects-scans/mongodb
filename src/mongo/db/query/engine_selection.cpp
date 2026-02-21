@@ -42,6 +42,7 @@
 #include "mongo/db/pipeline/document_source_lookup.h"
 #include "mongo/db/pipeline/sbe_pushdown.h"
 #include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/engine_selection_plan.h"
 #include "mongo/db/query/plan_cache/plan_cache.h"
 #include "mongo/db/query/query_utils.h"
 
@@ -189,11 +190,6 @@ bool hasNodeOfType(const QuerySolutionNode* node, StageType type) {
 bool isPlanSbeEligible(const QuerySolution* solution) {
     // Distinct scan plans not supported in SBE.
     return !hasNodeOfType(solution->root(), StageType::STAGE_DISTINCT_SCAN);
-}
-
-EngineChoice engineSelectionForPlan(const QuerySolution* solution) {
-    // TODO SERVER-117448 implement engine selection based on winning plan.
-    return EngineChoice::kClassic;
 }
 
 /**
