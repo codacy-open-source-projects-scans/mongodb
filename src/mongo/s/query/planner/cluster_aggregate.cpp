@@ -1079,6 +1079,58 @@ Status ClusterAggregate::runAggregate(
         opCtx, namespaces, request, {request}, privileges, verbosity, result, comment, ifrContext);
 }
 
+void makeEOFExplainResult(OperationContext* opCtx,
+                          const ClusterAggregate::Namespaces& namespaces,
+                          AggregateCommandRequest& request,
+                          const LiteParsedPipeline& liteParsedPipeline,
+                          boost::optional<ExplainOptions::Verbosity> verbosity,
+                          BSONObjBuilder* result,
+                          std::shared_ptr<IncrementalFeatureRolloutContext> ifrContext) {
+    BSONObjBuilder queryPlannerBob(result->subobjStart("queryPlanner"));
+    BSONObjBuilder winningPlanBob(queryPlannerBob.subobjStart("winningPlan"));
+    winningPlanBob.append("stage", "EOF");
+    winningPlanBob.appendNumber("planNodeId", 1);
+    winningPlanBob.append("type", eof_node::typeStr(eof_node::EOFType::NonExistentNamespace));
+    winningPlanBob.doneFast();
+    queryPlannerBob.doneFast();
+
+    auto expCtx =
+        makeExpressionContext(opCtx,
+                              request,
+                              boost::none /* cri */,
+                              namespaces.executionNss,
+                              namespaces.requestedNss,
+                              BSONObj(), /* collation obj */
+                              boost::none /* uuid */,
+                              resolveInvolvedNamespaces(liteParsedPipeline.getInvolvedNamespaces()),
+                              liteParsedPipeline.hasChangeStream(),
+                              verbosity,
+                              ExpressionContextCollationMatchesDefault::kYes,
+                              std::move(ifrContext));
+
+    auto pipeline = Pipeline::parseFromLiteParsed(liteParsedPipeline, expCtx);
+
+    query_shape::DeferredQueryShape deferredShape{[&]() {
+        return shape_helpers::tryMakeShape<query_shape::AggCmdShape>(
+            request,
+            namespaces.executionNss,
+            liteParsedPipeline.getInvolvedNamespaces(),
+            *pipeline,
+            expCtx);
+    }};
+    CurOp::get(opCtx)->debug().ensureQueryShapeHash(opCtx, [&]() {
+        return shape_helpers::computeQueryShapeHash(expCtx, deferredShape, namespaces.executionNss);
+    });
+
+    explain_common::generateQueryShapeHash(opCtx, result);
+    explain_common::generateServerInfo(result);
+    explain_common::generateServerParameters(expCtx, result);
+    explain_common::appendIfRoom(
+        serializeForPassthrough(expCtx, request, namespaces.requestedNss).toBson(),
+        "command",
+        result);
+}
+
 namespace {
 struct RetryState {
     // Information about the view that the top-level pipeline is running against.
@@ -1193,6 +1245,19 @@ Status ClusterAggregate::runAggregate(
         auto [currentRequest, userLPP] = buildResolvedViewAggregateRequest(
             state, request, opCtx, namespaces, verbosity, ifrContext);
 
+        // Sync the modified `currentRequest` back to the original request on scope exit (only after
+        // the first attempt). This has the side effect of syncing PQS that were applied via
+        // `runAggregateImpl` back to the original request.
+        //
+        // We only sync back on the first attempt because on the second retry and each subsequent
+        // retry, `currentRequest` may contain the updated namespaces/pipeline/metadata for running
+        // on a view.
+        ScopeGuard syncRequestOnExit([&] {
+            if (!state.originalRequest) {
+                state.originalRequest = currentRequest;
+            }
+        });
+
         LiteParsedPipeline liteParsedToUse =
             maybeRebuildLiteParsedPipelineForRetry(state, currentRequest, userLPP, ifrContext)
                 .value_or(liteParsedPipeline);
@@ -1213,26 +1278,14 @@ Status ClusterAggregate::runAggregate(
                                              result,
                                              ifrContext,
                                              state.alreadyDesugared);
-            // Throw all errors so the outer retry loop can handle any retryable errors accordingly,
-            // or capture any non-retryable errors.
+            // Throw all errors so the outer retry loop can handle any retryable errors
+            // accordingly, or capture any non-retryable errors.
             uassertStatusOK(status);
             return status;
         }
 
         // Use CollectionRouter with routing context.
         sharding::router::CollectionRouter router(opCtx, state.currentNamespaces.executionNss);
-
-        if (verbosity.has_value()) {
-            // Implicitly create the database for explain commands since, right now, there is no way
-            // to respond properly when the database doesn't exist.
-            // Before, the database was implicitly created by the CollectionRoutingInfoTargeter
-            // class, (for context, it's a legacy class to store the routing information), now that
-            // we are using the RoutingContext instead, we still need to create a database until
-            // SERVER-108882 gets addressed.
-            // TODO (SERVER-108882) Stop creating the db once explain can be executed when th db
-            // doesn't exist.
-            router.createDbImplicitlyOnRoute();
-        }
 
         Status aggregationStatus = Status::OK();
 
@@ -1321,6 +1374,20 @@ Status ClusterAggregate::runAggregate(
         Status finalStatus = [&]() -> Status {
             try {
                 return router.routeWithRoutingContext(comment, routingBody);
+            } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>& ex) {
+                if (verbosity.has_value()) {
+                    // Build an EOF explain result for explained aggregations
+                    // targeting non-existent databases.
+                    makeEOFExplainResult(opCtx,
+                                         namespaces,
+                                         request,
+                                         liteParsedPipeline,
+                                         verbosity,
+                                         result,
+                                         std::move(ifrContext));
+                    return Status::OK();
+                }
+                return ex.toStatus();
             } catch (const ExceptionFor<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>&) {
                 // Rethrow view errors so the outer retry loop can handle them.
                 throw;
@@ -1390,9 +1457,6 @@ Status ClusterAggregate::runAggregate(
             RetryState& state) {
             // Save the resolved view in the state.
             state.resolvedView = *ex.extraInfo<ResolvedView>();
-            if (!state.originalRequest) {
-                state.originalRequest = request;
-            }
             // Pre-disable vector search extension for views. This is an optimization, because we
             // know that the vector search extension is not eligible to run on views. If we do not
             // implement this optimization, we will eventually throw the IFR flag kickback retry and

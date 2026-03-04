@@ -1431,6 +1431,20 @@ void OpObserverImpl::onCreateCollection(
         return;
     }
 
+    bool replicatedRidsFeatureIsEnabled =
+        gFeatureFlagRecordIdsReplicated.isEnabledUseLastLTSFCVWhenUninitialized(
+            VersionContext::getDecoration(opCtx),
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
+
+    boost::optional<bool> recordIdsReplicated = boost::none;
+    // TODO SERVER-119864 We need to manually write recordIdsReplicated when it is false
+    // because collection options does not write it in that case. We do this so the replicas
+    // can use the same state as the primary, other wise the replicas would take their own decision
+    // that could create a divergence.
+    if (replicatedRidsFeatureIsEnabled && !options.recordIdsReplicated) {
+        recordIdsReplicated = options.recordIdsReplicated;
+    }
+
     MutableOplogEntry oplogEntry;
     oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
     if (isTimeseries &&
@@ -1442,7 +1456,9 @@ void OpObserverImpl::onCreateCollection(
     oplogEntry.setTid(collectionName.tenantId());
     oplogEntry.setNss(collectionName.getCommandNS());
     oplogEntry.setUuid(options.uuid);
-    oplogEntry.setObject(MutableOplogEntry::makeCreateCollObject(collectionName, options, idIndex));
+    oplogEntry.setObject(MutableOplogEntry::makeCreateCollObject(
+        collectionName, options, idIndex, recordIdsReplicated));
+
     if (shouldReplicateLocalCatalogIdentifiers(
             rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider())) {
         invariant(createCollCatalogIdentifier.has_value(),
@@ -2361,10 +2377,11 @@ void OpObserverImpl::onTransactionPrepare(
     }
 }
 
-void OpObserverImpl::onTransactionPrepareNonPrimary(OperationContext* opCtx,
-                                                    const LogicalSessionId& lsid,
-                                                    const std::vector<repl::OplogEntry>& statements,
-                                                    const repl::OpTime& prepareOpTime) {}
+void OpObserverImpl::onTransactionPrepareNonPrimaryForChunkMigration(
+    OperationContext* opCtx,
+    const LogicalSessionId& lsid,
+    boost::optional<const std::vector<repl::OplogEntry>&> statements,
+    boost::optional<const repl::OpTime&> prepareOpTime) {}
 
 void OpObserverImpl::onTransactionAbort(OperationContext* opCtx,
                                         boost::optional<OplogSlot> abortOplogEntryOpTime) {
@@ -2470,5 +2487,16 @@ void OpObserverImpl::onUpgradeDowngradeViewlessTimeseries(OperationContext* opCt
 
     logOperation(opCtx, &oplogEntry, true /*assignCommonFields*/, _operationLogger.get());
 }
+
+void OpObserverImpl::onReplicatedIdentDrop(OperationContext* opCtx,
+                                           const std::string& ident,
+                                           repl::OpTime& opTime) {
+    MutableOplogEntry oplogEntry;
+    oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
+    oplogEntry.setNss(NamespaceString::kAdminCommandNamespace);
+    oplogEntry.setObject(BSON("dropIdent" << ident));
+    opTime = logOperation(opCtx, &oplogEntry, true /*assignCommonFields*/, _operationLogger.get());
+}
+
 
 }  // namespace mongo

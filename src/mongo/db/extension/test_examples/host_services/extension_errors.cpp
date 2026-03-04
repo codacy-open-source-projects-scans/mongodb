@@ -131,8 +131,24 @@ public:
     AssertStageDescriptor() : sdk::AggStageDescriptor(kStageName) {}
 
     std::unique_ptr<sdk::AggStageParseNode> parse(mongo::BSONObj stageBson) const override {
+        _assertGlobalObservabilityContextIsNull();
         auto obj = sdk::validateStageDefinition(stageBson, kStageName);
         return std::make_unique<AssertParseNode>(kStageName, obj);
+    }
+
+private:
+    /**
+     * _assertGlobalObservabilityContextIsNull is a temporary test function that is used to confirm
+     * that this a test extension that is loaded into the server should never see a valid
+     * ObservabilityContext. Test extensions that are loaded into the server should be linked
+     * statically, and should never call setGlobalObservabilityContext. As a result, the global
+     * ObservabilityContext should always be null in an extension.
+     */
+    void _assertGlobalObservabilityContextIsNull() const {
+        auto obsCtx = mongo::extension::getGlobalObservabilityContext();
+        tassert(11569602,
+                "Observability context was valid when it should not have been!",
+                obsCtx == nullptr);
     }
 };
 

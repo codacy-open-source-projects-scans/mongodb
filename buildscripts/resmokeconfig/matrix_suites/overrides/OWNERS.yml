@@ -39,6 +39,9 @@ filters:
   - "fcv_upgrade_downgrade.yml":
     approvers:
       - 10gen/server-catalog-and-routing-routing-and-topology
+  - "fcv_upgrade_downgrade_timeseries.yml":
+    approvers:
+      - 10gen/server-catalog-and-routing-ddl
   - "fcv_upgrade_downgrade_primary_step_down_overrides.yml":
     approvers:
       - 10gen/server-replication-reviewers
@@ -63,3 +66,9 @@ filters:
   - "check_system_buckets_hook.yml":
     approvers:
       - 10gen/server-catalog-and-routing-ddl
+  - "no_causal_consistency.yml":
+    approvers:
+      - 10gen/server-replication-reviewers
+  - "drop_config_cache_collections_hook.yml":
+    approvers:
+      - 10gen/server-catalog-and-routing-shard-catalog

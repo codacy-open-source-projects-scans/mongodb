@@ -143,6 +143,12 @@ last-continuous:
       ticket: SERVER-106165
     - test_file: jstests/replsets/oplog_fetch_lag_metric.js
       ticket: SERVER-116300
+    - test_file: jstests/sharding/resharding_collection_cloner.js
+      ticket: SERVER-120210
+    - test_file: jstests/noPassthrough/replication/killOp_against_repl_threads.js
+      ticket: SERVER-112273
+    - test_file: jstests/replsets/retryable_write_interrupted_on_stepdown.js
+      ticket: SERVER-110728
   suites: null
 last-lts:
   all:
@@ -784,4 +790,10 @@ last-lts:
       ticket: SERVER-106165
     - test_file: jstests/replsets/oplog_fetch_lag_metric.js
       ticket: SERVER-116300
+    - test_file: jstests/sharding/resharding_collection_cloner.js
+      ticket: SERVER-120210
+    - test_file: jstests/noPassthrough/replication/killOp_against_repl_threads.js
+      ticket: SERVER-112273
+    - test_file: jstests/replsets/retryable_write_interrupted_on_stepdown.js
+      ticket: SERVER-110728
   suites: null

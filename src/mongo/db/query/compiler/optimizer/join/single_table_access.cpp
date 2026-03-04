@@ -61,7 +61,7 @@ SamplingEstimatorMap makeSamplingEstimators(const MultipleCollectionAccessor& co
                     cq->nss(),
                     yieldPolicy,
                     qkc.getInternalJoinPlanSamplingSize(),
-                    qkc.getInternalQuerySamplingCEMethod(),
+                    qkc.getInternalJoinOptimizationSamplingCEMethod(),
                     qkc.getNumChunksForChunkBasedSampling(),
                     ce::CardinalityEstimate{numRecords,
                                             cost_based_ranker::EstimationSource::Metadata});
@@ -130,8 +130,7 @@ StatusWith<SingleTableAccessPlansResult> singleTableAccessPlans(
         if (!swSolns.isOK()) {
             return swSolns.getStatus();
         }
-        auto swCbrResult = QueryPlanner::planWithCostBasedRanking(*node.accessPath,
-                                                                  params,
+        auto swCbrResult = QueryPlanner::planWithCostBasedRanking(params,
                                                                   samplingEstimators.at(nss).get(),
                                                                   nullptr /*exactCardinality*/,
                                                                   std::move(swSolns.getValue()));

@@ -6,7 +6,10 @@
  * This test also verifies that the $disallowViews extension stage correctly uasserts when
  * used in a view context.
  *
- * @tags: [featureFlagExtensionsAPI]
+ * @tags: [
+ *  featureFlagExtensionsAPI,
+ *  featureFlagExtensionStubParsers,
+ * ]
  */
 import {before, describe, it} from "jstests/libs/mochalite.js";
 
@@ -224,7 +227,7 @@ describe("View policy extension stages", function () {
 
         it("should add view name when $addViewName is used later in the pipeline", function () {
             const viewPipe = [{$addFields: {a: 1}}];
-            const userPipe = [{$project: {_id: 1}}, {$addViewName: {}}];
+            const userPipe = [{$testFoo: {}}, {$addViewName: {}}];
             const viewName = "test_view_later";
             const shouldPrepend = true; // ViewPolicy is kDefaultPrepend
             testViewNameWithTemporaryView(viewName, viewPipe, userPipe, shouldPrepend);
@@ -232,7 +235,7 @@ describe("View policy extension stages", function () {
 
         it("should add view name when $desugarAddViewName is used", function () {
             const viewPipe = [{$addFields: {a: 1}}];
-            const userPipe = [{$project: {_id: 1}}, {$desugarAddViewName: {}}];
+            const userPipe = [{$testFoo: {}}, {$desugarAddViewName: {}}];
             const viewName = "test_view_desugar";
             const shouldPrepend = true; // ViewPolicy is kDefaultPrepend
             testViewNameWithTemporaryView(viewName, viewPipe, userPipe, shouldPrepend);

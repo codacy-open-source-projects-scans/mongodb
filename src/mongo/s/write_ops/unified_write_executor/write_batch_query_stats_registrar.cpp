@@ -46,7 +46,8 @@ namespace {
 void parseAndRegisterUpdateOp(OperationContext* opCtx,
                               const NamespaceString& ns,
                               size_t writeOpIndex,
-                              const WriteCommandRef::UpdateOpRef& updateOp) {
+                              const WriteCommandRef::UpdateOpRef& updateOp,
+                              bool skipRegistration) {
     // Skip registering for query stats when the feature flag is disabled.
     if (!feature_flags::gFeatureFlagQueryStatsUpdateCommand.isEnabledUseLastLTSFCVWhenUninitialized(
             VersionContext::getDecoration(opCtx),
@@ -65,7 +66,8 @@ void parseAndRegisterUpdateOp(OperationContext* opCtx,
             return;
     }
 
-    const auto& wholeOp = updateOp.getCommand().getBatchedCommandRequest().getUpdateRequest();
+    const write_ops::UpdateCommandRequest& wholeOp =
+        updateOp.getCommand().getBatchedCommandRequest().getUpdateRequest();
 
     // Skip registering the request with encrypted fields as indicated by the inclusion of
     // encryptionInformation. It is important to do this before canonicalizing and optimizing the
@@ -141,6 +143,10 @@ void parseAndRegisterUpdateOp(OperationContext* opCtx,
                 expCtx, deferredShape, wholeOp.getNamespace());
         });
 
+    if (skipRegistration) {
+        return;
+    }
+
     // Register query stats collection.
     query_stats::registerWriteRequest(opCtx, ns, writeOpIndex, [&]() {
         uassertStatusOKWithContext(deferredShape->getStatus(), "Failed to compute query shape");
@@ -172,8 +178,9 @@ bool isAggregationPipeline(CurOp* curOp) {
 
 }  // namespace
 
-void WriteBatchQueryStatsRegistrar::registerRequest(OperationContext* opCtx,
-                                                    WriteCommandRef cmdRef) {
+void WriteBatchQueryStatsRegistrar::parseAndRegisterRequest(OperationContext* opCtx,
+                                                            WriteCommandRef cmdRef,
+                                                            bool skipRegistration) {
     // Skips if the top-level command is an aggregation. An aggregation pipeline containing a merge
     // stage may directly invoke cluster::write() to insert documents using replacement updates.
     if (isAggregationPipeline(CurOp::get(opCtx))) {
@@ -199,10 +206,23 @@ void WriteBatchQueryStatsRegistrar::registerRequest(OperationContext* opCtx,
     // Initializes the map to indicate that we have already processed the command.
     opDebug.ensureQueryStatsInfoForBatchWrites();
 
-    for (size_t opIndex = 0; opIndex < cmdRef.getNumOps(); opIndex++) {
+    size_t nOps = cmdRef.getNumOps();
+    for (size_t opIndex = 0; opIndex < nOps; opIndex++) {
         const auto& updateOp = cmdRef.getOp(opIndex).getUpdateOp();
-        parseAndRegisterUpdateOp(opCtx, updateOp.getNss(), opIndex, updateOp);
+        parseAndRegisterUpdateOp(opCtx, updateOp.getNss(), opIndex, updateOp, skipRegistration);
+
+        // Create QueryStatsInfo if the 'updateOp' is requested for the metrics.
+        if (updateOp.getIncludeQueryStatsMetricsForOpIndex() &&
+            !opDebug.hasQueryStatsInfo(opIndex)) {
+            opDebug.setQueryStatsInfoAtOpIndex(opIndex, {});
+        }
     }
+
+    // If we are collecting query stats for any of the ops, record the batch size now.
+    opDebug.forEachQueryStatsInfoForBatchWrites(
+        [nOps](size_t opIndex, OpDebug::QueryStatsInfo& info) {
+            info.additiveMetrics.nUpdateOps = nOps;
+        });
 }
 
 void WriteBatchQueryStatsRegistrar::setIncludeQueryStatsMetricsIfRequested(
@@ -210,12 +230,15 @@ void WriteBatchQueryStatsRegistrar::setIncludeQueryStatsMetricsIfRequested(
     if (isAggregationPipeline(curOp)) {
         return;
     }
-    bool requestQueryStatsFromRemotes =
+    bool requestQueryStatsFromRemotes = updateOpEntry.getIncludeQueryStatsMetricsForOpIndex() ||
         query_stats::shouldRequestRemoteMetrics(curOp->debug(), opIndex);
     if (requestQueryStatsFromRemotes &&
         _numOpsWithMetricsRequested < kMaxBatchOpsMetricsRequested) {
         updateOpEntry.setIncludeQueryStatsMetricsForOpIndex(opIndex);
         _numOpsWithMetricsRequested++;
+    } else {
+        // Unset the flag if we have reached the request limit kMaxBatchOpsMetricsRequested.
+        updateOpEntry.setIncludeQueryStatsMetricsForOpIndex(boost::none);
     }
 }
 

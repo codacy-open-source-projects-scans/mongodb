@@ -186,10 +186,6 @@ public:
 
     void setCacheMaxWaitTimeout(Milliseconds) override;
 
-    Milliseconds getCacheMaxWaitTimeout() override {
-        return _cacheMaxWaitTimeout;
-    }
-
     void optOutOfCacheEviction() override {
         // 1 is a magic number in WiredTiger that opts this thread out of all optional eviction.
         setCacheMaxWaitTimeout(Milliseconds(1));
@@ -246,6 +242,13 @@ private:
     void _ensureSession();
     void _txnClose(bool commit);
     void _txnOpen();
+
+    /**
+     * Forces a checkpoint on table create if the failpoint forceCheckpointOnTableCreate is
+     * enabled. This is used to reproduce excess-table-in-checkpoint inconsistencies for testing.
+     * The checkpoint is forced before committing the transaction that created the table.
+     */
+    void _forceCheckpointOnTableCreateForTestingIfEnabled();
 
     /**
      * Starts a transaction at the current all_durable timestamp.

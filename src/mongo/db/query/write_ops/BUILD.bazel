@@ -176,6 +176,7 @@ mongo_cc_library(
     deps = [
         "//src/mongo:base",
         "//src/mongo/db:dbmessage",
+        "//src/mongo/db/query/write_ops:write_ops_parsers",
     ],
 )
 
@@ -252,6 +253,7 @@ mongo_cc_library(
 mongo_cc_unit_test(
     name = "db_ops_test",
     srcs = [
+        "find_and_modify_image_lookup_util_test.cpp",
         "write_ops_exec_test.cpp",
         "write_ops_parsers_test.cpp",
         "write_ops_retryability_test.cpp",

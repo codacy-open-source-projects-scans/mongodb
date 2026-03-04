@@ -42,10 +42,11 @@
 #include "mongo/util/bufreader.h"
 #include "mongo/util/modules.h"
 
-#include <limits>
+#include <algorithm>
 #include <memory>
 #include <span>
 #include <utility>
+#include <vector>
 
 #include <boost/optional.hpp>
 
@@ -200,8 +201,9 @@ public:
                           SorterContainerStats& containerStats,
                           const SortOptions& opts,
                           int64_t nextKey,
+                          SorterChecksumVersion checksumVersion,
                           const Settings& settings)
-        : SortedStorageWriter<Key, Value>(opts, settings),
+        : SortedStorageWriter<Key, Value>(opts, settings, checksumVersion),
           _opCtx(opCtx),
           _ru(ru),
           _collection(collection),
@@ -280,8 +282,8 @@ public:
                                 IntegerKeyedContainer& container,
                                 SorterContainerStats& stats,
                                 int64_t currKey,
-                                boost::optional<DatabaseName> dbName = boost::none,
-                                SorterChecksumVersion checksumVersion = SorterChecksumVersion::v2)
+                                boost::optional<DatabaseName> dbName,
+                                SorterChecksumVersion checksumVersion)
         : SorterStorageBase<Key, Value>(std::move(dbName), checksumVersion),
           _opCtx(opCtx),
           _ru(ru),
@@ -293,7 +295,15 @@ public:
     std::unique_ptr<SortedStorageWriter<Key, Value>> makeWriter(const SortOptions& opts,
                                                                 const Settings& settings) override {
         return std::make_unique<sorter::SortedContainerWriter<Key, Value>>(
-            _opCtx, _ru, _collection, _container, _stats, opts, _currKey, settings);
+            _opCtx,
+            _ru,
+            _collection,
+            _container,
+            _stats,
+            opts,
+            _currKey,
+            this->getChecksumVersion(),
+            settings);
     };
 
     size_t getIteratorSize() override {
@@ -351,8 +361,8 @@ private:
     int64_t _currKey;
 };
 
-template <typename Key, typename Value>
-class ContainerBasedSpiller : public SorterSpillerBase<Key, Value> {
+template <typename Key, typename Value, typename Comparator>
+class ContainerBasedSpiller : public SorterSpillerBase<Key, Value, Comparator> {
 public:
     ContainerBasedSpiller(OperationContext& opCtx,
                           RecoveryUnit& ru,
@@ -362,16 +372,17 @@ public:
                           boost::optional<DatabaseName> dbName,
                           SorterChecksumVersion checksumVersion,
                           int64_t batchSize)
-        : SorterSpillerBase<Key, Value>(std::make_unique<ContainerBasedSorterStorage<Key, Value>>(
-              opCtx, ru, collection, container, stats, 1, std::move(dbName), checksumVersion)),
+        : SorterSpillerBase<Key, Value, Comparator>(
+              std::make_unique<ContainerBasedSorterStorage<Key, Value>>(
+                  opCtx, ru, collection, container, stats, 1, std::move(dbName), checksumVersion)),
           _opCtx(opCtx),
           _batchSize(batchSize) {}
 
     void mergeSpills(const SortOptions& opts,
-                     const SorterSpillerBase<Key, Value>::Settings& settings,
+                     const SorterSpillerBase<Key, Value, Comparator>::Settings& settings,
                      SorterStats& stats,
                      std::vector<std::shared_ptr<sorter::Iterator<Key, Value>>>& iters,
-                     SorterSpillerBase<Key, Value>::Comparator comp,
+                     Comparator comp,
                      std::size_t numTargetedSpills,
                      std::size_t numParallelSpills) override {
         std::vector<std::shared_ptr<sorter::Iterator<Key, Value>>> oldIters;
@@ -383,27 +394,21 @@ public:
                 auto mergeIterator = sorter::merge<Key, Value>(spillsToMerge, opts, comp);
                 auto writer = this->_storage->makeWriter(opts, settings);
 
-                int64_t start = std::numeric_limits<int64_t>::max();
-                int64_t end = 0;
+                int64_t deleteRangeStart = spillsToMerge.front()->getRange().getStartOffset();
+                int64_t deleteRangeEnd = validateMergeSpillRanges<Key, Value>(spillsToMerge);
+                const int64_t numSourceRows = deleteRangeEnd - deleteRangeStart;
+
                 int64_t numSpilled = 0;
 
                 while (mergeIterator->more()) {
-                    auto range = mergeIterator->iterator().getRange();
-                    if (range.getStartOffset() < start) {
-                        start = range.getStartOffset();
-                    }
-                    if (range.getEndOffset() > end) {
-                        end = range.getEndOffset();
-                    }
-
                     auto next = mergeIterator->next();
                     writer->addAlreadySorted(next.first, next.second);
                     ++numSpilled;
                 }
-                invariant(numSpilled == end - start);
+                invariant((opts.limit) ? numSpilled <= numSourceRows : numSpilled == numSourceRows);
 
-                // TOOD (SERVER-117546): Use a truncate rather than individual deletes.
-                for (int64_t current = start; current < end; ++current) {
+                // TODO(SERVER-117546): Use a truncate rather than individual deletes.
+                for (int64_t current = deleteRangeStart; current < deleteRangeEnd; ++current) {
                     _containerBasedStorage().remove(current);
                 }
 
@@ -411,6 +416,7 @@ public:
                 _current += numSpilled;
                 _containerBasedStorage().updateCurrKey(_current);
 
+                stats.incrementMergedSpills();
                 stats.incrementSpilledRanges();
                 stats.incrementSpilledKeyValuePairs(numSpilled);
             }
@@ -425,7 +431,7 @@ private:
 
     std::unique_ptr<SortedStorageWriter<Key, Value>> _spill(
         const SortOptions& opts,
-        const SorterSpillerBase<Key, Value>::Settings& settings,
+        const SorterSpillerBase<Key, Value, Comparator>::Settings& settings,
         std::span<std::pair<Key, Value>> data,
         uint32_t idx) override {
         auto writer = this->_storage->makeWriter(opts, settings);

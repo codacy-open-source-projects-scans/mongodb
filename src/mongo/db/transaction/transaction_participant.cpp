@@ -1185,10 +1185,12 @@ void TransactionParticipant::Participant::beginOrContinue(
         // Disallow multi-statement transactions on shard servers that have
         // writeConcernMajorityJournalDefault=false unless enableTestCommands=true. But allow
         // retryable writes (autocommit == boost::none).
+        const auto& provider = rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider();
         uassert(ErrorCodes::OperationNotSupportedInTransaction,
                 "Transactions are not allowed on shard servers when "
                 "writeConcernMajorityJournalDefault=false",
-                replCoord->getWriteConcernMajorityShouldJournal() ||
+                provider.settingsProvideMajorityWriteJournalDurability(
+                    replCoord->getWriteConcernMajorityShouldJournal()) ||
                     !serverGlobalParams.clusterRole.has(ClusterRole::ShardServer) || !autocommit ||
                     getTestCommandsEnabled());
     }
@@ -2106,10 +2108,6 @@ void TransactionParticipant::Participant::restorePreparedTxnFromPreciseCheckpoin
     // These should have been set earlier during beginOrContinueTransactionUnconditionally().
     invariant(p().needToWriteAbortEntry);
     invariant(p().autoCommit == boost::optional<bool>(false));
-
-    // TODO SERVER-113740: These will be unset and we need a way to ensure callers can handle that
-    // and won't introduce new dependencies on it.
-    // p().transactionOperations
 
     {
         stdx::lock_guard<Client> lg(*opCtx->getClient());

@@ -100,20 +100,29 @@ public:
      * Given a CanonicalQuery and a QSN tree, creates QSN nodes for each pipeline stage in 'query'
      * and grafts them on top of the existing QSN tree. If 'query' has an empty pipeline, this
      * function is a noop.
+     * If `keepSentinel` is set, extends the QuerySolution but marks where the new stages added by
+     * inserting a SentinelNode into the tree. This node connects the pushed down stages to the
+     * original tree.
      */
     static std::unique_ptr<QuerySolution> extendWithAggPipeline(
-        CanonicalQuery& query,
+        const CanonicalQuery& query,
         std::unique_ptr<QuerySolution>&& solution,
-        const std::map<NamespaceString, CollectionInfo>& secondaryCollInfos);
+        const std::map<NamespaceString, CollectionInfo>& secondaryCollInfos,
+        bool keepSentinel = false);
 
     /**
      * Returns the list of possible query solutions for the provided 'query' for multi-planning.
      * Uses the indices and other data in 'params' to determine the set of available plans.
+     * If relevantIndexOutput is set, the referenced set is populated with the names of the
+     * top-level fields in the relevant indices.
+     * If hasRelevantMultikeyIndex is set, the referenced bool is set to true if there are
+     * relevant multikey indices.
      */
     static StatusWith<std::vector<std::unique_ptr<QuerySolution>>> plan(
         const CanonicalQuery& query,
         const QueryPlannerParams& params,
-        boost::optional<StringSet&> relevantIndexOutput = boost::none);
+        boost::optional<StringSet&> relevantIndexOutput = boost::none,
+        boost::optional<bool&> hasRelevantMultikeyIndex = boost::none);
 
     /**
      * Given a set of possible plans, estimate the cost of each plan using the cardinality
@@ -122,7 +131,6 @@ public:
      * select a winner.
      */
     static StatusWith<PlanRankingResult> planWithCostBasedRanking(
-        const CanonicalQuery& query,
         const QueryPlannerParams& params,
         ce::SamplingEstimator* samplingEstimator,
         const ce::ExactCardinalityEstimator* exactCardinality,

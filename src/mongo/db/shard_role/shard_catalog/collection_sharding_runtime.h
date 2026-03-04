@@ -46,6 +46,7 @@
 #include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/db/versioning_protocol/stale_exception.h"
 #include "mongo/util/cancellation.h"
+#include "mongo/util/concurrency/waiter_list.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/future.h"
 #include "mongo/util/modules.h"
@@ -186,7 +187,8 @@ public:
      * This method must be called with an exclusive collection lock and it does not acquire any
      * locks itself.
      */
-    void setFilteringMetadata(OperationContext* opCtx, CollectionMetadata newMetadata);
+    void setFilteringMetadata_nonAuthoritative(OperationContext* opCtx,
+                                               CollectionMetadata newMetadata);
 
     /**
      * Marks the collection's filtering metadata as UNKNOWN, meaning that all attempts to check for
@@ -197,12 +199,12 @@ public:
      * It is safe to call this method with only an intent lock on the collection (as opposed to
      * setFilteringMetadata which requires exclusive).
      */
-    void clearFilteringMetadata(OperationContext* opCtx);
+    void clearFilteringMetadata_nonAuthoritative(OperationContext* opCtx);
 
     /**
      * Calls to clearFilteringMetadata + clears the _metadataManager object.
      */
-    void clearFilteringMetadataForDroppedCollection(OperationContext* opCtx);
+    void clearFilteringMetadataForDroppedCollection_nonAuthoritative(OperationContext* opCtx);
 
     /**
      * Methods to control the collection's critical section. Methods listed below must be called
@@ -290,6 +292,30 @@ public:
                                                         const ChunkVersion& shardVersion,
                                                         const UUID& collectionUUID);
 
+    /*
+     * This provides a mechanism by which waiters for a given shard version can wait until the
+     * provided version becomes available on the shard.
+     *
+     * The returned future will also wait for any critical section to be released if at the time of
+     * the wait there happened to be an active critical section.
+     */
+    SharedSemiFuture<void> registerWaiterForChunkVersion(OperationContext* opCtx,
+                                                         const ShardVersion& expectedVersion) const;
+
+    enum class AuthoritativeState {
+        /*
+         * The CSS is non-authoritative, meaning refreshes have to undergo the legacy protocol
+         * requiring interactions with the CSRS and or primary node in the replset.
+         */
+        kNonAuthoritative,
+        /*
+         * The CSS's latest state is authoritative, meaning any ownership/versioning decisions can
+         * be made solely by information present on the node without any external communication.
+         */
+        kAuthoritative
+    };
+    AuthoritativeState getAuthoritativeState() const;
+
 private:
     friend class CollectionShardingRuntimeTest;
 
@@ -352,6 +378,8 @@ private:
         kTracked     // metadata for this collection is registered in the sharding catalog
     } _metadataType;
 
+    AuthoritativeState _authoritativeState = AuthoritativeState::kNonAuthoritative;
+
     // If the collection state is known and is untracked, this will be nullptr.
     //
     // If the collection state is known and is tracked, this will point to the metadata
@@ -380,6 +408,11 @@ private:
     // Tracks ongoing placement version recover/refresh. Eventually set to the semifuture to wait on
     // and a CancellationSource to cancel it
     boost::optional<PlacementVersionRecoverOrRefresh> _placementVersionInRecoverOrRefresh;
+
+    // List of waiters currently waiting for the CSS/CSR to have the required placement version.
+    // This is mutable since we don't need to acquire the CSR in an exclusive state as it will not
+    // perform any modifications to the underlying data.
+    mutable WaiterList<ChunkVersion> _shardVersionWaiters;
 };
 
 /**

@@ -956,6 +956,7 @@ void extendCandidatePlans(const CanonicalQuery& query,
                           const std::vector<IndexEntry>& relevantIndices,
                           bool hasHint,
                           boost::optional<StringSet&> relevantIndexOutput,
+                          boost::optional<bool&> hasRelevantMultikeyIndex,
                           std::vector<std::unique_ptr<QuerySolution>>& out) {
     const bool isDistinctMultiplanningEnabled =
         query.getExpCtx()->isFeatureFlagShardFilteringDistinctScanEnabled();
@@ -1043,6 +1044,9 @@ void extendCandidatePlans(const CanonicalQuery& query,
                             cost_based_ranker::addFieldsToRelevantIndexOutput(
                                 index.keyPattern, relevantIndexOutput.get());
                         }
+                        if (hasRelevantMultikeyIndex) {
+                            *hasRelevantMultikeyIndex |= index.multikey;
+                        }
                         PlanCacheIndexTree* indexTree = new PlanCacheIndexTree();
                         indexTree->setIndexEntry(fullIndexList[i]);
                         SolutionCacheData* scd = new SolutionCacheData();
@@ -1094,6 +1098,9 @@ void extendCandidatePlans(const CanonicalQuery& query,
                     cost_based_ranker::addFieldsToRelevantIndexOutput(index.keyPattern,
                                                                       relevantIndexOutput.get());
                 }
+                if (hasRelevantMultikeyIndex) {
+                    *hasRelevantMultikeyIndex |= index.multikey;
+                }
                 PlanCacheIndexTree* indexTree = new PlanCacheIndexTree();
                 indexTree->setIndexEntry(index);
 
@@ -1139,7 +1146,8 @@ void extendCandidatePlans(const CanonicalQuery& query,
 StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     const CanonicalQuery& query,
     const QueryPlannerParams& params,
-    boost::optional<StringSet&> relevantIndexOutput) {
+    boost::optional<StringSet&> relevantIndexOutput,
+    boost::optional<bool&> hasRelevantMultikeyIndex) {
     LOGV2_DEBUG(20967,
                 5,
                 "Beginning planning",
@@ -1339,6 +1347,9 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
         if (relevantIndexOutput) {
             cost_based_ranker::addFieldsToRelevantIndexOutput(relevantIndices[i].keyPattern,
                                                               relevantIndexOutput.get());
+        }
+        if (hasRelevantMultikeyIndex) {
+            *hasRelevantMultikeyIndex |= relevantIndices[i].multikey;
         }
     }
 
@@ -1608,6 +1619,7 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
                          relevantIndices,
                          hintedIndexBson.has_value(),
                          relevantIndexOutput,
+                         hasRelevantMultikeyIndex,
                          out);
 
     // The caller can explicitly ask for a collscan.
@@ -1724,7 +1736,6 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
 }  // QueryPlanner::plan
 
 StatusWith<PlanRankingResult> QueryPlanner::planWithCostBasedRanking(
-    const CanonicalQuery& query,
     const QueryPlannerParams& params,
     ce::SamplingEstimator* samplingEstimator,
     const ce::ExactCardinalityEstimator* exactCardinality,
@@ -1814,9 +1825,10 @@ StatusWith<PlanRankingResult> QueryPlanner::planWithCostBasedRanking(
  * of the plan to the solution(s) via the extendWith() call near the end.
  */
 std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
-    CanonicalQuery& query,
+    const CanonicalQuery& query,
     std::unique_ptr<QuerySolution>&& solution,
-    const std::map<NamespaceString, CollectionInfo>& secondaryCollInfos) {
+    const std::map<NamespaceString, CollectionInfo>& secondaryCollInfos,
+    bool keepSentinel) {
     if (query.cqPipeline().empty()) {
         return std::move(solution);
     }
@@ -1987,8 +1999,10 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
         tasserted(5842400, "Pipeline contains unsupported stage for SBE pushdown");
     }
 
-    solution->extendWith(std::move(solnForAgg));
-    solution = QueryPlannerAnalysis::removeInclusionProjectionBelowGroup(std::move(solution));
+    solution->extendWith(std::move(solnForAgg), keepSentinel);
+    if (!keepSentinel) {
+        solution = QueryPlannerAnalysis::removeInclusionProjectionBelowGroup(std::move(solution));
+    }
 
     return std::move(solution);
 }  // QueryPlanner::extendWithAggPipeline

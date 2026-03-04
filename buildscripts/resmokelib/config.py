@@ -79,6 +79,7 @@ DEFAULTS = {
     "config_fuzz_seed": None,
     "disable_encryption_fuzzing": False,
     "genny_executable": None,
+    "append_mongo_path": [],
     "include_with_any_tags": None,
     "include_with_all_tags": None,
     "install_dir": None,
@@ -138,6 +139,7 @@ DEFAULTS = {
     "tag_files": [],
     "test_files": [],
     "user_friendly_output": None,
+    "max_exception_length": 150,
     # Output log format.
     "log_format": None,
     # Level of log severity.
@@ -511,6 +513,9 @@ DISABLE_ENCRYPTION_FUZZING = None
 # Executable file for genny, passed in as a command line arg.
 GENNY_EXECUTABLE = None
 
+# List of directories to append to MONGO_PATH for searching JavaScript modules.
+APPEND_MONGO_PATH = []
+
 # If set, then only jstests that have at least one of the specified tags will be run during the
 # jstest portion of the suite(s).
 INCLUDE_WITH_ANY_TAGS = None
@@ -810,6 +815,9 @@ JSTESTS_DIR = None
 # Generated logging config for the current invocation.
 LOGGING_CONFIG: dict = {}
 SHORTEN_LOGGER_NAME_CONFIG: dict = {}
+
+# Maximum number of lines to capture for an extracted exception in the test summary.
+MAX_EXCEPTION_LENGTH = 150
 
 # Whether legacy multiversion code is used. This value is not used on the master version of
 # resmoke.py but is needed to ensure the v5.0 version of fixture classes (e.g. standalone.py)

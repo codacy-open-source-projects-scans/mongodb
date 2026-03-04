@@ -292,6 +292,7 @@ const skippedAuthTestingCommands = [
     "mapReduce",
     "mergeAllChunksOnShard",
     "multicast",
+    "persistenceProviderProperties",
     "pinHistoryReplicated",
     "planCacheListFilters",
     "planCacheSetFilter",
@@ -5199,7 +5200,7 @@ export const authCommandsLib = {
             testcases: [
                 {
                     runOnDb: adminDbName,
-                    roles: roles_hostManager,
+                    roles: Object.extend({searchCoordinator: 1}, roles_hostManager),
                     privileges: [{resource: {cluster: true}, actions: ["fsync"]}],
                 },
                 {runOnDb: firstDbName, roles: {}},
@@ -7610,7 +7611,7 @@ export const authCommandsLib = {
             testcases: [
                 {
                     runOnDb: adminDbName,
-                    roles: roles_hostManager,
+                    roles: Object.extend({searchCoordinator: 1}, roles_hostManager),
                     privileges: [{resource: {cluster: true}, actions: ["fsync"]}],
                     expectFail: TestData.storageEngine == "inMemory",
                 },
@@ -7642,7 +7643,7 @@ export const authCommandsLib = {
             testcases: [
                 {
                     runOnDb: adminDbName,
-                    roles: roles_hostManager,
+                    roles: Object.extend({searchCoordinator: 1}, roles_hostManager),
                     privileges: [{resource: {cluster: true}, actions: ["fsync"]}],
                     expectFail: true,
                 },

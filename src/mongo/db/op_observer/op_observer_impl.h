@@ -275,10 +275,11 @@ public:
                                 const std::vector<OplogSlot>& reservedSlots,
                                 const TransactionOperations& transactionOperations) final {}
 
-    void onTransactionPrepareNonPrimary(OperationContext* opCtx,
-                                        const LogicalSessionId& lsid,
-                                        const std::vector<repl::OplogEntry>& statements,
-                                        const repl::OpTime& prepareOpTime) final;
+    void onTransactionPrepareNonPrimaryForChunkMigration(
+        OperationContext* opCtx,
+        const LogicalSessionId& lsid,
+        boost::optional<const std::vector<repl::OplogEntry>&> statements,
+        boost::optional<const repl::OpTime&> prepareOpTime) override;
 
     void onTransactionAbort(OperationContext* opCtx,
                             boost::optional<OplogSlot> abortOplogEntryOpTime) final;
@@ -303,6 +304,10 @@ public:
                                               const UUID& uuid,
                                               bool isUpgrade,
                                               bool skipViewCreation = false) final;
+
+    void onReplicatedIdentDrop(OperationContext* opCtx,
+                               const std::string& ident,
+                               repl::OpTime& opTime) final;
 
 private:
     std::unique_ptr<OperationLogger> _operationLogger;

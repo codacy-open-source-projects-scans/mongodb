@@ -51,6 +51,13 @@
 
 #include <filesystem>
 
+// Disable LSan's at-exit leak check for this binary. The statically-linked, uninstrumented
+// extension .so files cause the leak check to exceed the CI timeout (BF-41799). ASAN and UBSan
+// coverage is otherwise unaffected.
+extern "C" int __lsan_is_turned_off() {
+    return 1;
+}
+
 namespace mongo::extension::host {
 
 namespace {

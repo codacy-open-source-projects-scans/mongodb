@@ -579,13 +579,15 @@ public:
         }
     }
 
-    void onTransactionPrepareNonPrimary(OperationContext* opCtx,
-                                        const LogicalSessionId& lsid,
-                                        const std::vector<repl::OplogEntry>& statements,
-                                        const repl::OpTime& prepareOpTime) override {
+    void onTransactionPrepareNonPrimaryForChunkMigration(
+        OperationContext* opCtx,
+        const LogicalSessionId& lsid,
+        boost::optional<const std::vector<repl::OplogEntry>&> statements,
+        boost::optional<const repl::OpTime&> prepareOpTime) override {
         ReservedTimes times{opCtx};
         for (auto& observer : _observers) {
-            observer->onTransactionPrepareNonPrimary(opCtx, lsid, statements, prepareOpTime);
+            observer->onTransactionPrepareNonPrimaryForChunkMigration(
+                opCtx, lsid, statements, prepareOpTime);
         }
     }
 
@@ -679,6 +681,15 @@ public:
         ReservedTimes times{opCtx};
         for (auto& o : _observers)
             o->onUpgradeDowngradeViewlessTimeseries(opCtx, nss, uuid, isUpgrade, skipViewCreation);
+    }
+
+    void onReplicatedIdentDrop(OperationContext* opCtx,
+                               const std::string& ident,
+                               repl::OpTime& opTime) override {
+        ReservedTimes times{opCtx};
+        for (auto& o : _observers) {
+            o->onReplicatedIdentDrop(opCtx, ident, opTime);
+        }
     }
 
 private:

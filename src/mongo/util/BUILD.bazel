@@ -887,7 +887,6 @@ mongo_cc_unit_test(
         "future_test_shared_future.cpp",
         "future_test_valid.cpp",
         "future_util_test.cpp",
-        "hierarchical_acquisition_test.cpp",
         "histogram_test.cpp",
         "icu_test.cpp",
         "inline_memory_test.cpp",
@@ -1161,6 +1160,16 @@ mongo_cc_benchmark(
     name = "base64_bm",
     srcs = [
         "base64_bm.cpp",
+    ],
+    tags = [
+        "first_half_bm",
+    ],
+)
+
+mongo_cc_benchmark(
+    name = "hex_bm",
+    srcs = [
+        "hex_bm.cpp",
     ],
     tags = [
         "first_half_bm",

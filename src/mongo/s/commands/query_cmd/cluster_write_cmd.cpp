@@ -72,6 +72,7 @@
 #include "mongo/s/would_change_owning_shard_exception.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/s/write_ops/batched_upsert_detail.h"
+#include "mongo/s/write_ops/unified_write_executor/write_batch_query_stats_registrar.h"
 #include "mongo/s/write_ops/write_without_shard_key_util.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/future.h"
@@ -554,11 +555,15 @@ bool ClusterWriteCmd::runExplainWithoutShardKey(OperationContext* opCtx,
 
     // Implicitly create the db if it doesn't exist. There is no way right now to return an
     // explain on a sharded cluster if the database doesn't exist.
-    // TODO (SERVER-108882) Stop creating the db once explain can be executed when th db
+    // TODO (SERVER-120673) Stop creating the db once explain can be executed when th db
     // doesn't exist.
     router.createDbImplicitlyOnRoute();
     return router.routeWithRoutingContext(
         "explain write"_sd, [&](OperationContext* opCtx, RoutingContext& originalRoutingCtx) {
+            // If supported, compute QueryShapeHash and record it in CurOp
+            unified_write_executor::WriteBatchQueryStatsRegistrar::parseAndRegisterRequest(
+                opCtx, WriteCommandRef{req}, true /* skipRegistration */);
+
             const auto targeter = CollectionRoutingInfoTargeter(opCtx, originalNss);
             auto [translatedNss, translatedReqBSON] = translateRequestForTimeseriesIfNeeded(
                 opCtx, originalRoutingCtx, originalNss, req, targeter);
@@ -644,11 +649,15 @@ void ClusterWriteCmd::executeWriteOpExplain(OperationContext* opCtx,
 
     // Implicitly create the db if it doesn't exist. There is no way right now to return an
     // explain on a sharded cluster if the database doesn't exist.
-    // TODO (SERVER-108882) Stop creating the db once explain can be executed when th db
+    // TODO (SERVER-120673) Stop creating the db once explain can be executed when th db
     // doesn't exist.
     router.createDbImplicitlyOnRoute();
     router.routeWithRoutingContext(
         "explain write"_sd, [&](OperationContext* opCtx, RoutingContext& originalRoutingCtx) {
+            // If supported, compute QueryShapeHash and record it in CurOp
+            unified_write_executor::WriteBatchQueryStatsRegistrar::parseAndRegisterRequest(
+                opCtx, WriteCommandRef{*requestPtr}, true /* skipRegistration */);
+
             const auto targeter = CollectionRoutingInfoTargeter(opCtx, originalNss);
             auto [translatedNss, translatedReqBSON] = translateRequestForTimeseriesIfNeeded(
                 opCtx, originalRoutingCtx, originalNss, *requestPtr, targeter);

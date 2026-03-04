@@ -94,6 +94,8 @@ include:
 
   - filename: etc/evergreen_yml_components/variants/codecoverage/test_dev.yml
 
+  - filename: etc/evergreen_yml_components/variants/amazon/streams/streams_dev.yml
+
   - filename: src/mongo/db/modules/atlas/atlas_dev.yml
 
   - filename: monguard/.evergreen/config.yml
@@ -120,6 +122,11 @@ commit_queue_aliases:
     task: ".*"
     variant_tags: []
     task_tags: []
+  # Monguard
+  - variant: "^(amazon-linux2023-arm|Lint)$"
+    task: "^(.*)$"
+    variant_tags: []
+    task_tags: []
 
 github_pr_aliases:
   - variant: "^(commit-queue)$"
@@ -136,6 +143,7 @@ github_pr_aliases:
     task: ".*"
     variant_tags: []
     task_tags: []
+  # Monguard
   - variant: "^(amazon-linux2023-arm|Lint)$"
     task: "^(.*)$"
     variant_tags: []
@@ -187,4 +195,8 @@ patch_aliases:
   - alias: blocking-emergency-atlas-release-tasks
     description: "Run variants that would potentially block an emergency release"
     variant_tags: ["emergency_release"]
+    task: ".*"
+  - alias: streams
+    description: "Runs all streams variants"
+    variant: "^(enterprise-amazon2023-streams|enterprise-rhel8-streams-tsan|enterprise-rhel8-streams-aubsan)$"
     task: ".*"

@@ -7,27 +7,26 @@ notifications:
     thresholds:
       overall:
         hot:
-          count: 53 # temporary while we get AFs under control, then should reduce to 60
-          grace_period_days: 7
+          count: 35
+          grace_period_days: 5
         cold:
-          count: 75
-          grace_period_days: 7
+          count: 50
+          grace_period_days: 5
       group:
         hot:
-          count: 12
-          grace_period_days: 7
+          count: 8
+          grace_period_days: 5
         cold:
-          count: 24
-          grace_period_days: 7
+          count: 16
+          grace_period_days: 5
       team:
         hot:
-          count: 5
+          count: 4
           grace_period_days: 2
         cold:
-          count: 8
+          count: 6
           grace_period_days: 2
     slack:
-      channel: "#10gen-mongo-code-lockdown"
       overall_scope_tags:
         - "<!here>"
       message_footer: |
@@ -70,7 +69,6 @@ notifications:
   #         count: 10
   #         grace_period_days: 0
   #   slack:
-  #     channel: "#10gen-mongo-version-lockdown"
   #     overall_scope_tags:
   #       - "<!here>"
   #     message_footer: |
@@ -163,22 +161,40 @@ teams:
   - name: "Catalog and Routing"
     slack_tags:
       - "<@U01ALSK50HH>" # sergi.mateo-bellido@mongodb.com - Director
+    thresholds: # reduced thresholds for C&I teams
+      hot: 3
+      cold: 5
   - name: "Cluster Scalability"
     slack_tags:
       - "<@U0V2RMB1N>" # judah.schvimer@mongodb.com - Director
+    thresholds: # reduced thresholds for C&I teams
+      hot: 3
+      cold: 5
   - name: "Networking & Observability"
     slack_tags:
       - "<@U0V2RMB1N>" # judah.schvimer@mongodb.com - Director
+    thresholds: # reduced thresholds for C&I teams
+      hot: 3
+      cold: 5
   - name: "Server Programmability"
     slack_tags:
       - "<@U23L5FVFH>" # ryan.chipman@mongodb.com - Director
+    thresholds: # reduced thresholds for C&I teams
+      hot: 3
+      cold: 5
   - name: "Server Security"
     slack_tags:
       - "<@U23L5FVFH>" # ryan.chipman@mongodb.com - Director
       - "<@U02HWKGMAQL>" # adam.rayner@mongodb.com - Lead
+    thresholds: # reduced thresholds for C&I teams
+      hot: 3
+      cold: 5
   - name: "Workload Resilience"
     slack_tags:
       - "<@U0V2RMB1N>" # judah.schvimer@mongodb.com - Director
+    thresholds: # reduced thresholds for C&I teams
+      hot: 3
+      cold: 5
 
   # Durable Transactions & Availability teams
   - name: "RSSD"
@@ -251,6 +267,9 @@ teams:
   - name: "Build Baron"
     slack_tags:
       - "<@U0V9XLF8R>" # kelsey.schubert@mongodb.com - Director
+  - name: "None"
+    slack_tags:
+      - "<@S0AHTLRQLJD>" # @buildbaronteam for routing to appropriate team
   - name: "Product Performance"
     slack_tags:
       - "<@U0V9XLF8R>" # kelsey.schubert@mongodb.com - Director

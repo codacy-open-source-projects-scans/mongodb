@@ -291,6 +291,12 @@ BatchWriteCommandReply BatchWriteCommandReply::make(const BatchedCommandResponse
         reply.retriedStmtIds = bcr.getRetriedStmtIds();
     }
 
+    if (bcr.areQueryStatsMetricsSet()) {
+        for (auto&& metrics : bcr.getQueryStatsMetrics()) {
+            reply.queryStatsMetrics.emplace_back(metrics);
+        }
+    }
+
     return reply;
 }
 
@@ -379,10 +385,10 @@ BatchedCommandRequest WriteBatchExecutor::buildBatchWriteRequest(
             // Copy the UpdateOpEntry from the original command, and then update the "sampleId"
             // and "$_allowShardKeyUpdatesWithoutFullShardKeyInQuery" fields appropriately.
             std::vector<write_ops::UpdateOpEntry> updateOps;
-            WriteBatchQueryStatsRegistrar registerer;
+            WriteBatchQueryStatsRegistrar registrar;
             for (auto& op : ops) {
                 auto updateOpEntry = write_op_helpers::getOrMakeUpdateOpEntry(op.getUpdateOp());
-                registerer.setIncludeQueryStatsMetricsIfRequested(
+                registrar.setIncludeQueryStatsMetricsIfRequested(
                     CurOp::get(opCtx), op.getIndex(), updateOpEntry);
 
                 auto sampleIdIt = sampleIds.find(getWriteOpId(op));

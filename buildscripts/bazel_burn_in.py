@@ -42,6 +42,7 @@ from buildscripts.burn_in_tests import (
     SELECTOR_FILE,
     SUPPORTED_TEST_KINDS,
     LocalFileChangeDetector,
+    MockFileChangeDetector,
 )
 from buildscripts.ciconfig.evergreen import parse_evergreen_file
 from buildscripts.generate_result_tasks import make_results_task
@@ -141,14 +142,21 @@ def get_resmoke_configs():
         return yaml.safe_load(f)
 
 
-def query_targets_to_burn_in(origin_rev: str) -> list[BurnInTargetInfo]:
-    change_detector = LocalFileChangeDetector(origin_rev)
+def query_targets_to_burn_in(
+    origin_rev: str, test_changed_files: str | None = None
+) -> set[BurnInTargetInfo]:
+    # Use MockFileChangeDetector if test files are provided (for testing purposes)
+    if test_changed_files:
+        changed_files = {f.strip() for f in test_changed_files.split(",")}
+        change_detector = MockFileChangeDetector(changed_files)
+    else:
+        change_detector = LocalFileChangeDetector(origin_rev)
     tests_changed = change_detector.find_changed_tests([Repo(".")])
 
     with open(SELECTOR_FILE, "r") as f:
         exclusions = yaml.safe_load(f)
 
-    targets = []
+    targets = set()
     for config_label, config_path in get_resmoke_configs().items():
         test_label = config_label.removeprefix("@@").removesuffix("_config")
         with open(config_path, "r") as f:
@@ -173,7 +181,7 @@ def query_targets_to_burn_in(origin_rev: str) -> list[BurnInTargetInfo]:
                 + test.replace("/", "_").replace("\\", "_").removeprefix("_")
             )
 
-            targets.append(
+            targets.add(
                 BurnInTargetInfo(
                     burn_in_target=burn_in_target, original_target=test_label, test=test
                 )
@@ -291,11 +299,17 @@ app = typer.Typer(pretty_exceptions_show_locals=False)
 
 
 @app.command()
-def generate_targets(origin_rev: str):
+def generate_targets(
+    origin_rev: str,
+    test_changed_files: Annotated[
+        str | None,
+        typer.Option(hidden=True, help="Comma-separated list of changed files (for testing)"),
+    ] = None,
+):
     """Generate burn-in test targets for changed test files."""
     os.chdir(os.environ.get("BUILD_WORKSPACE_DIRECTORY", "."))
 
-    targets = query_targets_to_burn_in(origin_rev)
+    targets = query_targets_to_burn_in(origin_rev, test_changed_files)
     print(f"\nFound {len(targets)} burn-in targets to generate\n")
 
     for burn_in_name, original_target, test in targets:
@@ -305,16 +319,24 @@ def generate_targets(origin_rev: str):
 
 
 @app.command()
-def generate_tasks(origin_rev: str, outfile: Annotated[str, typer.Option()]):
+def generate_tasks(
+    origin_rev: str,
+    outfile: Annotated[str, typer.Option()],
+    test_changed_files: Annotated[
+        str | None,
+        typer.Option(hidden=True, help="Comma-separated list of changed files (for testing)"),
+    ] = None,
+):
     os.chdir(os.environ.get("BUILD_WORKSPACE_DIRECTORY", "."))
 
-    targets = query_targets_to_burn_in(origin_rev)
+    targets = query_targets_to_burn_in(origin_rev, test_changed_files)
 
     evg_conf = parse_evergreen_file("etc/evergreen.yml")
 
     shrub_project = ShrubProject.empty()
 
     results_tasks = []
+    seen_targets = set()
     for variant_name in evg_conf.variant_names:
         variant = evg_conf.get_variant(variant_name)
         if not (variant.is_required_variant() or variant.is_suggested_variant()):
@@ -334,9 +356,10 @@ def generate_tasks(origin_rev: str, outfile: Annotated[str, typer.Option()]):
             if burn_in_targets_to_run:
                 burn_in_task = make_task(burn_in_targets_to_run, variant_name)
 
-                results_tasks.extend(
-                    [make_results_task(target) for target in burn_in_targets_to_run]
-                )
+                for target in burn_in_targets_to_run:
+                    if target not in seen_targets:
+                        seen_targets.add(target)
+                        results_tasks.append(make_results_task(target))
 
                 build_variant = BuildVariant(name=variant_name)
                 build_variant.add_task_group(burn_in_task)

@@ -46,6 +46,7 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/commands/set_feature_compatibility_version_gen.h"
+#include "mongo/db/commands/set_feature_compatibility_version_steps/fcv_step.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
@@ -702,11 +703,10 @@ public:
                   "toVersion"_attr = requestedVersion);
         }
 
-        const boost::optional<Timestamp> changeTimestamp = getChangeTimestamp(opCtx, request);
-
         auto resolvedTransition =
             FeatureCompatibilityVersion::validateSetFeatureCompatibilityVersionRequest(
                 opCtx, request, actualVersion);
+        const boost::optional<Timestamp>& changeTimestamp = resolvedTransition.changeTimestamp;
 
         uassert(5563600,
                 "'phase' field is only valid to be specified on shards",
@@ -723,52 +723,52 @@ public:
             return true;
         }
 
-        // Automatic dryRun processing only if skipDryRun is false and the role is either the config
-        // server or not part of a sharded cluster
-        if (repl::feature_flags::gFeatureFlagSetFcvDryRunMode.isEnabled() && !skipDryRun &&
-            (!role || !role->isShardOnly())) {
-            processDryRun(opCtx, request, requestedVersion, actualVersion);
-        }
+        // ---------- kStart phase (Enter transitional FCV) ----------
+        if (resolvedTransition.shouldRun(SetFCVPhaseEnum::kStart)) {
+            // Automatic dryRun processing only if skipDryRun is false and the role is either the
+            // config server or not part of a sharded cluster
+            if (repl::feature_flags::gFeatureFlagSetFcvDryRunMode.isEnabled() && !skipDryRun &&
+                (!role || !role->isShardOnly())) {
+                processDryRun(opCtx, request, requestedVersion, actualVersion);
+            }
 
-        if (!request.getPhase() || request.getPhase() == SetFCVPhaseEnum::kStart) {
+            if (role && role->has(ClusterRole::ConfigServer) && requestedVersion > actualVersion) {
+                _fixConfigShardsTopologyTime(opCtx);
+            }
+
+            // TODO (SERVER-98118): remove once 9.0 becomes last LTS.
+            if (role && role->has(ClusterRole::ConfigServer) &&
+                feature_flags::gShardAuthoritativeDbMetadataDDL
+                    .isEnabledOnTargetFCVButDisabledOnOriginalFCV(requestedVersion,
+                                                                  actualVersion) &&
+                !serverGlobalParams.featureCompatibility.acquireFCVSnapshot()
+                     .isUpgradingOrDowngrading()) {
+                // Drop the authoritative database collection before transitioning to kUpgrading
+                // to ensure we don't start from a state containing leftovers from a previous
+                // upgrade.
+                dropAuthoritativeDatabaseCollectionOnShards(opCtx);
+            }
+
+            if (role && role->has(ClusterRole::ConfigServer)) {
+                // Waiting for recovery here to avoid waiting for recovery while holding the
+                // fcvChangeRegion
+                ShardingDDLCoordinatorService::getService(opCtx)->waitForRecovery(opCtx);
+
+                if (requestedVersion <= actualVersion) {
+                    // A background initialization of config.placementHistory may be setting
+                    // cluster parameters (a condition that may cause this command to fail with
+                    // a CannotDowngrade error in the checks performed under the
+                    // fcvChangeRegion); perform a best-effort drain to avoid the scenario.
+                    ShardingDDLCoordinatorService::getService(opCtx)
+                        ->waitForOngoingCoordinatorsToFinish(
+                            opCtx, [](const ShardingDDLCoordinator& instance) -> bool {
+                                return instance.operationType() ==
+                                    DDLCoordinatorTypeEnum::kInitializePlacementHistory;
+                            });
+                }
+            }
+
             {
-                if (role && role->has(ClusterRole::ConfigServer) &&
-                    requestedVersion > actualVersion) {
-                    _fixConfigShardsTopologyTime(opCtx);
-                }
-
-                // TODO (SERVER-98118): remove once 9.0 becomes last LTS.
-                if (role && role->has(ClusterRole::ConfigServer) &&
-                    feature_flags::gShardAuthoritativeDbMetadataDDL
-                        .isEnabledOnTargetFCVButDisabledOnOriginalFCV(requestedVersion,
-                                                                      actualVersion) &&
-                    !serverGlobalParams.featureCompatibility.acquireFCVSnapshot()
-                         .isUpgradingOrDowngrading()) {
-                    // Drop the authoritative database collection before transitioning to kUpgrading
-                    // to ensure we don't start from a state containing leftovers from a previous
-                    // upgrade.
-                    dropAuthoritativeDatabaseCollectionOnShards(opCtx);
-                }
-
-                if (role && role->has(ClusterRole::ConfigServer)) {
-                    // Waiting for recovery here to avoid waiting for recovery while holding the
-                    // fcvChangeRegion
-                    ShardingDDLCoordinatorService::getService(opCtx)->waitForRecovery(opCtx);
-
-                    if (requestedVersion <= actualVersion) {
-                        // A background initialization of config.placementHistory may be setting
-                        // cluster parameters (a condition that may cause this command to fail with
-                        // a CannotDowngrade error in the checks performed under the
-                        // fcvChangeRegion); perform a best-effort drain to avoid the scenario.
-                        ShardingDDLCoordinatorService::getService(opCtx)
-                            ->waitForOngoingCoordinatorsToFinish(
-                                opCtx, [](const ShardingDDLCoordinator& instance) -> bool {
-                                    return instance.operationType() ==
-                                        DDLCoordinatorTypeEnum::kInitializePlacementHistory;
-                                });
-                    }
-                }
-
                 // Start transition to 'requestedVersion' by updating the local FCV document to a
                 // 'kUpgrading' or 'kDowngrading' state, respectively.
                 const auto fcvChangeRegion(
@@ -863,26 +863,21 @@ public:
                     "failpoint set",
                     !failAfterReachingTransitioningState.shouldFail());
 
-            if (request.getPhase() == SetFCVPhaseEnum::kStart) {
-                invariant(role);
-                invariant(role->has(ClusterRole::ShardServer));
-
+            if (role && role->has(ClusterRole::ShardServer)) {
                 // This helper function is only for any actions that should be done specifically on
                 // shard servers during phase 1 of the 3-phase setFCV protocol for sharded clusters.
                 // For example, before completing phase 1, we must wait for backward incompatible
                 // ShardingDDLCoordinators to finish.
                 // We do not expect any other feature-specific work to be done in the 'start' phase.
                 _shardServerPhase1Tasks(opCtx, requestedVersion);
-
-                // If we are only running the 'start' phase, then we are done.
-                return true;
             }
         }
 
-        invariant(serverGlobalParams.featureCompatibility.acquireFCVSnapshot()
-                      .isUpgradingOrDowngrading());
+        // ---------- kPrepare phase (Feasibility Check) ----------
+        if (resolvedTransition.shouldRun(SetFCVPhaseEnum::kPrepare)) {
+            invariant(serverGlobalParams.featureCompatibility.acquireFCVSnapshot()
+                          .isUpgradingOrDowngrading());
 
-        if (!request.getPhase() || request.getPhase() == SetFCVPhaseEnum::kPrepare) {
             if (role && role->has(ClusterRole::ConfigServer)) {
                 uassert(ErrorCodes::Error(6794600),
                         "Failing downgrade due to "
@@ -924,87 +919,85 @@ public:
                 _sendEnterSetFCVPhaseRequestToShard(
                     opCtx, request, changeTimestamp, SetFCVPhaseEnum::kPrepare);
             }
-
-            if (request.getPhase() == SetFCVPhaseEnum::kPrepare) {
-                invariant(role);
-                invariant(role->has(ClusterRole::ShardServer));
-                // If we are only running the 'prepare' phase, then we are done
-                return true;
-            }
         }
 
-        invariant(serverGlobalParams.featureCompatibility.acquireFCVSnapshot()
-                      .isUpgradingOrDowngrading());
-        invariant(!request.getPhase() || request.getPhase() == SetFCVPhaseEnum::kComplete);
+        // ---------- kComplete phase (Metadata changes & Transition to Target FCV) ----------
+        if (resolvedTransition.shouldRun(SetFCVPhaseEnum::kComplete)) {
+            invariant(serverGlobalParams.featureCompatibility.acquireFCVSnapshot()
+                          .isUpgradingOrDowngrading());
 
+            const bool isDowngradeTransition = requestedVersion < actualVersion;
+            if (isDowngradeTransition ||
+                repl::feature_flags::gFeatureFlagUpgradingToDowngrading.isEnabled()) {
 
-        const bool isDowngradeTransition = requestedVersion < actualVersion;
-        if (isDowngradeTransition ||
-            repl::feature_flags::gFeatureFlagUpgradingToDowngrading.isEnabled()) {
+                hangTransitionBeforeIsCleaningServerMetadata.pauseWhileSet(opCtx);
+                // Set the isCleaningServerMetadata field to true. This prohibits the upgradingTo
+                // Downgrading/ downgradingToUpgrading transition until the isCleaningServerMetadata
+                // is unset when we successfully finish the FCV upgrade/downgrade and transition to
+                // the upgraded/downgraded state.
+                {
+                    const auto fcvChangeRegion(
+                        FeatureCompatibilityVersion::enterFCVChangeRegion(opCtx));
+                    FeatureCompatibilityVersion::updateFeatureCompatibilityVersionDocument(
+                        opCtx,
+                        resolvedTransition.transitionalVersion,
+                        changeTimestamp,
+                        true /* setIsCleaningServerMetadata*/);
+                }
 
-            hangTransitionBeforeIsCleaningServerMetadata.pauseWhileSet(opCtx);
-            // Set the isCleaningServerMetadata field to true. This prohibits the upgradingTo
-            // Downgrading/ downgradingToUpgrading transition until the isCleaningServerMetadata is
-            // unset when we successfully finish the FCV upgrade/downgrade and transition to the
-            // upgraded/downgraded state.
+                uassert(ErrorCodes::Error(10778000),
+                        "Failing transition due to 'failTransitionDuringIsCleaningServerMetadata' "
+                        "failpoint set",
+                        !failTransitionDuringIsCleaningServerMetadata.shouldFail());
+            }
+
+            // All feature-specific FCV upgrade or downgrade code should go into the respective
+            // _runUpgrade and _runDowngrade functions. Each of them have their own helper functions
+            // where all feature-specific upgrade/downgrade code should be placed. Please read the
+            // comments on the helper functions for more details on where to place the code.
+            if (isDowngradeTransition) {
+                _runDowngrade(opCtx, request, changeTimestamp);
+            } else {
+                _runUpgrade(opCtx, request, changeTimestamp);
+            }
+
             {
+                // Complete transition by updating the local FCV document to the fully upgraded or
+                // downgraded requestedVersion.
                 const auto fcvChangeRegion(
                     FeatureCompatibilityVersion::enterFCVChangeRegion(opCtx));
+
+                uassert(ErrorCodes::Error(6794601),
+                        "Failing downgrade due to 'failBeforeUpdatingFcvDoc' failpoint set",
+                        !failBeforeUpdatingFcvDoc.shouldFail());
+
+                hangBeforeUpdatingFcvDoc.pauseWhileSet();
+
                 FeatureCompatibilityVersion::updateFeatureCompatibilityVersionDocument(
                     opCtx,
-                    resolvedTransition.transitionalVersion,
+                    requestedVersion,
                     changeTimestamp,
-                    true /* setIsCleaningServerMetadata*/);
+                    false /* setIsCleaningServerMetadata */);
             }
 
-            uassert(ErrorCodes::Error(10778000),
-                    "Failing transition due to 'failTransitionDuringIsCleaningServerMetadata' "
-                    "failpoint set",
-                    !failTransitionDuringIsCleaningServerMetadata.shouldFail());
+            // _finalizeUpgrade/_finalizeDowngrade are only for any tasks that must be done to fully
+            // complete the FCV change AFTER the FCV document has already been updated to the
+            // requested FCV. This is because there are feature flags that only change value once
+            // the FCV document is on the requested value. Everything in these functions **must** be
+            // idempotent/retryable.
+            if (requestedVersion > actualVersion) {
+                _finalizeUpgrade(opCtx, requestedVersion);
+            } else {
+                _finalizeDowngrade(opCtx, requestedVersion);
+            }
+
+            LOGV2(6744302,
+                  "setFeatureCompatibilityVersion succeeded",
+                  "upgradeOrDowngrade"_attr = upgradeOrDowngrade,
+                  "serverType"_attr = serverType,
+                  "fromVersion"_attr = actualVersion,
+                  "toVersion"_attr = requestedVersion);
         }
-
-        // All feature-specific FCV upgrade or downgrade code should go into the respective
-        // _runUpgrade and _runDowngrade functions. Each of them have their own helper functions
-        // where all feature-specific upgrade/downgrade code should be placed. Please read the
-        // comments on the helper functions for more details on where to place the code.
-        if (isDowngradeTransition) {
-            _runDowngrade(opCtx, request, changeTimestamp);
-        } else {
-            _runUpgrade(opCtx, request, changeTimestamp);
-        }
-
-        {
-            // Complete transition by updating the local FCV document to the fully upgraded or
-            // downgraded requestedVersion.
-            const auto fcvChangeRegion(FeatureCompatibilityVersion::enterFCVChangeRegion(opCtx));
-
-            uassert(ErrorCodes::Error(6794601),
-                    "Failing downgrade due to 'failBeforeUpdatingFcvDoc' failpoint set",
-                    !failBeforeUpdatingFcvDoc.shouldFail());
-
-            hangBeforeUpdatingFcvDoc.pauseWhileSet();
-
-            FeatureCompatibilityVersion::updateFeatureCompatibilityVersionDocument(
-                opCtx, requestedVersion, changeTimestamp, false /* setIsCleaningServerMetadata */);
-        }
-
-        // _finalizeUpgrade/_finalizeDowngrade are only for any tasks that must be done to fully
-        // complete the FCV change AFTER the FCV document has already been updated to the requested
-        // FCV. This is because there are feature flags that only change value once the FCV document
-        // is on the requested value. Everything in these functions **must** be
-        // idempotent/retryable.
-        if (requestedVersion > actualVersion) {
-            _finalizeUpgrade(opCtx, requestedVersion);
-        } else {
-            _finalizeDowngrade(opCtx, requestedVersion);
-        }
-
-        LOGV2(6744302,
-              "setFeatureCompatibilityVersion succeeded",
-              "upgradeOrDowngrade"_attr = upgradeOrDowngrade,
-              "serverType"_attr = serverType,
-              "fromVersion"_attr = actualVersion,
-              "toVersion"_attr = requestedVersion);
 
         return true;
     }
@@ -1146,6 +1139,9 @@ private:
             uasserted(ErrorCodes::CannotUpgrade,
                       "Simulated dry-run validation failure via fail point.");
         }
+
+        FCVStepRegistry::get(opCtx->getServiceContext())
+            .userCollectionsUassertsForUpgrade(opCtx, originalVersion, requestedVersion);
     }
 
     // This helper function is for any actions that should be done before taking the global lock in
@@ -1157,6 +1153,10 @@ private:
         const multiversion::FeatureCompatibilityVersion requestedVersion,
         boost::optional<Timestamp> changeTimestamp) {
         auto role = ShardingState::get(opCtx)->pollClusterRole();
+        const auto originalVersion =
+            getTransitionFCVInfo(
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot().getVersion())
+                .from;
         // Note the config server is also considered a shard, so the ConfigServer and ShardServer
         // roles aren't mutually exclusive.
         if (role && role->has(ClusterRole::ConfigServer)) {
@@ -1166,6 +1166,9 @@ private:
         if (role && role->has(ClusterRole::ShardServer)) {
             // Shard server role actions.
         }
+
+        FCVStepRegistry::get(opCtx->getServiceContext())
+            .prepareToUpgradeActionsBeforeGlobalLock(opCtx, originalVersion, requestedVersion);
     }
 
     // This helper function is for any user collections creations, changes or deletions that need
@@ -1194,6 +1197,9 @@ private:
                     return collection->shouldRemoveLegacyTimeseriesBucketingParametersHaveChanged();
                 });
         }
+
+        FCVStepRegistry::get(opCtx->getServiceContext())
+            .userCollectionsWorkForUpgrade(opCtx, originalVersion, requestedVersion);
     }
 
     // This helper function is for updating server metadata to make sure the new features in the
@@ -1221,6 +1227,9 @@ private:
         }
 
         _cleanUpDeprecatedCatalogMetadata(opCtx);
+
+        FCVStepRegistry::get(opCtx->getServiceContext())
+            .upgradeServerMetadata(opCtx, originalVersion, requestedVersion);
     }
 
     // TODO(SERVER-100328): remove after 9.0 is branched.
@@ -1364,6 +1373,11 @@ private:
     // This helper function is for any actions that should be done before taking the global lock in
     // S mode.
     void _prepareToDowngradeActions(OperationContext* opCtx, const FCV requestedVersion) {
+        const auto originalVersion =
+            getTransitionFCVInfo(
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot().getVersion())
+                .from;
+
         auto role = ShardingState::get(opCtx)->pollClusterRole();
         // Note the config server is also considered a shard, so the ConfigServer and ShardServer
         // roles aren't mutually exclusive.
@@ -1374,6 +1388,9 @@ private:
         if (role && role->has(ClusterRole::ShardServer)) {
             // Shard server role actions.
         }
+
+        FCVStepRegistry::get(opCtx->getServiceContext())
+            .prepareToDowngradeActions(opCtx, originalVersion, requestedVersion);
     }
 
     /**
@@ -1581,6 +1598,9 @@ private:
                     });
             }
         }
+
+        FCVStepRegistry::get(opCtx->getServiceContext())
+            .userCollectionsUassertsForDowngrade(opCtx, originalVersion, requestedVersion);
     }
 
     // Remove cluster parameters from the clusterParameters collections which are not enabled on
@@ -1730,6 +1750,9 @@ private:
         if (role && role->has(ClusterRole::ShardServer)) {
             abortAllMultiUpdateCoordinators(opCtx, requestedVersion, originalVersion);
         }
+
+        FCVStepRegistry::get(opCtx->getServiceContext())
+            .internalServerCleanupForDowngrade(opCtx, originalVersion, requestedVersion);
     }
 
     void abortAllMultiUpdateCoordinators(OperationContext* opCtx,
@@ -1839,33 +1862,6 @@ private:
         }
 
         hangBeforeTransitioningToDowngraded.pauseWhileSet(opCtx);
-    }
-
-    /**
-     * For sharded cluster servers:
-     *  Generate a new changeTimestamp if change fcv is called on config server,
-     *  otherwise retrieve changeTimestamp from the Config Server request.
-     */
-    boost::optional<Timestamp> getChangeTimestamp(mongo::OperationContext* opCtx,
-                                                  mongo::SetFeatureCompatibilityVersion request) {
-        auto role = ShardingState::get(opCtx)->pollClusterRole();
-        boost::optional<Timestamp> changeTimestamp;
-        if (role && role->has(ClusterRole::ConfigServer)) {
-            // The Config Server always creates a new ID (i.e., timestamp) when it receives an
-            // upgrade or downgrade request.
-            const auto now = VectorClock::get(opCtx)->getTime();
-            changeTimestamp = now.clusterTime().asTimestamp();
-        } else if (role && role->has(ClusterRole::ShardServer) && request.getPhase()) {
-            // Shards receive the timestamp from the Config Server's request.
-            changeTimestamp = request.getChangeTimestamp();
-            uassert(5563500,
-                    "The 'changeTimestamp' field is missing even though the node is running as a "
-                    "shard. This may indicate that the 'setFeatureCompatibilityVersion' command "
-                    "was invoked directly against the shard or that the config server has not been "
-                    "upgraded to at least version 5.0.",
-                    changeTimestamp);
-        }
-        return changeTimestamp;
     }
 
     /**
@@ -2058,6 +2054,8 @@ private:
                 .migrateRepresentativeQueriesFromQuerySettingsClusterParameterToDedicatedCollection(
                     opCtx);
         }
+
+        FCVStepRegistry::get(opCtx->getServiceContext()).finalizeUpgrade(opCtx, requestedVersion);
     }
 
     // _finalizeDowngrade is analogous to _finalizeUpgrade, but runs on downgrade. As with
@@ -2107,6 +2105,8 @@ private:
                     opCtx);
             service.dropQueryShapeRepresentativeQueriesCollection(opCtx);
         }
+
+        FCVStepRegistry::get(opCtx->getServiceContext()).finalizeDowngrade(opCtx, requestedVersion);
     }
     void _forwardDryRunRequestToShards(OperationContext* opCtx,
                                        const SetFeatureCompatibilityVersion& request) {

@@ -479,7 +479,10 @@ flags in common: {common_set}
                 )
             print("# Fetched unreleased incremental rollout feature flags...")
 
-            disabled_feature_flags_set = (unreleased_ifr_set - added_set) | excluded_set
+            effectively_disabled_flags_set = unreleased_ifr_set - added_set
+            enabled_feature_flags_set = enabled_feature_flags_set - effectively_disabled_flags_set
+
+            disabled_feature_flags_set = effectively_disabled_flags_set | excluded_set
         else:
             disabled_feature_flags_set = excluded_set
 
@@ -591,6 +594,7 @@ flags in common: {common_set}
     _config.INCLUDE_TAGS = _tags_from_list(config.pop("include_with_all_tags"))
 
     _config.GENNY_EXECUTABLE = _expand_user(config.pop("genny_executable"))
+    _config.APPEND_MONGO_PATH = config.pop("append_mongo_path")
     _config.JOBS = config.pop("jobs")
     _config.LINEAR_CHAIN = config.pop("linear_chain") == "on"
     _config.MAJORITY_READ_CONCERN = config.pop("majority_read_concern") == "on"
@@ -826,6 +830,7 @@ flags in common: {common_set}
         _config.SUITE_FILES = _config.SUITE_FILES.split(",")
     _config.TAG_FILES = config.pop("tag_files")
     _config.USER_FRIENDLY_OUTPUT = config.pop("user_friendly_output")
+    _config.MAX_EXCEPTION_LENGTH = config.pop("max_exception_length")
     _config.LOG_FORMAT = config.pop("log_format")
     _config.LOG_LEVEL = config.pop("log_level")
     _config.SANITY_CHECK = config.pop("sanity_check")

@@ -138,9 +138,76 @@ public:
 
     PlanEnumeratorContext makeEnumeratorContext(const JoinReorderingContext& ctx,
                                                 EnumerationStrategy strategy) {
-        auto ce = makeFakeEstimator(ctx);
-        auto coster = makeCoster(ctx, *ce);
-        return {ctx, std::move(ce), std::move(coster), std::move(strategy)};
+        _ce = makeFakeEstimator(ctx);
+        _coster = makeCoster(ctx, *_ce);
+        return {ctx, _ce.get(), _coster.get(), std::move(strategy)};
+    }
+
+    void validatePlanWasHintedCorrectly(const JoinReorderingContext& jCtx,
+                                        EnumerationStrategy strat) {
+        auto ctx = makeEnumeratorContext(jCtx, std::move(strat));
+        ctx.enumerateJoinSubsets();
+        const auto& registry = ctx.registry();
+
+        // Validate we have all base nodes.
+        auto it = strat.mode.begin();
+        ASSERT_EQ(it.get().mode, PlanEnumerationMode::HINTED);
+        ASSERT(it.get().hint);
+        const auto firstHintNode = it.get().hint->node;
+        ASSERT_EQ(ctx.getSubsets(0).size(), jCtx.joinGraph.numNodes());
+        for (const auto& s : ctx.getSubsets(0)) {
+            // We may have a base node AND an INLJ node.
+            ASSERT_LTE(s.plans.size(), 2);
+            ASSERT(registry.isOfType<BaseNode>(s.plans[0]));
+            ASSERT_EQ(registry.getAs<BaseNode>(s.plans[0]).node, s.getNodeId());
+            if (s.plans.size() > 1) {
+                ASSERT(registry.isOfType<INLJRHSNode>(s.plans[1]));
+                ASSERT_EQ(registry.getAs<INLJRHSNode>(s.plans[1]).node, s.getNodeId());
+            }
+        }
+        it.next();
+
+        // Validate we have exactly one subset and one join node per subset per level after this.
+        // Furthermore, ensure that each such plan matches its corresponding hint.
+        for (size_t i = 1; i < jCtx.joinGraph.numNodes(); i++) {
+            ASSERT_EQ(it.get().mode, PlanEnumerationMode::HINTED);
+            ASSERT(it.get().hint);
+
+            const auto& s = ctx.getSubsets(i);
+            ASSERT_EQ(s.size(), 1);
+            ASSERT_EQ(s[0].plans.size(), 1);
+            ASSERT(registry.isOfType<JoiningNode>(s[0].plans[0]));
+            const auto& j = registry.getAs<JoiningNode>(s[0].plans[0]);
+            ASSERT_EQ(j.method, it.get().hint->method);
+
+            if (it.get().hint->isLeftChild) {
+                // Only a HJ can have a left child be a base collection access.
+                ASSERT(j.method == JoinMethod::HJ);
+            }
+
+            const JoinPlanNodeId child = it.get().hint->isLeftChild ? j.left : j.right;
+            if (j.method != JoinMethod::INLJ) {
+                ASSERT(registry.isOfType<BaseNode>(child));
+                ASSERT_EQ(registry.getAs<BaseNode>(child).node, it.get().hint->node);
+            } else {
+                ASSERT(registry.isOfType<INLJRHSNode>(child));
+                ASSERT_EQ(registry.getAs<INLJRHSNode>(child).node, it.get().hint->node);
+            }
+
+            if (i == 1) {
+                // Validate both children of node for the join level.
+                const JoinPlanNodeId otherChild = it.get().hint->isLeftChild ? j.right : j.left;
+                if (j.method != JoinMethod::INLJ || !it.get().hint->isLeftChild) {
+                    ASSERT(registry.isOfType<BaseNode>(otherChild));
+                    ASSERT_EQ(registry.getAs<BaseNode>(otherChild).node, firstHintNode);
+                } else {
+                    ASSERT(registry.isOfType<INLJRHSNode>(otherChild));
+                    ASSERT_EQ(registry.getAs<INLJRHSNode>(otherChild).node, firstHintNode);
+                }
+            }
+
+            it.next();
+        }
     }
 
     // Asserts that for all HJ enumerated at every level of enumeration, the CE for the LHS of the
@@ -217,6 +284,8 @@ public:
     }
 
     std::vector<BSONObj> bsonStorage;
+    std::unique_ptr<JoinCardinalityEstimator> _ce;
+    std::unique_ptr<JoinCostEstimator> _coster;
 };
 
 TEST_F(JoinPlanEnumeratorTest, InitializeSubsetsTwo) {
@@ -527,7 +596,7 @@ TEST_F(JoinPlanEnumeratorTest, InitialzeLargeSubsets) {
 }
 
 DEATH_TEST(PerSubsetLevelEnumerationModeDeathTest, NoModes, "11391600") {
-    PerSubsetLevelEnumerationMode(std::vector<std::pair<size_t, PlanEnumerationMode>>{});
+    PerSubsetLevelEnumerationMode(std::vector<PerSubsetLevelEnumerationMode::SubsetLevelMode>{});
 }
 DEATH_TEST(PerSubsetLevelEnumerationModeDeathTest, FirstModeLevelNotZero, "11391600") {
     PerSubsetLevelEnumerationMode({{1, PlanEnumerationMode::ALL}});
@@ -556,6 +625,54 @@ DEATH_TEST(PerSubsetLevelEnumerationModeDeathTest, NonAscendingMode3, "11391600"
         {2, PlanEnumerationMode::CHEAPEST},
         {4, PlanEnumerationMode::ALL},
         {3, PlanEnumerationMode::CHEAPEST},
+    });
+}
+DEATH_TEST(PerSubsetLevelEnumerationModeDeathTest, HintedWithNoHints, "11391600") {
+    PerSubsetLevelEnumerationMode({
+        {0, PlanEnumerationMode::HINTED},
+    });
+}
+DEATH_TEST(PerSubsetLevelEnumerationModeDeathTest, HintedWithNoHints2, "11391600") {
+    PerSubsetLevelEnumerationMode({
+        {0, PlanEnumerationMode::CHEAPEST},
+        {5, PlanEnumerationMode::HINTED},
+    });
+}
+DEATH_TEST(PerSubsetLevelEnumerationModeDeathTest, HintedWithNoHints3, "11391600") {
+    PerSubsetLevelEnumerationMode({
+        {0, PlanEnumerationMode::CHEAPEST},
+        {.level = 3,
+         .mode = PlanEnumerationMode::HINTED,
+         .hint = JoinHint{.node = 1, .method = JoinMethod::HJ, .isLeftChild = true}},
+        {4, PlanEnumerationMode::HINTED},  // Bad hint.
+    });
+}
+DEATH_TEST(PerSubsetLevelEnumerationModeDeathTest, HintedWithRepeatedNode, "11391600") {
+    PerSubsetLevelEnumerationMode({
+        {0, PlanEnumerationMode::CHEAPEST},
+        {.level = 3,
+         .mode = PlanEnumerationMode::HINTED,
+         .hint = JoinHint{.node = 1, .method = JoinMethod::HJ, .isLeftChild = false}},
+        {.level = 4,
+         .mode = PlanEnumerationMode::HINTED,
+         .hint = JoinHint{.node = 2, .method = JoinMethod::HJ, .isLeftChild = true}},
+        {.level = 5,
+         .mode = PlanEnumerationMode::HINTED,
+         .hint = JoinHint{.node = 1, .method = JoinMethod::HJ, .isLeftChild = true}},  // Bad hint.
+    });
+}
+DEATH_TEST(PerSubsetLevelEnumerationModeDeathTest, HintedWithLevelSkip, "11391600") {
+    PerSubsetLevelEnumerationMode({
+        {0, PlanEnumerationMode::CHEAPEST},
+        {.level = 3,
+         .mode = PlanEnumerationMode::HINTED,
+         .hint = JoinHint{.node = 1, .method = JoinMethod::HJ, .isLeftChild = false}},
+        {.level = 4,
+         .mode = PlanEnumerationMode::HINTED,
+         .hint = JoinHint{.node = 2, .method = JoinMethod::HJ, .isLeftChild = true}},
+        {.level = 6,
+         .mode = PlanEnumerationMode::HINTED,
+         .hint = JoinHint{.node = 3, .method = JoinMethod::HJ, .isLeftChild = true}},  // Bad hint.
     });
 }
 
@@ -699,4 +816,144 @@ TEST_F(JoinPlanEnumeratorTest, MultiEnumerationModes) {
     }
 }
 
+TEST_F(JoinPlanEnumeratorTest, HintedEnumeration) {
+    initGraph(3);
+    graph.addSimpleEqualityEdge(NodeId(0), NodeId(1), 0, 1);
+    graph.addSimpleEqualityEdge(NodeId(0), NodeId(2), 0, 2);
+    graph.addSimpleEqualityEdge(NodeId(1), NodeId(2), 1, 2);
+
+    auto jCtx = makeContext();
+    validatePlanWasHintedCorrectly(
+        jCtx,
+        EnumerationStrategy{
+            .planShape = PlanTreeShape::ZIG_ZAG,
+            .mode = PerSubsetLevelEnumerationMode({
+                {.level = 0,
+                 .mode = PlanEnumerationMode::HINTED,
+                 .hint = JoinHint{.node = 1, .method = JoinMethod::HJ, .isLeftChild = true}},
+                {.level = 1,
+                 .mode = PlanEnumerationMode::HINTED,
+                 .hint = JoinHint{.node = 2, .method = JoinMethod::NLJ, .isLeftChild = false}},
+                {.level = 2,
+                 .mode = PlanEnumerationMode::HINTED,
+                 .hint = JoinHint{.node = 0, .method = JoinMethod::HJ, .isLeftChild = true}},
+            }),
+            .enableHJOrderPruning = false});
+
+    validatePlanWasHintedCorrectly(
+        jCtx,
+        EnumerationStrategy{
+            .planShape = PlanTreeShape::LEFT_DEEP,
+            .mode = PerSubsetLevelEnumerationMode({
+                {.level = 0,
+                 .mode = PlanEnumerationMode::HINTED,
+                 .hint = JoinHint{.node = 0, .method = JoinMethod::NLJ, .isLeftChild = false}},
+                {.level = 1,
+                 .mode = PlanEnumerationMode::HINTED,
+                 .hint = JoinHint{.node = 2, .method = JoinMethod::HJ, .isLeftChild = false}},
+                {.level = 2,
+                 .mode = PlanEnumerationMode::HINTED,
+                 .hint = JoinHint{.node = 1, .method = JoinMethod::NLJ, .isLeftChild = false}},
+            }),
+            .enableHJOrderPruning = false});
+
+    // Can't enumerate INLJ without index information.
+    {
+        auto ctx = makeEnumeratorContext(
+            jCtx,
+            EnumerationStrategy{
+                .planShape = PlanTreeShape::LEFT_DEEP,
+                .mode = PerSubsetLevelEnumerationMode({
+                    {.level = 0,
+                     .mode = PlanEnumerationMode::HINTED,
+                     .hint = JoinHint{.node = 0, .method = JoinMethod::NLJ, .isLeftChild = false}},
+                    {.level = 1,
+                     .mode = PlanEnumerationMode::HINTED,
+                     .hint = JoinHint{.node = 2, .method = JoinMethod::NLJ, .isLeftChild = false}},
+                    {.level = 2,
+                     .mode = PlanEnumerationMode::HINTED,
+                     .hint = JoinHint{.node = 1, .method = JoinMethod::INLJ, .isLeftChild = false}},
+                }),
+                .enableHJOrderPruning = false});
+        ctx.enumerateJoinSubsets();
+        ASSERT_FALSE(ctx.enumerationSuccessful());
+    }
+
+    // Can't enumerate a LEFT_DEEP plan in RIGHT_DEEP mode.
+    {
+        auto ctx = makeEnumeratorContext(
+            jCtx,
+            EnumerationStrategy{
+                .planShape = PlanTreeShape::RIGHT_DEEP,
+                .mode = PerSubsetLevelEnumerationMode({
+                    {.level = 0,
+                     .mode = PlanEnumerationMode::HINTED,
+                     .hint = JoinHint{.node = 0, .method = JoinMethod::NLJ, .isLeftChild = false}},
+                    {.level = 1,
+                     .mode = PlanEnumerationMode::HINTED,
+                     .hint = JoinHint{.node = 2, .method = JoinMethod::NLJ, .isLeftChild = false}},
+                    {.level = 2,
+                     .mode = PlanEnumerationMode::HINTED,
+                     .hint = JoinHint{.node = 1, .method = JoinMethod::NLJ, .isLeftChild = false}},
+                }),
+                .enableHJOrderPruning = false});
+        ctx.enumerateJoinSubsets();
+        ASSERT_FALSE(ctx.enumerationSuccessful());
+    }
+}
+
+TEST_F(JoinPlanEnumeratorTest, HintedEnumerationINLJ) {
+    initGraph(2, true /* withIndexes */);
+    graph.addSimpleEqualityEdge(NodeId(0), NodeId(1), 0, 1);
+
+    auto jCtx = makeContext();
+    validatePlanWasHintedCorrectly(
+        jCtx,
+        EnumerationStrategy{
+            .planShape = PlanTreeShape::ZIG_ZAG,
+            .mode = PerSubsetLevelEnumerationMode({
+                {.level = 0,
+                 .mode = PlanEnumerationMode::HINTED,
+                 .hint = JoinHint{.node = 0, .method = JoinMethod::INLJ, .isLeftChild = true}},
+                {.level = 1,
+                 .mode = PlanEnumerationMode::HINTED,
+                 .hint = JoinHint{.node = 1, .method = JoinMethod::INLJ, .isLeftChild = false}},
+            }),
+            .enableHJOrderPruning = false});
+    validatePlanWasHintedCorrectly(
+        jCtx,
+        EnumerationStrategy{
+            .planShape = PlanTreeShape::RIGHT_DEEP,
+            .mode = PerSubsetLevelEnumerationMode({
+                {.level = 0,
+                 .mode = PlanEnumerationMode::HINTED,
+                 .hint = JoinHint{.node = 1, .method = JoinMethod::INLJ, .isLeftChild = false}},
+                {.level = 1,
+                 .mode = PlanEnumerationMode::HINTED,
+                 .hint = JoinHint{.node = 0, .method = JoinMethod::INLJ, .isLeftChild = false}},
+            }),
+            .enableHJOrderPruning = false});
+
+    // Can't enumerate an INLJ-only plan in LEFT_DEEP mode.
+    {
+        auto ctx = makeEnumeratorContext(
+            jCtx,
+            EnumerationStrategy{
+                .planShape = PlanTreeShape::LEFT_DEEP,
+                .mode = PerSubsetLevelEnumerationMode({
+                    {.level = 0,
+                     .mode = PlanEnumerationMode::HINTED,
+                     .hint = JoinHint{.node = 0, .method = JoinMethod::NLJ, .isLeftChild = false}},
+                    {.level = 1,
+                     .mode = PlanEnumerationMode::HINTED,
+                     .hint = JoinHint{.node = 2, .method = JoinMethod::NLJ, .isLeftChild = false}},
+                    {.level = 2,
+                     .mode = PlanEnumerationMode::HINTED,
+                     .hint = JoinHint{.node = 1, .method = JoinMethod::NLJ, .isLeftChild = false}},
+                }),
+                .enableHJOrderPruning = false});
+        ctx.enumerateJoinSubsets();
+        ASSERT_FALSE(ctx.enumerationSuccessful());
+    }
+}
 }  // namespace mongo::join_ordering

@@ -610,6 +610,14 @@ server_parameters:
         default: true
         redact: false
 
+    internalEnableJoinOptimizationUseIndexUniqueness:
+        description: "Whether or not to use index uniqueness metadata during join optimization"
+        set_at: [startup, runtime]
+        cpp_varname: "internalEnableJoinOptimizationUseIndexUniqueness"
+        cpp_vartype: AtomicWord<bool>
+        default: false
+        redact: false
+
     internalQueryEnableCSTParser:
         description: "If true, use the grammar-based parser and CST to parse queries."
         set_at: [startup, runtime]
@@ -751,10 +759,21 @@ server_parameters:
             chunk-based.
         set_at: [startup, runtime]
         cpp_class:
-            name: SamplingCEMethod
+            name: CBRSamplingCEMethod
             data: synchronized_value<SamplingCEMethodEnum>
         default:
             expr: SamplingCEMethodEnum::kChunk
+        redact: false
+
+    # TODO SERVER-63949: Consolidate CBRSamplingCEMethod and JoinSamplingCEMethod.
+    internalJoinOptimizationSamplingCEMethod:
+        description: Control sampling CE method for the join optimization codepath.
+        set_at: [startup, runtime]
+        cpp_class:
+            name: JoinSamplingCEMethod
+            data: synchronized_value<SamplingCEMethodEnum>
+        default:
+            expr: SamplingCEMethodEnum::kRandom
         redact: false
 
     internalQueryNumChunksForChunkBasedSampling:

@@ -42,6 +42,7 @@
 #include "mongo/util/shared_buffer_fragment.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <functional>
 #include <memory>
@@ -79,9 +80,25 @@
  * // Return *this if your type doesn't have an unowned state.
  * Type getOwned() const;
  *
- * Comparators are std::function<int(const Key&, const Key&)> that are passed in during Sorter
- * creation and return an int less than, equal to, or greater than 0 depending on how the two
- * keys compare with the same semantics as memcmp.
+ * Comparators are functors that that compare std::pair<Key, Value> and return an
+ * int less than, equal to, or greater than 0 depending on how the two pairs
+ * compare with the same semantics as memcmp.
+ * Example for Key=BSONObj, Value=int:
+ *
+ * class MyComparator {
+ * public:
+ *     int operator()(const std::pair<BSONObj, int>& lhs,
+ *                    const std::pair<BSONObj, int>& rhs) {
+ *         int ret = lhs.first.woCompare(rhs.first, _ord);
+ *         if (ret)
+ *             return ret;
+ *
+ *        if (lhs.second >  rhs.second) return 1;
+ *        if (lhs.second == rhs.second) return 0;
+ *        return -1;
+ *     }
+ *     Ordering _ord;
+ * };
  */
 
 namespace MONGO_MOD_PUB mongo {
@@ -93,15 +110,10 @@ struct SortOptions {
     // The number of KV pairs to be returned. 0 indicates no limit.
     unsigned long long limit;
 
-    // When in-memory memory usage exceeds this value, we try to spill to disk. This is approximate.
+    // When in-memory memory usage exceeds this value, we try to spill to the underlying sorter
+    // storage. This is approximate.
     size_t maxMemoryUsageBytes;
     static const size_t DefaultMaxMemoryUsageBytes = 64 * 1024 * 1024;
-
-    // In case the sorter spills encrypted data to disk that must be readable even after process
-    // restarts, it must encrypt with a persistent key. This key is accessed using the database
-    // name that the sorted collection lives in. If encryption is enabled and dbName is boost::none,
-    // a temporary key is used.
-    boost::optional<DatabaseName> dbName;
 
     // Directory into which we place a file when spilling to disk. boost::none means we aren't
     // allowing external sorting.
@@ -119,9 +131,6 @@ struct SortOptions {
     // If set to true and sorted data fits into memory, sorted data will be moved into iterator
     // instead of copying.
     bool moveSortedDataIntoIterator;
-
-    // Checksum version to use for spill files. Only applicable if tempDir != boost::none.
-    SorterChecksumVersion checksumVersion = SorterChecksumVersion::v2;
 
     SortOptions()
         : limit(0),
@@ -148,11 +157,6 @@ struct SortOptions {
         return *this;
     }
 
-    SortOptions& DBName(DatabaseName newDbName) {
-        dbName = std::move(newDbName);
-        return *this;
-    }
-
     SortOptions& Tracker(SorterTracker* newSorterTracker) {
         sorterTracker = newSorterTracker;
         return *this;
@@ -165,11 +169,6 @@ struct SortOptions {
 
     SortOptions& UseMemoryPool(bool usePool) {
         useMemPool = usePool;
-        return *this;
-    }
-
-    SortOptions& ChecksumVersion(SorterChecksumVersion version) {
-        checksumVersion = version;
         return *this;
     }
 };
@@ -210,7 +209,6 @@ public:
     typedef std::pair<typename Key::SorterDeserializeSettings,
                       typename Value::SorterDeserializeSettings>
         Settings;
-    using Comparator = std::function<int(const Key&, const Key&)>;
 
     // Unowned objects are only valid until next call to any method
 
@@ -267,17 +265,17 @@ public:
     }
 };
 
-template <typename Key, typename Value>
+template <typename Key, typename Value, typename Comparator>
 class MergeIterator;
 
 /**
  * Returns an iterator that merges the passed-in iterators.
  */
-template <typename Key, typename Value>
-std::unique_ptr<MergeIterator<Key, Value>> merge(
+template <typename Key, typename Value, typename Comparator>
+std::unique_ptr<MergeIterator<Key, Value, Comparator>> merge(
     std::span<std::shared_ptr<Iterator<Key, Value>>> iters,
     const SortOptions& opts,
-    const std::function<int(const Key&, const Key&)>& comp);
+    const Comparator& comp);
 
 }  // namespace sorter
 
@@ -314,14 +312,16 @@ public:
                       typename Value::SorterDeserializeSettings>
         Settings;
 
-    explicit SortedStorageWriter(const SortOptions& opts, const Settings& settings);
+    explicit SortedStorageWriter(const SortOptions& opts,
+                                 const Settings& settings,
+                                 SorterChecksumCalculator checksumCalculator);
     virtual ~SortedStorageWriter() = default;
 
     virtual void addAlreadySorted(const Key&, const Value&) = 0;
 
     /**
-     * Writes any data remaining in the buffer to disk and then closes the storage to which data was
-     * written.
+     * If the storage has a buffer, flushes the buffer to the storage.
+     * Closes the storage to which data was written to and closes it.
      *
      * No more data can be added via addAlreadySorted() after calling done().
      */
@@ -329,11 +329,12 @@ public:
     virtual std::unique_ptr<Iterator> doneUnique() = 0;
 
     /**
-     * The SortedStorageWriter organizes data into chunks, with a chunk getting written to the
-     * output storage when it exceeds a maximum chunks size. A SortedStorageWriter client can
-     * produce a short chunk by manually calling this function.
+     * For sorter storages that use a buffer, the SortedStorageWriter organizes data into chunks,
+     * with a chunk getting written to the output storage when it exceeds a maximum chunks size. A
+     * SortedStorageWriter client can produce a short chunk by manually calling this function.
      *
-     * If no new data has been added since the last chunk was written, this function is a no-op.
+     * If the sorter storage doesn't use a buffer, or no new data has been added since the last
+     * chunk was written, this function is a no-op.
      */
     virtual void writeChunk() = 0;
 
@@ -348,7 +349,7 @@ protected:
 
 
 /**
- * Represents the file that a Sorter uses to spill to disk. Supports reading and writing
+ * Represents the file that a Sorter can use to spill to disk. Supports reading and writing
  * (append-only).
  */
 class SorterFile {
@@ -361,26 +362,26 @@ public:
     }
 
     /**
-     * Signals that the on-disk storage should not be cleaned up.
+     * Signals that the on-disk file should not be cleaned up.
      */
     void keep() {
         _keep = true;
     };
 
     /**
-     * Reads the requested data from the storage. Cannot write more to the storage once this has
+     * Reads the requested data from the file. Cannot write more to the file once this has
      * been called.
      */
     void read(std::streamoff offset, std::streamsize size, void* out);
 
 
     /**
-     * Writes the given data to the end of the storage. Cannot be called after reading.
+     * Writes the given data to the end of the file. Cannot be called after reading.
      */
     void write(const char* data, std::streamsize size);
 
     /**
-     * Returns the current offset of the end of the storage. Cannot be called after reading.
+     * Returns the current offset of the end of the file. Cannot be called after reading.
      */
     std::streamoff currentOffset();
 
@@ -402,13 +403,13 @@ private:
      */
     std::error_code _getErrorCode();
 
-    // The current offset of the end of the storage if there may be unflushed data, or -1 if the
+    // The current offset of the end of the file if there may be unflushed data, or -1 if the
     // file either has not yet been opened or has been flushed.
     std::streamoff _offset = -1;
 
     std::fstream _file;
 
-    // Whether to keep the on-disk storage even after this in-memory object has been destructed.
+    // Whether to keep the on-disk file even after this in-memory object has been destructed.
     bool _keep = false;
 
     // If set, this points to an external metrics holder for tracking storage open/close
@@ -432,7 +433,7 @@ public:
     virtual ~SorterStorage() = default;
 
     virtual std::unique_ptr<SortedStorageWriter<Key, Value>> makeWriter(
-        const SortOptions& opts, const Settings& settings = Settings()) = 0;
+        const SortOptions& opts, const Settings& settings) = 0;
 
     virtual size_t getIteratorSize() = 0;
 
@@ -497,8 +498,8 @@ template <typename Key, typename Value>
 class MONGO_MOD_PRIVATE Stream {
 public:
     typedef sorter::Iterator<Key, Value> Input;
-    Stream(size_t fileNum, std::shared_ptr<Input> iter)
-        : fileNum(fileNum), _current(iter->nextWithDeferredValue()), _rest(std::move(iter)) {}
+    Stream(size_t sourceId, std::shared_ptr<Input> iter)
+        : sourceId(sourceId), _current(iter->nextWithDeferredValue()), _rest(std::move(iter)) {}
 
     const Key& current() const {
         return _current;
@@ -520,7 +521,7 @@ public:
         return *_rest;
     }
 
-    const size_t fileNum;
+    const size_t sourceId;
 
 private:
     Key _current;
@@ -533,9 +534,8 @@ private:
 // on whole elements.
 //
 // Used for the BoundedSorter and spillWithHeap in the SorterSpiller class.
-template <typename Key, typename Value>
+template <typename Key, typename Value, typename Comparator>
 struct MONGO_MOD_PRIVATE Greater {
-    using Comparator = std::function<int(const Key&, const Key&)>;
 
     // Prevent default construction.
     explicit Greater(Comparator const* compare) : compare(compare) {}
@@ -547,9 +547,31 @@ struct MONGO_MOD_PRIVATE Greater {
 };
 
 /**
- * A class where we declare how to spill depending on the underlying storage the sorter is using.
+ * Validates that all ranges in a merge batch have non-decreasing offsets and form a contiguous
+ * sequence. Returns the end offset immediately after the final range in the batch.
  */
 template <typename Key, typename Value>
+inline int64_t validateMergeSpillRanges(
+    std::span<std::shared_ptr<sorter::Iterator<Key, Value>>> spillsToMerge) {
+    invariant(!spillsToMerge.empty());
+    int64_t expectedRangeStart = spillsToMerge.front()->getRange().getStartOffset();
+    for (const auto& it : spillsToMerge) {
+        auto range = it->getRange();
+        uassert(12017000,
+                "Merge range end offset must be greater than or equal to start offset",
+                range.getEndOffset() >= range.getStartOffset());
+        uassert(12017001,
+                "Merge ranges in batch must be adjacent",
+                range.getStartOffset() == expectedRangeStart);
+        expectedRangeStart = range.getEndOffset();
+    }
+    return expectedRangeStart;
+}
+
+/**
+ * A class where we declare how to spill depending on the underlying storage the sorter is using.
+ */
+template <typename Key, typename Value, typename Comparator>
 class SorterSpiller {
 public:
     typedef sorter::Iterator<Key, Value> Iterator;
@@ -557,7 +579,6 @@ public:
                       typename Value::SorterDeserializeSettings>
         Settings;
     typedef std::pair<Key, Value> Data;
-    using Comparator = std::function<int(const Key&, const Key&)>;
 
     virtual std::shared_ptr<Iterator> spill(const SortOptions& opts,
                                             const Settings& settings,
@@ -572,8 +593,15 @@ public:
     virtual std::shared_ptr<Iterator> spillWithHeap(
         const SortOptions& opts,
         const Settings& settings,
-        std::priority_queue<Data, std::vector<Data>, Greater<Key, Value>>& heap) = 0;
+        std::priority_queue<Data, std::vector<Data>, Greater<Key, Value, Comparator>>& heap) = 0;
 
+    /**
+     * Merge 'iters' in groups of at most 'numParallelSpills' until at most
+     * 'numTargetedSpills' remain.
+     *
+     * 'iters' must be ordered by increasing range start offset and form one contiguous
+     * range.
+     */
     virtual void mergeSpills(const SortOptions& opts,
                              const Settings& settings,
                              SorterStats& stats,
@@ -587,13 +615,12 @@ public:
     virtual ~SorterSpiller() = default;
 };
 
-template <typename Key, typename Value>
-class SorterSpillerBase : public SorterSpiller<Key, Value> {
+template <typename Key, typename Value, typename Comparator>
+class SorterSpillerBase : public SorterSpiller<Key, Value, Comparator> {
 public:
     typedef sorter::Iterator<Key, Value> Iterator;
     typedef std::pair<Key, Value> Data;
-    using Comparator = std::function<int(const Key&, const Key&)>;
-    using Settings = SorterSpiller<Key, Value>::Settings;
+    using Settings = SorterSpiller<Key, Value, Comparator>::Settings;
 
     explicit SorterSpillerBase(std::unique_ptr<SorterStorage<Key, Value>> storage)
         : _storage(std::move(storage)) {}
@@ -615,7 +642,8 @@ public:
     std::shared_ptr<Iterator> spillWithHeap(
         const SortOptions& opts,
         const Settings& settings,
-        std::priority_queue<Data, std::vector<Data>, Greater<Key, Value>>& heap) override {
+        std::priority_queue<Data, std::vector<Data>, Greater<Key, Value, Comparator>>& heap)
+        override {
         std::unique_ptr<SortedStorageWriter<Key, Value>> writer =
             _storage->makeWriter(opts, settings);
         while (!heap.empty()) {
@@ -641,13 +669,14 @@ private:
 };
 
 /**
- * This is the way to input data to the sorting framework.
+ * Each instance of this class accepts (Key, Value) pairs and, depending on its
+ * SortOptions and the configured SorterSpiller/SorterStorage, may keep them
+ * in memory or spill sorted ranges to an external storage.
  *
- * Each instance of this class will generate a file name and spill sorted data ranges to that file
- * if allowed in its given Settings. If the instance destructs before done() is called, it will
- * handle deleting the data file used for spills. Otherwise, if done() is called, responsibility for
- * file deletion moves to the returned Iterator object, which must then delete the file upon its own
- * destruction.
+ * Ownership and cleanup of any spill storage are handled by the underlying
+ * SorterStorage implementation. Callers that need spilled data to outlive
+ * the Sorter itself should use persistDataForShutdown() and later reconstruct a Sorter from the
+ * returned PersistedState.
  */
 template <typename Key, typename Value>
 class Sorter : public SorterBase {
@@ -661,7 +690,6 @@ public:
     typedef std::pair<typename Key::SorterDeserializeSettings,
                       typename Value::SorterDeserializeSettings>
         Settings;
-    using Comparator = std::function<int(const Key&, const Key&)>;
 
     struct PersistedState {
         std::string storageIdentifier;
@@ -676,18 +704,21 @@ public:
      */
     Sorter(const SortOptions& opts, std::string storageIdentifier);
 
-    static std::unique_ptr<Sorter> make(const SortOptions& opts,
-                                        const Comparator& comp,
-                                        std::shared_ptr<SorterSpiller<Key, Value>> spiller,
-                                        const Settings& settings = Settings());
+    template <typename Comparator>
+    static std::unique_ptr<Sorter> make(
+        const SortOptions& opts,
+        const Comparator& comp,
+        std::shared_ptr<SorterSpiller<Key, Value, Comparator>> spiller,
+        const Settings& settings);
 
+    template <typename Comparator>
     static std::unique_ptr<Sorter> makeFromExistingRanges(
         std::string storageIdentifier,
         const std::vector<SorterRange>& ranges,
         const SortOptions& opts,
         const Comparator& comp,
-        std::shared_ptr<SorterSpiller<Key, Value>> spiller,
-        const Settings& settings = Settings());
+        std::shared_ptr<SorterSpiller<Key, Value, Comparator>> spiller,
+        const Settings& settings);
 
     virtual void add(const Key&, const Value&) = 0;
     virtual void emplace(Key&&, ValueProducer) = 0;
@@ -717,9 +748,9 @@ public:
     virtual ~Sorter() {}
 
     /**
-     * Spills all of the sorted data to disk, preserves the temporary file, and then returns
-     * metadata which can be passed to makeFromExistingRanges() to use the spill file later. May be
-     * called before or after calling done().
+     * Spills all of the sorted data to disk, preserves the temporary storage, and then returns
+     * metadata which can be passed to makeFromExistingRanges() to use the spill storage later. May
+     * be called before or after calling done().
      *
      * Only applicable to sorters with limit = 0.
      */
@@ -747,9 +778,7 @@ template <typename Key, typename Value>
 class BoundedSorterInterface : public SorterBase {
 
 public:
-    BoundedSorterInterface(const SortOptions& opts,
-                           std::shared_ptr<SorterSpiller<Key, Value>> spiller)
-        : SorterBase(opts.sorterTracker), _spiller(spiller) {}
+    explicit BoundedSorterInterface(const SortOptions& opts) : SorterBase(opts.sorterTracker) {}
 
     virtual ~BoundedSorterInterface() {}
 
@@ -801,9 +830,6 @@ public:
 
     // Update current bound without adding new item.
     virtual void setBound(Key key) = 0;
-
-protected:
-    std::shared_ptr<SorterSpiller<Key, Value>> _spiller;
 };
 
 /**
@@ -824,16 +850,15 @@ protected:
  * BoundMaker takes a Key from the input, and computes a bound. The bound is a Key that is
  * less-or-equal to all future Keys that will be seen in the input.
  */
-template <typename Key, typename Value, typename BoundMaker>
+template <typename Key, typename Value, typename Comparator, typename BoundMaker>
 class BoundedSorter final : public BoundedSorterInterface<Key, Value> {
 public:
-    using Comparator = std::function<int(const Key&, const Key&)>;
-    using Settings = SorterSpiller<Key, Value>::Settings;
+    using Settings = SorterSpiller<Key, Value, Comparator>::Settings;
 
     BoundedSorter(const SortOptions& opts,
                   Comparator comp,
                   BoundMaker makeBound,
-                  std::shared_ptr<SorterSpiller<Key, Value>> spiller,
+                  std::shared_ptr<SorterSpiller<Key, Value, Comparator>> spiller,
                   bool checkInput = true);
 
     BoundedSorter(const BoundedSorter&) = delete;
@@ -886,6 +911,9 @@ public:
     const Comparator compare;
     const BoundMaker makeBound;
 
+protected:
+    std::shared_ptr<SorterSpiller<Key, Value, Comparator>> _spiller;
+
 private:
     using SpillIterator = sorter::Iterator<Key, Value>;
 
@@ -896,7 +924,7 @@ private:
     const SortOptions _opts;
 
     using Data = std::pair<Key, Value>;
-    std::priority_queue<Data, std::vector<Data>, Greater<Key, Value>> _heap;
+    std::priority_queue<Data, std::vector<Data>, Greater<Key, Value, Comparator>> _heap;
 
     std::unique_ptr<SpillIterator> _spillIter;
 

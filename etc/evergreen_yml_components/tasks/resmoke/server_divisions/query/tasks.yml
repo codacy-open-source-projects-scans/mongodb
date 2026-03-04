@@ -877,6 +877,7 @@ tasks:
         "incompatible_s390x",
         "concurrency",
         "common",
+        "has_bazel_target",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -1183,6 +1184,7 @@ tasks:
         "requires_large_host",
         "jscore",
         "common",
+        "has_bazel_target",
       ]
     commands:
       - func: "do setup"
@@ -2183,6 +2185,7 @@ tasks:
         "incompatible_mac",
         "aggregation",
         "common",
+        "has_bazel_target",
       ]
     commands:
       - func: "do setup"
@@ -2569,8 +2572,6 @@ tasks:
 
   - <<: *task_template
     name: query_golden_cbr_automatic_cost_choice
-    # Currently disabled until SERVER-x?
-    disable: true
     tags: [
         "assigned_to_jira_team_server_query_optimization",
         "experimental",
@@ -3043,3 +3044,24 @@ tasks:
     commands:
       - func: "do setup"
       - func: "run tests"
+
+  - <<: *task_template
+    name: extensions_verify_visibility
+    tags:
+      [
+        "assigned_to_jira_team_server_query_integration",
+        "default",
+        "extensions",
+        "incompatible_windows",
+        "incompatible_mac",
+      ]
+    commands:
+      - func: "do setup"
+      - func: "f_expansions_write"
+      - command: subprocess.exec
+        display_name: "Verify extension visibility and dlopen safety"
+        type: test
+        params:
+          binary: bash
+          args:
+            - "src/evergreen/verify_all_extensions_visibility.sh"

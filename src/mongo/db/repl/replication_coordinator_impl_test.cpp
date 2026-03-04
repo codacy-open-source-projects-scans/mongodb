@@ -6404,6 +6404,38 @@ TEST_F(ReplCoordTest, WaitUntilOpTimeforReadReturnsImmediatelyForMajorityReadCon
     ASSERT_OK(status);
 }
 
+TEST_F(ReplCoordTest, RegisterWaiterForMajorityOpTimeWorks) {
+    assertStartSuccess(BSON("_id" << "mySet"
+                                  << "version" << 2 << "members"
+                                  << BSON_ARRAY(BSON("host" << "node1:12345"
+                                                            << "_id" << 0))),
+                       HostAndPort("node1", 12345));
+
+    auto opCtx = makeOperationContext();
+    runSingleNodeElection(opCtx.get());
+    getStorageInterface()->allDurableTimestamp = Timestamp(100, 1);
+    replCoordSetMyLastWrittenAndAppliedAndDurableOpTime(OpTime(Timestamp(100, 1), 1),
+                                                        Date_t() + Seconds(100));
+    getReplCoord()->attemptToAdvanceStableTimestamp();
+
+    auto fulfilledFuture = getReplCoord()->registerWaiterForMajorityReadOpTime(
+        opCtx.get(), OpTime(Timestamp(1, 0), 1));
+
+    ASSERT_TRUE(fulfilledFuture.isReady());
+
+    auto future = getReplCoord()->registerWaiterForMajorityReadOpTime(opCtx.get(),
+                                                                      OpTime(Timestamp(200, 0), 1));
+
+    ASSERT_FALSE(future.isReady());
+
+    OpTime committedOpTime(Timestamp(200, 1), 1);
+    replCoordSetMyLastWrittenAndAppliedAndDurableOpTime(committedOpTime, Date_t() + Seconds(100));
+    getStorageInterface()->allDurableTimestamp = committedOpTime.getTimestamp();
+    getReplCoord()->attemptToAdvanceStableTimestamp();
+
+    ASSERT_TRUE(future.isReady());
+}
+
 TEST_F(ReplCoordTest, DoNotIgnoreTheContentsOfMetadataWhenItsConfigVersionDoesNotMatchOurs) {
     // Ensure that we do not process ReplSetMetadata when ConfigVersions do not match.
     assertStartSuccess(BSON("_id" << "mySet"
@@ -6810,6 +6842,7 @@ TEST_F(ReplCoordTest, DoNotScheduleElectionWhenCancelAndRescheduleElectionTimeou
     // We must take the RSTL in mode X before transitioning to RS_ROLLBACK.
     const auto opCtx = makeOperationContext();
     ReplicationStateTransitionLockGuard transitionGuard(opCtx.get(), MODE_X);
+
     ASSERT_OK(replCoord->setFollowerModeRollback(opCtx.get()));
 
     getReplCoord()->cancelAndRescheduleElectionTimeout();
@@ -8766,9 +8799,7 @@ TEST_F(ReplCoordTest, GetLastWrittenDuringRollback) {
                                   << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                            << "test1:1234")
                                                 << BSON("_id" << 1 << "host"
-                                                              << "test2:1234")
-                                                << BSON("_id" << 2 << "host"
-                                                              << "test3:1234"))),
+                                                              << "test2:1234"))),
                        HostAndPort("test2", 1234));
     ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
     auto term = getTopoCoord().getTerm();
@@ -8791,6 +8822,43 @@ TEST_F(ReplCoordTest, GetLastWrittenDuringRollback) {
     ASSERT_TRUE(getReplCoord()->getMemberState().rollback());
 
     // getLastWritten with rollbackSafe=true will return a null opTime if the node is in ROLLBACK.
+    ASSERT_EQUALS(time1,
+                  getReplCoord()->getMyLastWrittenOpTimeAndWallTime(false /*rollbackSafe*/).opTime);
+    ASSERT_TRUE(
+        getReplCoord()->getMyLastWrittenOpTimeAndWallTime(true /*rollbackSafe*/).opTime.isNull());
+    ASSERT_EQUALS(time1, getReplCoord()->getMyLastAppliedOpTimeAndWallTime().opTime);
+
+    // Remove the node.
+    auto net = getNet();
+    enterNetwork();
+    ASSERT_TRUE(net->hasReadyRequests());
+    auto noi = net->getNextReadyRequest();
+    auto&& request = noi->getRequest();
+    ASSERT_EQUALS(HostAndPort("test1", 1234), request.target);
+    ASSERT_EQUALS("replSetHeartbeat", request.cmdObj.firstElement().fieldNameStringData());
+    ReplSetHeartbeatResponse hbResp;
+    auto removedFromConfig =
+        ReplSetConfig::parse(BSON("_id" << "mySet"
+                                        << "protocolVersion" << 1 << "version" << 2 << "members"
+                                        << BSON_ARRAY(BSON("host" << "node1:1234"
+                                                                  << "_id" << 0))));
+    hbResp.setConfig(removedFromConfig);
+    hbResp.setConfigVersion(2);
+    hbResp.setSetName("mySet");
+    hbResp.setState(MemberState::RS_SECONDARY);
+    hbResp.setAppliedOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
+    hbResp.setWrittenOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
+    hbResp.setDurableOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
+    net->scheduleResponse(noi, net->now(), makeResponseStatus(hbResp.toBSON()));
+    net->runReadyNetworkOperations();
+    exitNetwork();
+
+    // Wait for the node to be removed. Test that we increment the topology version.
+    ASSERT_OK(getReplCoord()->waitForMemberState(
+        Interruptible::notInterruptible(), MemberState::RS_REMOVED, Seconds(1)));
+
+    // getLastWritten with rollbackSafe=true will return a null opTime while the node is in REMOVED
+    // state.
     ASSERT_EQUALS(time1,
                   getReplCoord()->getMyLastWrittenOpTimeAndWallTime(false /*rollbackSafe*/).opTime);
     ASSERT_TRUE(

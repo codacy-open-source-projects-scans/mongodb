@@ -46,7 +46,9 @@
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/sasl_command_constants.h"
 #include "mongo/db/auth/user.h"
+#include "mongo/db/connection_health_metrics_parameter_gen.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/stats/counters.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/remote_command_response.h"
@@ -68,6 +70,14 @@
 
 namespace mongo {
 namespace auth {
+
+const std::vector<std::string> kAllMechanisms{std::string(kMechanismMongoX509),
+                                              std::string(kMechanismSaslPlain),
+                                              std::string(kMechanismGSSAPI),
+                                              std::string(kMechanismScramSha1),
+                                              std::string(kMechanismScramSha256),
+                                              std::string(kMechanismMongoAWS),
+                                              std::string(kMechanismMongoOIDC)};
 
 using executor::RemoteCommandRequest;
 
@@ -132,18 +142,70 @@ StatusWith<OpMsgRequest> createX509AuthCmd(const BSONObj& params, StringData cli
 
 // Use the MONGODB-X509 protocol to authenticate as "username." The certificate details
 // have already been communicated automatically as part of the connect call.
-Future<void> authX509(RunCommandHook runCommand, const BSONObj& params, StringData clientName) {
+Future<void> authX509(RunCommandHook runCommand,
+                      const HostAndPort& hostname,
+                      const BSONObj& params,
+                      StringData clientName) {
     invariant(runCommand);
 
     // Just 1 step: send authenticate command, receive response
-    auto authRequest = createX509AuthCmd(params, clientName);
-    if (!authRequest.isOK())
-        return authRequest.getStatus();
+    auto swAuthRequest = createX509AuthCmd(params, clientName);
+    if (!swAuthRequest.isOK())
+        return swAuthRequest.getStatus();
+
+    auto swTargetDb = extractDBField(params);
+    if (!swTargetDb.isOK()) {
+        return swTargetDb.getStatus();
+    }
+    auto targetDb = std::move(swTargetDb.getValue());
+
+    auto mechCounter = authCounter.getMechanismCounter(kMechanismMongoX509);
+    mechCounter.incAuthenticateSent();
+
+    auto argsBlock =
+        std::make_tuple(hostname, params, std::string(clientName), targetDb, mechCounter);
+    auto sharedBlock = std::make_shared<decltype(argsBlock)>(std::move(argsBlock));
+
+    auto metricsRecorder = std::make_shared<AuthMetricsRecorder>();
 
     // The runCommand hook checks whether the command returned { ok: 1.0 }, and we don't need to
     // extract anything from the command payload, so this is just turning a Future<BSONObj>
     // into a Future<void>
-    return runCommand(authRequest.getValue()).ignoreValue();
+    return runCommand(swAuthRequest.getValue())
+        .then([metricsRecorder, sharedBlock](const BSONObj& obj) {
+            BSONObj metrics = metricsRecorder->captureEgress();
+            auto [hostname, params, clientName, targetDb, mechCounter] = *sharedBlock.get();
+            mechCounter.incEgressAuthenticateSuccessful();
+            if (gEnableDetailedConnectionHealthMetricLogLines.load()) {
+                LOGV2(10748708,
+                      "Authentication to remote host succeeded using MONGODB-X509",
+                      "hostname"_attr = hostname,
+                      "params"_attr = params,
+                      "subjectName"_attr = clientName,
+                      "targetDatabase"_attr = targetDb,
+                      "mechanism"_attr = kMechanismMongoX509,
+                      "result"_attr = Status::OK().code(),
+                      "metrics"_attr = metrics);
+            }
+        })
+        .onError([metricsRecorder, sharedBlock](const Status& status) {
+            BSONObj metrics = metricsRecorder->captureEgress();
+            auto [hostname, params, clientName, targetDb, _] = *sharedBlock.get();
+            if (gEnableDetailedConnectionHealthMetricLogLines.load()) {
+                LOGV2(10748707,
+                      "Authentication to remote host failed using MONGODB-X509",
+                      "hostname"_attr = hostname,
+                      "params"_attr = params,
+                      "subjectName"_attr = clientName,
+                      "targetDatabase"_attr = targetDb,
+                      "mechanism"_attr = kMechanismMongoX509,
+                      "error"_attr = redact(status),
+                      "result"_attr = status.code(),
+                      "metrics"_attr = metrics);
+            }
+            return status;
+        })
+        .ignoreValue();
 }
 
 class DefaultInternalAuthParametersProvider : public InternalAuthParametersProvider {
@@ -195,7 +257,7 @@ Future<void> authenticateClient(const BSONObj& params,
 
 #ifdef MONGO_CONFIG_SSL
     else if (mechanism == kMechanismMongoX509)
-        return authX509(runCommand, params, clientName).onError(errorHandler);
+        return authX509(runCommand, hostname, params, clientName).onError(errorHandler);
 #endif
 
     else if (saslClientAuthenticate != nullptr)
@@ -322,10 +384,49 @@ StatusWith<std::shared_ptr<SaslClientSession>> _speculateSaslStart(
         return status;
     }
 
-    std::string payload;
-    status = session->step("", &payload);
+    std::string username;
+    status = bsonExtractStringFieldWithDefault(params, saslCommandUserFieldName, ""_sd, &username);
     if (!status.isOK()) {
         return status;
+    }
+
+    std::string payload;
+
+    auto mechCounter = authCounter.getMechanismCounter(mechanism);
+    mechCounter.incAuthenticateSent();
+    mechCounter.incSpeculativeAuthenticateSent();
+
+    AuthMetricsRecorder metricsRecorder;
+    status = session->step("", &payload);
+    if (!status.isOK()) {
+        auto metrics = metricsRecorder.captureEgress();
+        if (gEnableDetailedConnectionHealthMetricLogLines.load()) {
+            LOGV2(10748709,
+                  "Speculative authentication to remote host failed",
+                  "hostname"_attr = host,
+                  "saslParameters"_attr = params,
+                  "username"_attr = username,
+                  "targetDatabase"_attr = authDB,
+                  "mechanism"_attr = mechanism,
+                  "error"_attr = redact(status),
+                  "result"_attr = status.code(),
+                  "metrics"_attr = metrics);
+        }
+        return status;
+    }
+    mechCounter.incEgressAuthenticateSuccessful();
+    mechCounter.incEgressSpeculativeAuthenticateSuccessful();
+    auto metrics = metricsRecorder.captureEgress();
+    if (gEnableDetailedConnectionHealthMetricLogLines.load()) {
+        LOGV2(10748710,
+              "Speculative authentication to remote host succeeded",
+              "hostname"_attr = host,
+              "saslParameters"_attr = params,
+              "username"_attr = username,
+              "targetDatabase"_attr = authDB,
+              "mechanism"_attr = mechanism,
+              "result"_attr = Status::OK().code(),
+              "metrics"_attr = metrics);
     }
 
     BSONObjBuilder saslStart;

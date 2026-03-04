@@ -30,6 +30,12 @@
 #include "mongo/shell/debugger/debugger.h"
 
 #include "mongo/scripting/mozjs/shell/implscope.h"
+#include "mongo/shell/debugger/adapter.h"
+#include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/mutex.h"
+
+#include <map>
+#include <set>
 
 #include <jsapi.h>
 
@@ -37,19 +43,45 @@
 #include <js/Conversions.h>
 #include <js/SourceText.h>
 
+// Forward declarations for generated JS files
+namespace mongo {
+namespace JSFiles {
+extern const JSFile onDebuggerStatement;
+extern const JSFile onNewScript;
+}  // namespace JSFiles
+}  // namespace mongo
+
 namespace mongo {
 namespace mozjs {
+namespace debugger {
+
+using namespace protocol;
 
 // Execution state
 static AtomicWord<bool> _paused{false};
 static std::string _pausedScript;
 static int _pausedLine{0};
 
+AtomicWord<bool> _configurationDone{false};
+static stdx::mutex _pauseMutex;
+static stdx::condition_variable _pauseCV;
+
 // Evaluation state for debugger REPL
 std::string _pendingEval;
 std::string _evalResult;
 AtomicWord<bool> _hasEvalRequest{false};
 AtomicWord<bool> _evalComplete{false};
+
+// Scope and variable data captured when paused
+static std::vector<Scope> _capturedScopes;
+static std::map<int, std::vector<Variable>> _capturedVariables;
+
+// Debugger state
+static std::unique_ptr<DebuggerObject> _debuggerObject;
+static std::unique_ptr<JS::PersistentRooted<JSObject*>> _debuggerGlobal;
+
+// Pending breakpoints: map from source URL to set of line numbers
+static std::map<std::string, std::set<int>> _pendingBreakpoints;
 
 DebuggerObject::DebuggerObject(JSContext* cx, JS::HandleObject debugger)
     : _cx(cx), _debugger(cx, debugger) {}
@@ -141,6 +173,55 @@ bool DebuggerObject::getEvalRequest(JSContext* cx, unsigned argc, JS::Value* vp)
 }
 
 /**
+ * Get pending breakpoints for a given source URL.
+ * Returns an array of line numbers.
+ */
+bool DebuggerObject::getPendingBreakpointsCallback(JSContext* cx, unsigned argc, JS::Value* vp) {
+    JS::CallArgs args = JS::CallArgsFromVp(argc, vp);
+
+    if (argc < 1 || !args[0].isString()) {
+        args.rval().setUndefined();
+        return true;
+    }
+
+    JS::RootedString urlStr(cx, args[0].toString());
+    JS::UniqueChars urlChars = JS_EncodeStringToUTF8(cx, urlStr);
+    if (!urlChars) {
+        args.rval().setUndefined();
+        return true;
+    }
+
+    std::string url(urlChars.get());
+
+    // Look up any pending breakpoints for this URL
+    auto it = _pendingBreakpoints.find(url);
+    if (it == _pendingBreakpoints.end() || it->second.empty()) {
+        // none found
+        args.rval().setUndefined();
+        return true;
+    }
+
+    // Create an array of line numbers
+    JS::RootedObject linesArray(cx, JS::NewArrayObject(cx, it->second.size()));
+    if (!linesArray) {
+        args.rval().setUndefined();
+        return true;
+    }
+
+    uint32_t index = 0;
+    for (int line : it->second) {
+        JS::RootedValue lineVal(cx, JS::Int32Value(line));
+        if (!JS_SetElement(cx, linesArray, index++, lineVal)) {
+            args.rval().setUndefined();
+            return true;
+        }
+    }
+
+    args.rval().setObject(*linesArray);
+    return true;
+}
+
+/**
  * Store the stringified result of the frame.eval
  */
 bool DebuggerObject::storeEvalResult(JSContext* cx, unsigned argc, JS::Value* vp) {
@@ -161,93 +242,222 @@ bool DebuggerObject::storeEvalResult(JSContext* cx, unsigned argc, JS::Value* vp
     return true;
 }
 
+/**
+ * Store scope information extracted from the frame.
+ * Expects an array of objects with {name, variablesReference, expensive} properties.
+ */
+bool DebuggerObject::storeScopesCallback(JSContext* cx, unsigned argc, JS::Value* vp) {
+    JS::CallArgs args = JS::CallArgsFromVp(argc, vp);
+
+    if (argc < 1 || !args[0].isObject()) {
+        args.rval().setUndefined();
+        return true;
+    }
+
+    JS::RootedObject scopesArray(cx, &args[0].toObject());
+    bool isArray;
+    if (!JS::IsArrayObject(cx, scopesArray, &isArray) || !isArray) {
+        args.rval().setUndefined();
+        return true;
+    }
+
+    uint32_t length;
+    if (!JS::GetArrayLength(cx, scopesArray, &length)) {
+        args.rval().setUndefined();
+        return true;
+    }
+
+    // Clear both scopes and variables when called with empty array (initialization)
+    // Only clear scopes when called with actual data (to preserve variables we just stored)
+    _capturedScopes.clear();
+    if (length == 0) {
+        _capturedVariables.clear();
+    }
+
+    for (uint32_t i = 0; i < length; i++) {
+        JS::RootedValue scopeVal(cx);
+        if (!JS_GetElement(cx, scopesArray, i, &scopeVal) || !scopeVal.isObject()) {
+            continue;
+        }
+
+        JS::RootedObject scopeObj(cx, &scopeVal.toObject());
+
+        // Extract name
+        JS::RootedValue nameVal(cx);
+        std::string name = "unknown";
+        if (JS_GetProperty(cx, scopeObj, "name", &nameVal) && nameVal.isString()) {
+            JS::RootedString nameStr(cx, nameVal.toString());
+            JS::UniqueChars nameChars = JS_EncodeStringToUTF8(cx, nameStr);
+            if (nameChars) {
+                name = std::string(nameChars.get());
+            }
+        }
+
+        // Extract variablesReference
+        JS::RootedValue refVal(cx);
+        int variablesReference = 0;
+        if (JS_GetProperty(cx, scopeObj, "variablesReference", &refVal)) {
+            int32_t ref;
+            if (JS::ToInt32(cx, refVal, &ref)) {
+                variablesReference = ref;
+            }
+        }
+
+        // Extract expensive flag
+        JS::RootedValue expensiveVal(cx);
+        bool expensive = false;
+        if (JS_GetProperty(cx, scopeObj, "expensive", &expensiveVal) && expensiveVal.isBoolean()) {
+            expensive = expensiveVal.toBoolean();
+        }
+
+        _capturedScopes.emplace_back(name, variablesReference, expensive);
+    }
+
+    args.rval().setUndefined();
+    return true;
+}
+
+/**
+ * Store variable information for a given scope.
+ * Expects variablesReference (int) and an array of {name, value, type, variablesReference}
+ * objects.
+ */
+bool DebuggerObject::storeVariablesCallback(JSContext* cx, unsigned argc, JS::Value* vp) {
+    JS::CallArgs args = JS::CallArgsFromVp(argc, vp);
+
+    if (argc < 2 || !args[1].isObject()) {
+        args.rval().setUndefined();
+        return true;
+    }
+
+    // Get the variablesReference (scope ID)
+    int32_t scopeId;
+    if (!JS::ToInt32(cx, args[0], &scopeId)) {
+        args.rval().setUndefined();
+        return true;
+    }
+
+    std::vector<Variable> variables;
+
+    JS::RootedObject varsArray(cx, &args[1].toObject());
+    bool isArray;
+    if (!JS::IsArrayObject(cx, varsArray, &isArray) || !isArray) {
+        args.rval().setUndefined();
+        return true;
+    }
+
+    uint32_t length;
+    if (!JS::GetArrayLength(cx, varsArray, &length)) {
+        args.rval().setUndefined();
+        return true;
+    }
+
+    for (uint32_t i = 0; i < length; i++) {
+        JS::RootedValue varVal(cx);
+        if (!JS_GetElement(cx, varsArray, i, &varVal) || !varVal.isObject()) {
+            continue;
+        }
+
+        JS::RootedObject varObj(cx, &varVal.toObject());
+
+        // Extract name
+        JS::RootedValue nameVal(cx);
+        std::string name = "unknown";
+        if (JS_GetProperty(cx, varObj, "name", &nameVal) && nameVal.isString()) {
+            JS::RootedString nameStr(cx, nameVal.toString());
+            JS::UniqueChars nameChars = JS_EncodeStringToUTF8(cx, nameStr);
+            if (nameChars) {
+                name = std::string(nameChars.get());
+            }
+        }
+
+        // Extract value
+        JS::RootedValue valueVal(cx);
+        std::string value = "";
+        if (JS_GetProperty(cx, varObj, "value", &valueVal) && valueVal.isString()) {
+            JS::RootedString valueStr(cx, valueVal.toString());
+            JS::UniqueChars valueChars = JS_EncodeStringToUTF8(cx, valueStr);
+            if (valueChars) {
+                value = std::string(valueChars.get());
+            }
+        }
+
+        // Extract type
+        JS::RootedValue typeVal(cx);
+        std::string type = "unknown";
+        if (JS_GetProperty(cx, varObj, "type", &typeVal) && typeVal.isString()) {
+            JS::RootedString typeStr(cx, typeVal.toString());
+            JS::UniqueChars typeChars = JS_EncodeStringToUTF8(cx, typeStr);
+            if (typeChars) {
+                type = std::string(typeChars.get());
+            }
+        }
+
+        // Extract variablesReference
+        JS::RootedValue refVal(cx);
+        int variablesReference = 0;
+        if (JS_GetProperty(cx, varObj, "variablesReference", &refVal)) {
+            int32_t ref;
+            if (JS::ToInt32(cx, refVal, &ref)) {
+                variablesReference = ref;
+            }
+        }
+
+        variables.emplace_back(name, value, type, variablesReference);
+    }
+
+    _capturedVariables[scopeId] = variables;
+
+    args.rval().setUndefined();
+    return true;
+}
+
 Status DebuggerObject::setOnDebuggerStatementCallback(JS::RootedObject const& global) {
     Status status = Status::OK();
 
-    if (!(status = registerNativeFunction(
-              _cx, global, "__onDebuggerStatement", DebuggerObject::onDebuggerStatementCallback, 1))
-             .isOK()) {
+    status = registerNativeFunction(
+        _cx, global, "__onDebuggerStatement", DebuggerObject::onDebuggerStatementCallback, 1);
+    if (!status.isOK()) {
         return status;
     }
 
-    if (!(status = registerNativeFunction(
-              _cx, global, "__isPaused", DebuggerObject::isPausedCallback, 0))
-             .isOK()) {
-        return status;
-    }
-    if (!(status = registerNativeFunction(
-              _cx, global, "__storeEvalResult", DebuggerObject::storeEvalResult, 1))
-             .isOK()) {
-        return status;
-    }
-    if (!(status = registerNativeFunction(
-              _cx, global, "__hasEvalRequest", DebuggerObject::hasEvalRequest, 0))
-             .isOK()) {
-        return status;
-    }
-    if (!(status = registerNativeFunction(
-              _cx, global, "__getEvalRequest", DebuggerObject::getEvalRequest, 0))
-             .isOK()) {
+    status = registerNativeFunction(_cx, global, "__isPaused", DebuggerObject::isPausedCallback, 0);
+    if (!status.isOK()) {
         return status;
     }
 
-    // Doing more work here in JS makes for 10x fewer LOC in C++
-    const char* hookCode = R"HOOK(
-            (function(frame) {
-                // Store location info so C++ can access it
-                globalThis.__pausedLocation = {
-                    script: frame.script?.url ?? "unknown",
-                    line: frame.script?.getOffsetLocation?.call(frame.script, frame.offset)?.lineNumber ?? 0,
-                };
-                
-                // invoke the C++ callback
-                globalThis.__onDebuggerStatement(frame);
+    status = registerNativeFunction(
+        _cx, global, "__storeEvalResult", DebuggerObject::storeEvalResult, 1);
+    if (!status.isOK()) {
+        return status;
+    }
 
-                // Spin-wait until the paused flag is cleared
-                // This blocks JavaScript execution in this frame
-                while (globalThis.__isPaused()) {
+    status =
+        registerNativeFunction(_cx, global, "__hasEvalRequest", DebuggerObject::hasEvalRequest, 0);
+    if (!status.isOK()) {
+        return status;
+    }
 
-                    // Check for pending evaluation requests
-                    if (globalThis.__hasEvalRequest()) {
-                        // Get the expression to evaluate
-                        const expr = globalThis.__getEvalRequest();
+    status =
+        registerNativeFunction(_cx, global, "__getEvalRequest", DebuggerObject::getEvalRequest, 0);
+    if (!status.isOK()) {
+        return status;
+    }
 
-                        // Wrap the expression to format the result with tojson in the debuggee context
-                        const wrappedExpr = `\
-                            (function() {
-                                try {
-                                    const __result = (${expr});
-                                    return tojson(__result);
-                                } catch (e) {
-                                    // eg. reference errors, assertion failures
-                                    return e.name + ": " + e.message;
-                                }
-                            })()`;
-                        // Evaluate in the context of the current frame
-                        let result = "";
-                        try {
-                            output = frame.eval(wrappedExpr);
-                            if (output.return) {
-                                result = output.return;
-                            } else if (output.throw) {
-                                // eg, syntax error in eval'ed string
-                                const e = output.throw.unsafeDereference(); // unwrap Debugger.Object
-                                result = e.name + ": " + e.message;
-                            }
-                        } catch (e) {
-                            // something really unexpected happened, but avoid a crash
-                            result = e.name + ": " + e.message;
-                        }
-                        globalThis.__storeEvalResult(result);
-                    }
-                }
+    status = registerNativeFunction(
+        _cx, global, "__storeScopes", DebuggerObject::storeScopesCallback, 1);
+    if (!status.isOK()) {
+        return status;
+    }
 
-                return undefined;
-            })
-        )HOOK";
+    status = registerNativeFunction(
+        _cx, global, "__storeVariables", DebuggerObject::storeVariablesCallback, 2);
+    if (!status.isOK()) {
+        return status;
+    }
 
     JS::RootedValue onDebuggerStatement(_cx);
-    status = compileJSCodeBlock(hookCode, "debugger-hook", &onDebuggerStatement);
+    status = compileJSCodeBlock(::mongo::JSFiles::onDebuggerStatement, &onDebuggerStatement);
     if (!status.isOK()) {
         return status;
     }
@@ -257,6 +467,12 @@ Status DebuggerObject::setOnDebuggerStatementCallback(JS::RootedObject const& gl
     }
 
     return status;
+}
+
+Status DebuggerObject::compileJSCodeBlock(JSFile jsfile, JS::MutableHandleValue out) {
+    auto code = std::string(toStdStringViewForInterop(jsfile.source));
+    auto name = jsfile.name;
+    return DebuggerObject::compileJSCodeBlock(code.c_str(), name, out);
 }
 
 Status DebuggerObject::compileJSCodeBlock(const char* code,
@@ -343,6 +559,96 @@ int DebuggerFrame::getLineNumber() {
     }
 
     return 0;
+}
+
+bool DebuggerScript::breakpointHandler(JSContext* cx, unsigned argc, JS::Value* vp) {
+    JS::CallArgs args = JS::CallArgsFromVp(argc, vp);
+
+    // Get current frame information (THIS IS MISSING!)
+    DebuggerFrame frame(cx);
+    _pausedScript = frame.getScriptUrl();
+    _pausedLine = frame.getLineNumber();
+
+    DebugAdapter::sendPause();
+
+    std::unique_lock<std::mutex> lock(_pauseMutex);
+    _paused.store(true);
+    _pauseCV.wait(lock, [] { return !_paused.load(); });
+
+    // Resumption value of 'undefined': The debuggee should continue execution normally.
+    args.rval().setUndefined();
+
+    return true;
+}
+
+Status DebuggerObject::setOnNewScriptCallback(JS::RootedObject const& global) {
+    Status status = Status::OK();
+
+    status = registerNativeFunction(
+        _cx, global, "__getPendingBreakpoints", DebuggerObject::getPendingBreakpointsCallback, 1);
+    if (!status.isOK()) {
+        return status;
+    }
+
+    status = registerNativeFunction(
+        _cx, global, "__onScriptSetBreakpoint", DebuggerScript::breakpointHandler, 1);
+    if (!status.isOK()) {
+        return status;
+    }
+
+    JS::RootedValue onNewScript(_cx);
+    status = compileJSCodeBlock(::mongo::JSFiles::onNewScript, &onNewScript);
+    if (!status.isOK()) {
+        return status;
+    }
+
+    if (!JS_SetProperty(_cx, _debugger, "onNewScript", onNewScript)) {
+        return Status(ErrorCodes::JSInterpreterFailure, "Failed to set onNewScript");
+    }
+
+    return Status::OK();
+}
+
+void DebuggerObject::setBreakpoints(SetBreakpointsRequest request) {
+
+    // Assume that all breakpoints are set before running the shell.
+    // This means that the scripts that the breakpoints are in have not been loaded yet.
+    // Store these pending breakpoints to register later via debugger.onNewScript.
+    _pendingBreakpoints[request.source].clear();
+    for (int line : request.lines) {
+        _pendingBreakpoints[request.source].insert(line);
+    }
+
+    // TODO: Try to apply to already-loaded scripts, where users add more breakpoints as they go
+}
+
+void DebuggerGlobal::setBreakpoints(SetBreakpointsRequest request) {
+    _debuggerObject->setBreakpoints(request);
+}
+
+std::string DebuggerGlobal::getPausedScript() {
+    return _pausedScript;
+}
+
+int DebuggerGlobal::getPausedLine() {
+    return _pausedLine;
+}
+
+std::vector<Scope> DebuggerGlobal::getScopes(int frameId) {
+    return _capturedScopes;
+}
+
+std::vector<Variable> DebuggerGlobal::getVariables(int variablesReference) {
+    auto it = _capturedVariables.find(variablesReference);
+    if (it != _capturedVariables.end()) {
+        return it->second;
+    }
+    return std::vector<Variable>();
+}
+
+void DebuggerGlobal::unpause() {
+    _paused.store(false);
+    _pauseCV.notify_all();
 }
 
 std::unique_ptr<std::thread> _stdinThread;
@@ -446,6 +752,7 @@ Status DebuggerGlobal::init(JSContext* cx) {
     if (!debuggerGlobal) {
         return Status(ErrorCodes::JSInterpreterFailure, "Failed to create debugger compartment");
     }
+    _debuggerGlobal = std::make_unique<JS::PersistentRooted<JSObject*>>(cx, debuggerGlobal);
 
     Status status = Status::OK();
 
@@ -454,19 +761,37 @@ Status DebuggerGlobal::init(JSContext* cx) {
         // Enter the debugger's compartment
         JSAutoRealm realm(cx, debuggerGlobal);
 
-        DebuggerObject debuggerObject = DebuggerObject::create(cx, debuggerGlobal);
-        status = debuggerObject.addDebuggee(mainGlobal);
+        // Create and store the debugger object for later use (e.g., setting breakpoints)
+        _debuggerObject =
+            std::make_unique<DebuggerObject>(DebuggerObject::create(cx, debuggerGlobal));
+
+        status = _debuggerObject->addDebuggee(mainGlobal);
         if (!status.isOK()) {
             return status;
         }
 
         // Set up onDebuggerStatement hook
-        status = debuggerObject.setOnDebuggerStatementCallback(debuggerGlobal);
+        status = _debuggerObject->setOnDebuggerStatementCallback(debuggerGlobal);
+        if (!status.isOK()) {
+            return status;
+        }
+
+        // Set up script.onNewScript hook to activate breakpoints
+        status = _debuggerObject->setOnNewScriptCallback(debuggerGlobal);
         if (!status.isOK()) {
             return status;
         }
 
     }  // Exit debugger compartment - JSAutoRealm goes out of scope here
+
+    status = DebugAdapter::connect();
+    if (!status.isOK()) {
+        return status;
+    }
+
+    // Wait for the debugger to send initial configuration (breakpoints, etc.)
+    // before proceeding with script execution
+    DebugAdapter::waitForHandshake();
 
     // Start stdin handling thread for debug commands
     _stdinThread = std::make_unique<std::thread>(handleStdinThread);
@@ -501,5 +826,6 @@ BSONObj initDebuggerGlobal(const BSONObj& args, void* data) {
 }
 
 
+}  // namespace debugger
 }  // namespace mozjs
 }  // namespace mongo

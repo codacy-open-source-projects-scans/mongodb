@@ -49,7 +49,39 @@ enum class PlanEnumerationMode {
     // Only enumerate plans if they are cheaper than the lowest-cost plan for each subset.
     CHEAPEST,
     // Enumerates all plans, regardless of cost.
-    ALL
+    ALL,
+    // Enumerates a plan based on hints.
+    HINTED
+};
+
+/**
+ * Hints how a join should be done at the current subset level.
+ */
+struct JoinHint {
+    // The next node to join with.
+    NodeId node;
+    // The next join method to use. Ignored for base subset.
+    JoinMethod method;
+    /**
+     * Indicates if the base collection access node is the left or right child of this node.
+     * Ignored for base subset. For example, this hint vector (let every entry indicate one subset
+     * level):
+     *   {{INLJ, 1, true}, {HJ, 2, true}, {NLJ, 3, false}}
+     * would result in the following tree:
+     *
+     *          NLJ
+     *         /   \
+     *        HJ    3
+     *       /  \
+     *      2    1
+     *
+     * We ignore the join method/isLeftChild field for the first level (node 1). We place node 2 on
+     * the left side of a HJ ('isLeftChild' = true), and our current subtree on the right. Finally,
+     * we place an NLJ with node 3 on the right ('isLeftChild' = false).
+     */
+    bool isLeftChild;
+
+    BSONObj toBSON() const;
 };
 
 /**
@@ -73,8 +105,21 @@ enum class PlanEnumerationMode {
  */
 class PerSubsetLevelEnumerationMode {
 public:
-    PerSubsetLevelEnumerationMode(PlanEnumerationMode mode) : _modes{{0, mode}} {}
-    PerSubsetLevelEnumerationMode(std::vector<std::pair<size_t, PlanEnumerationMode>> modes);
+    /**
+     * Describes enumeration strategy for a given subset level and above.
+     */
+    struct SubsetLevelMode {
+        // First level at which to apply this mode.
+        size_t level;
+        PlanEnumerationMode mode;
+        // Only used by HINTED mode to specify what we should enumerate for this subset level.
+        boost::optional<JoinHint> hint = boost::none;
+
+        BSONObj toBSON() const;
+    };
+
+    PerSubsetLevelEnumerationMode(PlanEnumerationMode mode);
+    PerSubsetLevelEnumerationMode(std::vector<SubsetLevelMode> modes);
 
     struct Iterator {
         Iterator& next() {
@@ -112,8 +157,10 @@ public:
         return Iterator(*this, _modes.size());
     };
 
+    BSONObj toBSON() const;
+
 private:
-    const std::vector<std::pair<size_t /* starting subset level */, PlanEnumerationMode>> _modes;
+    const std::vector<SubsetLevelMode> _modes;
     friend PerSubsetLevelEnumerationMode::Iterator;
 };
 
@@ -134,15 +181,15 @@ struct EnumerationStrategy {
 class PlanEnumeratorContext {
 public:
     PlanEnumeratorContext(const JoinReorderingContext& ctx,
-                          std::unique_ptr<JoinCardinalityEstimator> estimator,
-                          std::unique_ptr<JoinCostEstimator> coster,
+                          JoinCardinalityEstimator* estimator,
+                          JoinCostEstimator* coster,
                           EnumerationStrategy strategy)
         : _ctx{ctx},
           _estimator(std::move(estimator)),
           _coster(std::move(coster)),
           _strategy(std::move(strategy)) {}
 
-    // Delete copy and move operations to prevent issues with copying '_joinGraph'.
+    // Delete copy and move operations to ensure concrete ownership.
     PlanEnumeratorContext(const PlanEnumeratorContext&) = delete;
     PlanEnumeratorContext& operator=(const PlanEnumeratorContext&) = delete;
     PlanEnumeratorContext(PlanEnumeratorContext&&) = delete;
@@ -157,6 +204,14 @@ public:
      * Enumerates all join subsets in bottom-up fashion.
      */
     void enumerateJoinSubsets();
+
+    /**
+     * Did the plan enumerator find a plan?
+     */
+    bool enumerationSuccessful() const {
+        return _joinSubsets[_joinSubsets.size() - 1].size() == 1 &&
+            !_joinSubsets[_joinSubsets.size() - 1][0].plans.empty();
+    }
 
     JoinPlanNodeId getBestFinalPlan() const {
         return finalSubset().bestPlan();
@@ -173,23 +228,25 @@ public:
     }
 
     JoinCardinalityEstimator* getJoinCardinalityEstimator() const {
-        return _estimator.get();
+        return _estimator;
     }
 
     JoinCostEstimator* getJoinCostEstimator() const {
-        return _coster.get();
+        return _coster;
     }
 
     /**
      * Used for testing & debugging.
      */
     std::string toString() const;
+    const EnumerationStrategy& getStrategy() const {
+        return _strategy;
+    }
 
 private:
     const JoinSubset& finalSubset() const {
-        tassert(11336904,
-                "Expected subsets to have already been enumerated",
-                _joinSubsets.size() > 0 && _joinSubsets[_joinSubsets.size() - 1].size() == 1);
+        tassert(
+            11336904, "Expected subsets to have already been enumerated", enumerationSuccessful());
         return _joinSubsets[_joinSubsets.size() - 1][0];
     }
 
@@ -220,6 +277,11 @@ private:
                                    const JoinSubset& right,
                                    const std::vector<EdgeId>& edges,
                                    JoinSubset& subset);
+    void enumerateHintedPlan(JoinMethod method,
+                             const JoinSubset& left,
+                             const JoinSubset& right,
+                             const std::vector<EdgeId>& edges,
+                             JoinSubset& subset);
 
     /**
      * Helper for enumerating an INLJ plan with the specified left subtree & generating an index
@@ -261,12 +323,14 @@ private:
     }
 
     const JoinReorderingContext& _ctx;
-    std::unique_ptr<JoinCardinalityEstimator> _estimator;
-    std::unique_ptr<JoinCostEstimator> _coster;
+    // Unowned pointers! If null, all costs are set to 0.
+    JoinCardinalityEstimator* _estimator;
+    JoinCostEstimator* _coster;
     EnumerationStrategy _strategy;
 
     // Variable tracking current enumeration mode during enumeration.
-    PlanEnumerationMode _mode = PlanEnumerationMode::CHEAPEST;
+    PerSubsetLevelEnumerationMode::SubsetLevelMode _mode{.level = 0,
+                                                         .mode = PlanEnumerationMode::CHEAPEST};
 
     // Hold intermediate results of the enumeration algorithm. The index into the outer vector
     // represents the "level". The i'th level contains solutions for the optimal way to join all

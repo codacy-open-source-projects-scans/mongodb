@@ -1415,6 +1415,18 @@ class RunPlugin(PluginInterface):
         )
 
         parser.add_argument(
+            "--appendMongoPath",
+            dest="append_mongo_path",
+            action="append",
+            metavar="PATH",
+            help=(
+                "Append a directory to MONGO_PATH for searching JavaScript modules used by "
+                "load() and import(). Can be specified multiple times. Paths are searched in "
+                "the order specified."
+            ),
+        )
+
+        parser.add_argument(
             "--includeWithAnyTags",
             action="append",
             dest="include_with_any_tags",
@@ -1770,6 +1782,16 @@ class RunPlugin(PluginInterface):
             dest="user_friendly_output",
             metavar="FILE",
             help="Have resmoke redirect all output to FILE. Additionally, stdout will contain lines that typically indicate that the test is making progress, or an error has happened. If `mrlog` is in the path it will be used. `tee` and `egrep` must be in the path.",
+        )
+
+        parser.add_argument(
+            "--maxExceptionLength",
+            action="store",
+            type=int,
+            dest="max_exception_length",
+            metavar="LINES",
+            default=150,
+            help="Maximum number of lines to capture for an extracted exception in the test failure summary. Defaults to %(default)s.",
         )
 
         # TODO-99797: Change the default value or remove this parameter completely when the

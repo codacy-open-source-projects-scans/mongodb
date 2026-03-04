@@ -87,9 +87,8 @@ bool shouldUseReplicatedTruncatesForPreImages(OperationContext* opCtx) {
 
     // Next check feature flag.
     const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
-    return fcvSnapshot.isVersionInitialized() &&
-        feature_flags::gFeatureFlagUseReplicatedTruncatesForDeletions.isEnabled(
-            VersionContext::getDecoration(opCtx), fcvSnapshot);
+    return feature_flags::gFeatureFlagUseReplicatedTruncatesForDeletions
+        .isEnabledUseLastLTSFCVWhenUninitialized(VersionContext::getDecoration(opCtx), fcvSnapshot);
 }
 
 boost::optional<Seconds> getExpireAfterSeconds(OperationContext* opCtx) {

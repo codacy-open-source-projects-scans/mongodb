@@ -61,7 +61,7 @@ QueryKnobConfiguration::QueryKnobConfiguration(const query_settings::QuerySettin
             ->_data.get();
 
     _samplingCEMethod = ServerParameterSet::getNodeParameterSet()
-                            ->get<SamplingCEMethod>("internalQuerySamplingCEMethod")
+                            ->get<CBRSamplingCEMethod>("internalQuerySamplingCEMethod")
                             ->_data.get();
 
     _numChunksForChunkBasedSampling = internalQueryNumChunksForChunkBasedSampling.load();
@@ -100,6 +100,8 @@ QueryKnobConfiguration::QueryKnobConfiguration(const query_settings::QuerySettin
         internalMaxNumberNodesConsideredForImplicitEdges.load();
     _internalMaxGroupAccumulatorsInSbe = gInternalMaxGroupAccumulatorsInSbe.loadRelaxed();
     _enableJoinEnumerationHJOrderPruning = internalEnableJoinEnumerationHJOrderPruning.load();
+    _enableJoinOptimizationUseIndexUniqueness =
+        internalEnableJoinOptimizationUseIndexUniqueness.load();
     _enablePathArrayness = internalEnablePathArrayness.loadRelaxed();
     _enablePipelineOptimizationAdditionalTestingRules =
         internalEnablePipelineOptimizationAdditionalTestingRules.loadRelaxed();
@@ -107,6 +109,10 @@ QueryKnobConfiguration::QueryKnobConfiguration(const query_settings::QuerySettin
     _internalJoinEnumerateCollScanPlans = internalJoinEnumerateCollScanPlans.loadRelaxed();
     _minAllPlansEnumerationSubsetLevel = internalMinAllPlansEnumerationSubsetLevel.loadRelaxed();
     _maxAllPlansEnumerationSubsetLevel = internalMaxAllPlansEnumerationSubsetLevel.loadRelaxed();
+    _joinSamplingCEMethod =
+        ServerParameterSet::getNodeParameterSet()
+            ->get<JoinSamplingCEMethod>("internalJoinOptimizationSamplingCEMethod")
+            ->_data.get();
 }
 
 QueryFrameworkControlEnum QueryKnobConfiguration::getInternalQueryFrameworkControlForOp() const {
@@ -180,6 +186,10 @@ size_t QueryKnobConfiguration::getInternalMinAllPlansEnumerationSubsetLevel() co
 
 size_t QueryKnobConfiguration::getInternalMaxAllPlansEnumerationSubsetLevel() const {
     return _maxAllPlansEnumerationSubsetLevel;
+}
+
+bool QueryKnobConfiguration::getEnableJoinOptimizationUseIndexUniqueness() const {
+    return _enableJoinOptimizationUseIndexUniqueness;
 }
 
 double QueryKnobConfiguration::getSamplingMarginOfError() const {
@@ -265,6 +275,10 @@ bool QueryKnobConfiguration::getEnablePathArrayness() const {
 
 bool QueryKnobConfiguration::getEnablePipelineOptimizationAdditionalTestingRules() const {
     return _enablePipelineOptimizationAdditionalTestingRules;
+}
+
+SamplingCEMethodEnum QueryKnobConfiguration::getInternalJoinOptimizationSamplingCEMethod() const {
+    return _joinSamplingCEMethod;
 }
 
 }  // namespace mongo

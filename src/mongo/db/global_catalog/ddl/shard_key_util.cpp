@@ -178,13 +178,15 @@ bool validShardKeyIndexExists(OperationContext* opCtx,
         BSONObj currentKey = idx["key"].embeddedObject();
         bool isUnique = idx["unique"].trueValue();
         bool isPrepareUnique = idx["prepareUnique"].trueValue();
+        auto collation = idx["collation"].ok() ? idx["collation"].Obj() : BSONObj();
         uassert(ErrorCodes::InvalidOptions,
                 str::stream() << "can't shard collection '" << nss.toStringForErrorMsg()
-                              << "' with unique index on " << currentKey
-                              << " and proposed shard key " << shardKeyPattern.toBSON()
-                              << ". Uniqueness can't be maintained unless shard key is a prefix",
+                              << "' with unique index on " << currentKey << ", proposed shard key "
+                              << shardKeyPattern.toBSON() << " and collation " << collation
+                              << ". Uniqueness can't be maintained unless shard key is a prefix "
+                                 "and has simple collation",
                 (!isUnique && !isPrepareUnique) ||
-                    shardKeyPattern.isIndexUniquenessCompatible(currentKey));
+                    shardKeyPattern.isIndexUniquenessAndCollationCompatible(currentKey, collation));
     }
 
     // 2. Check for a useful index
@@ -376,6 +378,9 @@ BSONObj validateAndTranslateTimeseriesShardKey(const TimeseriesOptions& tsOption
 }
 
 bool isRawTimeseriesShardKey(const TimeseriesOptions& tsOptions, const BSONObj& tsShardKey) {
+    if (tsShardKey.isEmpty()) {
+        return false;
+    }
     const auto& timeFieldName = tsOptions.getTimeField();
     const auto& metaFieldName = tsOptions.getMetaField();
     for (const auto& elem : tsShardKey) {
@@ -386,7 +391,10 @@ bool isRawTimeseriesShardKey(const TimeseriesOptions& tsOptions, const BSONObj& 
             return false;
         }
     }
-    return true;
+
+    // After checking if any field matches user-facing field names, we need to check if it is a
+    // valid bucket format key to reject invalid keys.
+    return timeseries::createTimeseriesIndexFromBucketsIndexSpec(tsOptions, tsShardKey).has_value();
 }
 
 // TODO: SERVER-64187 move calls to validateShardKeyIsNotEncrypted into

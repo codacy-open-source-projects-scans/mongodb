@@ -57,6 +57,8 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/timestamp_block.h"
 #include "mongo/db/replication_state_transition_lock_guard.h"
+#include "mongo/db/rss/replicated_storage_service.h"
+#include "mongo/db/s/resharding/local_resharding_operations_registry.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_recovery.h"
 #include "mongo/db/service_context.h"
@@ -82,6 +84,7 @@
 #include "mongo/logv2/log_severity_suppressor.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/message.h"
+#include "mongo/s/resharding/resharding_feature_flag_gen.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
@@ -285,7 +288,12 @@ void removeIndexBuildEntryAfterCommitOrAbort(OperationContext* opCtx,
                                              const NamespaceStringOrUUID& dbAndUUID,
                                              const CollectionPtr& indexBuildEntryCollection,
                                              const ReplIndexBuildState& replState) {
-    if (IndexBuildProtocol::kSinglePhase == replState.protocol) {
+    if (IndexBuildProtocol::kTwoPhase != replState.protocol) {
+        return;
+    }
+
+    // TODO SERVER-109664: remove this check since the above protocol check is sufficient
+    if (isPrimaryDrivenIndexBuildEnabled(VersionContext::getDecoration(opCtx))) {
         return;
     }
 
@@ -351,8 +359,15 @@ void onCommitIndexBuild(OperationContext* opCtx,
 
     // Since two phase index builds are allowed to survive replication state transitions, we should
     // check if the node is currently a primary before attempting to write to the oplog.
+    // If we're running Disagg PIT Restore, we don't want to run 'onCommitIndexBuild()' below
+    // because that creates an oplog entry for the commit. We already have an oplog entry that was
+    // written so we want to exit early, as a standby would.
     auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-    if (!replCoord->canAcceptWritesFor(opCtx, nss)) {
+    if (!replCoord->canAcceptWritesFor(opCtx, nss) ||
+        (storageGlobalParams.magicRestore &&
+         !rss::ReplicatedStorageService::get(opCtx->getServiceContext())
+              .getPersistenceProvider()
+              .supportsClassicMagicRestore())) {
         invariant(!shard_role_details::getRecoveryUnit(opCtx)->getCommitTimestamp().isNull(),
                   str::stream() << "commitIndexBuild: " << buildUUID);
         return;
@@ -2619,7 +2634,8 @@ StatusWith<AutoGetCollection> IndexBuildsCoordinator::_autoGetCollectionExclusiv
             LOGV2_DEBUG(7866200,
                         (*logSeveritySuppressor)().toInt(),
                         "Index build: collection lock acquisition timeout, retrying",
-                        "retries"_attr = retryCount);
+                        "retries"_attr = retryCount,
+                        "status"_attr = ex.toStatus());
         }
     }
 }
@@ -2638,13 +2654,26 @@ IndexBuildsCoordinator::_filterSpecsAndRegisterBuild(OperationContext* opCtx,
     CollectionWriter collection(opCtx, autoColl);
 
     const auto& nss = collection.get()->ns();
+    const bool useRegistry =
+        resharding::gFeatureFlagReshardingRegistry.isEnabledUseLatestFCVWhenUninitialized(
+            VersionContext::getDecoration(opCtx),
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
 
     {
         // This check is for optimization purposes only as since this lock is released after this,
         // and is acquired again when we build the index in _setUpIndexBuild.
         auto scopedCss = CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss);
         scopedCss->checkShardVersionOrThrow(opCtx);
-        scopedCss->getCollectionDescription(opCtx).throwIfReshardingInProgress(nss);
+
+        if (opCtx->writesAreReplicated()) {
+            // This check is only meaningful on primaries. Secondaries should defer to the primary's
+            // decision.
+            if (useRegistry) {
+                resharding::throwIfReshardingInProgress(nss);
+            } else {
+                scopedCss->getCollectionDescription(opCtx).throwIfReshardingInProgress(nss);
+            }
+        }
     }
 
     std::vector<IndexBuildInfo> filteredIndexes;
@@ -2766,14 +2795,18 @@ IndexBuildsCoordinator::PostSetupAction IndexBuildsCoordinator::_setUpIndexBuild
                                             indexBuildOptions.commitQuorum.value(),
                                             toIndexNames(replState->getIndexes()));
 
-            try {
-                uassertStatusOK(indexbuildentryhelpers::addIndexBuildEntry(opCtx, indexBuildEntry));
-            } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>& e) {
-                // If config.system.indexBuilds is not found, convert the NamespaceNotFound
-                // exception to an anonymous error code. This is to distinguish from
-                // a NamespaceNotFound exception on the user collection, which callers sometimes
-                // interpret as not being an error condition.
-                uasserted(6325700, e.reason());
+            // TODO SERVER-109664: check against protocol
+            if (indexBuildOptions.indexBuildMethod != IndexBuildMethodEnum::kPrimaryDriven) {
+                try {
+                    uassertStatusOK(
+                        indexbuildentryhelpers::addIndexBuildEntry(opCtx, indexBuildEntry));
+                } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>& e) {
+                    // If config.system.indexBuilds is not found, convert the NamespaceNotFound
+                    // exception to an anonymous error code. This is to distinguish from
+                    // a NamespaceNotFound exception on the user collection, which callers sometimes
+                    // interpret as not being an error condition.
+                    uasserted(6325700, e.reason());
+                }
             }
 
             opCtx->getServiceContext()->getOpObserver()->onStartIndexBuild(
@@ -3459,7 +3492,11 @@ void IndexBuildsCoordinator::_buildPrimaryDrivenIndex(
         isPrimary = true;
     }
 
-    if (isPrimary) {
+    // When in Disagg magic restore, although technically the node is in the primary state, it is
+    // processing oplog entries that it has fetched, as a standby would. For that reason when we're
+    // in Disagg magic restore we take the codepath that a standby would take as we want
+    // standby-like behavior.
+    if (isPrimary && !storageGlobalParams.magicRestore) {
         // The collection scan might read with a kMajorityCommitted read source, but will restore
         // kNoTimestamp afterwards.
         _scanCollectionAndInsertSortedKeysIntoIndex(opCtx, replState);
@@ -4043,12 +4080,14 @@ std::vector<IndexBuildInfo> IndexBuildsCoordinator::prepareSpecListForCreate(
     for (const auto& indexBuildInfo : filteredIndexes) {
         const BSONObj& spec = indexBuildInfo.spec;
         if (spec[kUniqueFieldName].trueValue() || spec[kPrepareUniqueFieldName].trueValue()) {
+            auto collation = spec["collation"].ok() ? spec["collation"].Obj() : BSONObj();
             uassert(
                 ErrorCodes::CannotCreateIndex,
                 str::stream() << "cannot create index with 'unique' or 'prepareUnique' option over "
                               << spec[kKeyFieldName].Obj() << " with shard key pattern "
-                              << shardKeyPattern.toBSON(),
-                shardKeyPattern.isIndexUniquenessCompatible(spec[kKeyFieldName].Obj()));
+                              << shardKeyPattern.toBSON() << " and collation " << collation,
+                shardKeyPattern.isIndexUniquenessAndCollationCompatible(spec[kKeyFieldName].Obj(),
+                                                                        collation));
         }
     }
 

@@ -157,6 +157,14 @@ public:
     /// Returns BSON("" << *this)
     BSONObj toBSON() const;
 
+    /**
+     * Hash function compatible with absl::Hash for absl::unordered_{map,set}
+     */
+    template <typename H>
+    friend H AbslHashValue(H h, const Timestamp& ts) {
+        return H::combine(std::move(h), ts.secs, ts.i);
+    }
+
 private:
     std::tuple<unsigned, unsigned> tie() const {
         return std::tie(secs, i);
@@ -175,3 +183,12 @@ inline StringBuilder& operator<<(StringBuilder& s, const Timestamp& t) {
 }
 
 }  // namespace mongo
+
+namespace fmt {
+template <>
+struct formatter<mongo::Timestamp> : formatter<std::string_view> {
+    auto format(const mongo::Timestamp& t, auto& ctx) const {
+        return fmt::format_to(ctx.out(), "Timestamp({}, {})", t.getSecs(), t.getInc());
+    }
+};
+}  // namespace fmt

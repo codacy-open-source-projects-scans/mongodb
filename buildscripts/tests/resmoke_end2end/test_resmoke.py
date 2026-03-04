@@ -691,6 +691,19 @@ class TestExceptionExtraction(unittest.TestCase):
 
         expected = """The following tests failed (with exit code):
         buildscripts/tests/resmoke_end2end/failtestfiles/python_failure.py (1 DB Exception)
+            Traceback (most recent call last):"""
+
+        assert expected in output
+
+    def test_resmoke_python_exception_truncated(self):
+        resmoke_args = [
+            "--suites=buildscripts/tests/resmoke_end2end/suites/resmoke_failing_python.yml",
+            "--maxExceptionLength=10",
+        ]
+        output = execute_resmoke(resmoke_args).stdout
+
+        expected = """The following tests failed (with exit code):
+        buildscripts/tests/resmoke_end2end/failtestfiles/python_failure.py (1 DB Exception)
             [LAST Part of Exception]"""
 
         assert expected in output
@@ -811,16 +824,13 @@ class TestEvergreenYML(unittest.TestCase):
 
     def validate_jstestfuzz_selector(self, suite_names):
         for suite_name in suite_names:
-            if not suite_name.startswith(
-                "//"
-            ):  # Ignore suites that are run via bazel. TODO: SERVER-104460
-                suite_config = suitesconfig.get_suite(suite_name).get_config()
-                expected_selector = ["jstestfuzz/out/*.js"]
-                self.assertEqual(
-                    suite_config["selector"]["roots"],
-                    expected_selector,
-                    msg=f"The jstestfuzz selector for {suite_name} did not match 'jstestfuzz/out/*.js'",
-                )
+            suite_config = suitesconfig.get_suite(suite_name).get_config()
+            expected_selector = ["jstestfuzz/out/*.js"]
+            self.assertEqual(
+                suite_config["selector"]["roots"],
+                expected_selector,
+                msg=f"The jstestfuzz selector for {suite_name} did not match 'jstestfuzz/out/*.js'",
+            )
 
     # This test asserts that the jstestfuzz tasks uploads the the URL we expect it to
     # If the remote url changes, also change it in the _log_local_resmoke_invocation method

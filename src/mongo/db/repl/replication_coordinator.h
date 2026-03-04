@@ -455,8 +455,10 @@ public:
      * corresponding to that OpTime.
      *
      * When rollbackSafe is true, this returns an empty OpTimeAndWallTime if the node is in ROLLBACK
-     * state. The lastWrittenOpTime during ROLLBACK might be temporarily pointing to an oplog entry
-     * in the divergent branch of history which would become invalid after the rollback finishes.
+     * or REMOVED state. The lastWrittenOpTime during a rollback might be temporarily pointing to an
+     * oplog entry in the divergent branch of history which would become invalid after the rollback
+     * finishes. A node may transition into removed state during a rollback, so an empty time is
+     * returned in this case as well.
      */
     virtual OpTimeAndWallTime getMyLastWrittenOpTimeAndWallTime(
         bool rollbackSafe = false) const = 0;
@@ -497,6 +499,14 @@ public:
      */
     virtual Status waitUntilOpTimeForRead(OperationContext* opCtx,
                                           const ReadConcernArgs& settings) = 0;
+
+    /**
+     * Registers a waiter for the given opTime to be majority available.
+     *
+     * If the opTime given is already visible then this will return an immediately fulfilled future.
+     */
+    virtual SharedSemiFuture<void> registerWaiterForMajorityReadOpTime(OperationContext* opCtx,
+                                                                       OpTime targetOpTime) = 0;
 
     /**
      * Waits until the deadline or until the optime of the current node is at least the opTime
@@ -1070,7 +1080,7 @@ public:
     /**
      * Returns true if logOp() should not append an entry to the oplog for this operation.
      */
-    bool isOplogDisabledFor(OperationContext* opCtx, const NamespaceString& nss) const;
+    virtual bool isOplogDisabledFor(OperationContext* opCtx, const NamespaceString& nss) const;
 
     /**
      * Returns true if logOp() should never append an entry to the oplog for this namespace. logOp()

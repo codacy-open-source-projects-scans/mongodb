@@ -109,7 +109,7 @@
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/topology/cluster_role.h"
-#include "mongo/db/transaction/transaction_participant.h"
+#include "mongo/db/transaction/retryable_write_util.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/connection_pool_stats.h"
 #include "mongo/executor/remote_command_request.h"
@@ -447,6 +447,7 @@ ReplicationCoordinatorImpl::ReplicationCoordinatorImpl(
       _replicationWaiterList(replicationWaiterListMetric),
       _lastAppliedOpTimeWaiterList(opTimeWaiterListMetric),
       _lastWrittenOpTimeWaiterList(opTimeWaiterListMetric),
+      _majorityReadWaiterList(opTimeWaiterListMetric),
       _inShutdown(false),
       _memberState(MemberState::RS_STARTUP),
       _rsConfigState(kConfigPreStart),
@@ -1222,6 +1223,8 @@ void ReplicationCoordinatorImpl::shutdown(OperationContext* opCtx,
             lk, {ErrorCodes::ShutdownInProgress, "Replication is being shut down"});
         _lastWrittenOpTimeWaiterList.setErrorAll(
             lk, {ErrorCodes::ShutdownInProgress, "Replication is being shut down"});
+        _majorityReadWaiterList.setErrorAll(
+            lk, {ErrorCodes::ShutdownInProgress, "Replication is being shut down"});
         _currentCommittedSnapshotCond.notify_all();
         _initialSyncer.swap(initialSyncerCopy);
     }
@@ -1751,7 +1754,10 @@ OpTime ReplicationCoordinatorImpl::getMyLastWrittenOpTime() const {
 OpTimeAndWallTime ReplicationCoordinatorImpl::getMyLastWrittenOpTimeAndWallTime(
     bool rollbackSafe) const {
     stdx::lock_guard lock(_mutex);
-    if (rollbackSafe && _getMemberState(lock).rollback()) {
+    // A node rolling back may be removed from the cluster, in which case it is still not safe to
+    // return the opTime from the oplog here. So, in the rollbackSafe case we do not return the time
+    // if we are in rollback OR removed state.
+    if (rollbackSafe && (_getMemberState(lock).rollback() || _getMemberState(lock).removed())) {
         return {};
     }
     return _getMyLastWrittenOpTimeAndWallTime(lock);
@@ -1792,6 +1798,26 @@ Status ReplicationCoordinatorImpl::_validateReadConcern(OperationContext* opCtx,
     }
 
     return Status::OK();
+}
+
+SharedSemiFuture<void> ReplicationCoordinatorImpl::registerWaiterForMajorityReadOpTime(
+    OperationContext* opCtx, OpTime targetOpTime) {
+    uassert(ErrorCodes::CommandNotSupported,
+            "Current storage engine does not support majority committed reads",
+            _externalState->snapshotsEnabled());
+
+    std::unique_lock lk(_mutex);
+
+    uassert(ErrorCodes::ShutdownInProgress, "Shutdown in progress", !_inShutdown);
+
+    // If the current majority timestamp is already inclusive of the given target opTime then it
+    // means the waiter can immediately return.
+    if (_currentCommittedSnapshot >= targetOpTime) {
+        return SemiFuture<void>::makeReady().share();
+    }
+
+    auto [future, handle] = _majorityReadWaiterList.add(lk, targetOpTime);
+    return std::move(future);
 }
 
 Status ReplicationCoordinatorImpl::waitUntilOpTimeForRead(OperationContext* opCtx,
@@ -5646,6 +5672,13 @@ bool ReplicationCoordinatorImpl::_updateCommittedSnapshot(WithLock lk,
     // Wake up any threads waiting for read concern or write concern.
     if (_externalState->snapshotsEnabled() && _currentCommittedSnapshot) {
         _wakeReadyWaiters(lk, _currentCommittedSnapshot);
+
+        _majorityReadWaiterList.setValueIf(
+            lk,
+            [&](WithLock, const OpTime& targetOpTime, const SharedWaiterHandle&) -> bool {
+                return _currentCommittedSnapshot >= targetOpTime;
+            },
+            _currentCommittedSnapshot);
     }
     return true;
 }
@@ -5848,12 +5881,7 @@ void ReplicationCoordinatorImpl::clearSyncSource() {
 }
 
 bool ReplicationCoordinatorImpl::isRetryableWrite(OperationContext* opCtx) const {
-    if (!opCtx->writesAreReplicated() || !opCtx->isRetryableWrite()) {
-        return false;
-    }
-    auto txnParticipant = TransactionParticipant::get(opCtx);
-    return txnParticipant &&
-        (!opCtx->inMultiDocumentTransaction() || txnParticipant.transactionIsOpen());
+    return retryable_write_util::isRetryableWrite(opCtx);
 }
 
 boost::optional<UUID> ReplicationCoordinatorImpl::getInitialSyncId(OperationContext* opCtx) {
