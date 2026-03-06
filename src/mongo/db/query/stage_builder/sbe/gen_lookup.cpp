@@ -1681,8 +1681,8 @@ std::pair<SbStage, PlanStageSlots> generateJoinResult(const BinaryJoinEmbeddingN
         if (!fieldEffect.isAllowedField(field)) {
             paths.emplace_back(field);
             nodes.emplace_back(ProjectNode::Drop{});
-        } else if ((!node->rightEmbeddingField || field != node->rightEmbeddingField->fullPath()) &&
-                   (!node->leftEmbeddingField || field != node->leftEmbeddingField->fullPath())) {
+        } else if ((!node->rightEmbeddingField || !node->rightEmbeddingField->isPrefixOf(field)) &&
+                   (!node->leftEmbeddingField || !node->leftEmbeddingField->isPrefixOf(field))) {
             // This field is not one of the embeddings, so it must be propagated from a child stream
             // that is not embedded.
             paths.emplace_back(field);
@@ -1802,13 +1802,13 @@ collectRequestedFields(const BinaryJoinEmbeddingNode* node,
         // If this side is not embedded, forward all the requested fields to it, provided that:
         // 1) this side if the main collection or the field is an explicit output of this side
         // 2) the field is not listed as one of the outputs of the other side
-        // 3) the field is not the embedding of the other side
+        // 3) the field doesn't start from the embedding of the other side
         if (!thisEmbedding) {
             for (auto& field : reqs.getFields()) {
                 if ((childHoldsMainCollection ||
                      (childFieldEffect && childFieldEffect->isAllowedField(field))) &&
                     (!otherChildFieldEffect || !otherChildFieldEffect->isAllowedField(field)) &&
-                    (!otherEmbedding || field != *otherEmbedding)) {
+                    (!otherEmbedding || !otherEmbedding->isPrefixOf(field))) {
                     targetSet.insert(field);
                 }
             }
@@ -2061,6 +2061,15 @@ std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::buildHashJoinEmbedding
         }
     }
 
+    boost::optional<size_t> estimatedBuildCardinality = boost::none;
+
+    if (_estimates) {
+        if (auto it = _estimates->find(hashJoinEmbeddingNode->children[0].get());
+            it != _estimates->end()) {
+            estimatedBuildCardinality = static_cast<size_t>(it->second.outCE.toDouble());
+        }
+    }
+
     // Build the HashJoin stage that implements the hash join.
     auto hashJoinStage = b.makeHashJoin(std::move(rightPrjStage),
                                         std::move(leftPrjStage),
@@ -2068,7 +2077,8 @@ std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::buildHashJoinEmbedding
                                         rightProjectSlots,
                                         leftPrjOutputs,
                                         leftProjectSlots,
-                                        boost::none);
+                                        boost::none,
+                                        estimatedBuildCardinality);
 
     // If there is at least one $expr equality, insert an extra filter layer that excludes records
     // matching due to treating missing values equal to 'null'.
