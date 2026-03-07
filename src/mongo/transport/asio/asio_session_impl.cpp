@@ -65,6 +65,7 @@ MONGO_FAIL_POINT_DEFINE(asioTransportLayerBlockBeforeAddSession);
 MONGO_FAIL_POINT_DEFINE(clientIsConnectedToLoadBalancerPort);
 MONGO_FAIL_POINT_DEFINE(clientIsLoadBalancedPeer);
 MONGO_FAIL_POINT_DEFINE(isConnectedToProxyUnixSocketOverride);
+MONGO_FAIL_POINT_DEFINE(skipProxyProtocolParsing);
 
 namespace {
 
@@ -234,7 +235,21 @@ CommonAsioSession::CommonAsioSession(
     }
 
     try {
-        _remote = HostAndPort(_remoteAddr.toString(true));
+        auto makeUnixRemote = [&] {
+#ifndef _WIN32
+            const int unixSockPort = parsePortFromUnixSockPath(_localAddr.toString(true));
+            if (unixSockPort == -1) {
+                return HostAndPort(_remoteAddr.toString(true));
+            }
+            // Unix socket paths are not in host:port format, so the HostAndPort ctor can't parse
+            // the port. Explicitly specify the port instead.
+            return HostAndPort(_remoteAddr.toString(false), unixSockPort);
+#else
+            return HostAndPort(_remoteAddr.toString(true));
+#endif
+        };
+
+        _remote = _remoteAddr.isIP() ? HostAndPort(_remoteAddr.toString(true)) : makeUnixRemote();
         _restrictionEnvironment = RestrictionEnvironment(_remoteAddr, _localAddr);
     } catch (...) {
         LOGV2_DEBUG(9079003,
@@ -531,6 +546,10 @@ auto CommonAsioSession::getSocket() -> GenericSocket& {
 }
 
 ExecutorFuture<void> CommonAsioSession::parseProxyProtocolHeader(const ReactorHandle& reactor) {
+    if (MONGO_unlikely(skipProxyProtocolParsing.shouldFail())) {
+        return ExecutorFuture<void>(reactor);
+    }
+
     invariant(_isIngressSession);
     invariant(reactor);
     const Backoff kExponentialBackoff(Milliseconds(gProxyProtocolMaximumWaitBackoffMillis.load()),
@@ -869,6 +888,16 @@ Future<bool> CommonAsioSession::maybeHandshakeSSLForIngress(const MutableBufferS
         return Future<bool>::makeReady(false);
     }
 
+    // If the client is communicating to the server's unix domain socket, then the server
+    // should allow either a TLS handshake or plaintext irrespective of the server's
+    // TLS mode.
+    const bool isUnixDomainSockConn = [this]() {
+#ifndef _WIN32
+        return isUnixDomainSocket(local().host());
+#endif
+        return false;
+    }();
+
     if (maybeProxyProtocolHeader(
             StringData(static_cast<const char*>(buffer.data()), buffer.size()))) {
         // Protocol requirements mean that neither raw mongorpc nor TLS client hello will look like
@@ -943,11 +972,24 @@ Future<bool> CommonAsioSession::maybeHandshakeSSLForIngress(const MutableBufferS
             return Future<bool>::makeReady(true);
         });
     } else if (_tl->sslMode() == SSLParams::SSLMode_requireSSL) {
+        if (isUnixDomainSockConn) {
+            LOGV2_DEBUG(11772800,
+                        1,
+                        "Allowing no-TLS ingress connection on Unix Domain socket with SSL mode "
+                        "set to 'required'",
+                        "connectionId"_attr = id(),
+                        "local"_attr = local(),
+                        "remote"_attr = remote());
+            return Future<bool>::makeReady(false);
+        }
+
         uasserted(ErrorCodes::SSLHandshakeFailed,
                   "The server is configured to only allow SSL connections");
     } else {
+        // Plaintext connections to unix domain sockets are expected regardless of the server's
+        // TLS mode, so omit logging here to prevent noise.
         if (!sslGlobalParams.disableNonSSLConnectionLogging &&
-            _tl->sslMode() == SSLParams::SSLMode_preferSSL) {
+            _tl->sslMode() == SSLParams::SSLMode_preferSSL && !isUnixDomainSockConn) {
             LOGV2(23838,
                   "SSL mode is set to 'preferred' and connection to remote is not using SSL.",
                   "connectionId"_attr = id(),

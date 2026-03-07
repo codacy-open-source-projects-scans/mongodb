@@ -52,11 +52,9 @@ render_template(
     name = "feature_flag_test_tpl",
     srcs = [
         "feature_flag_test.idl.tpl",
-        "//buildscripts:cheetah_source_generator.py",
         "//src/mongo/util/version:releases.yml",
     ],
     cmd = [
-        "$(location //buildscripts:cheetah_source_generator.py)",
         "-o",
         "$(location feature_flag_test.idl)",
         "$(location feature_flag_test.idl.tpl)",
@@ -64,6 +62,7 @@ render_template(
         "$(MONGO_VERSION)",
     ],
     output = "feature_flag_test.idl",
+    python_file = "//buildscripts:cheetah_source_generator.py",
     python_libs = [
         dependency(
             "ct3",
@@ -545,6 +544,7 @@ mongo_cc_library(
         "//src/mongo/db/s:transaction_coordinator_worker_curop_repository.cpp",
         "//src/mongo/db/shard_role:direct_shard_client_tracker.cpp",
         "//src/mongo/db/shard_role:transaction_resources.cpp",
+        "//src/mongo/db/shard_role/ddl:ddl_lock_manager.cpp",
         "//src/mongo/db/shard_role/ddl:replica_set_ddl_tracker.cpp",
         "//src/mongo/db/shard_role/lock_manager:dump_lock_manager_impl.cpp",
         "//src/mongo/db/shard_role/shard_catalog:collection_metadata.cpp",
