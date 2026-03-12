@@ -66,7 +66,7 @@ MONGO_FAIL_POINT_DEFINE(asioTransportLayerBlockBeforeAddSession);
 MONGO_FAIL_POINT_DEFINE(clientIsConnectedToLoadBalancerPort);
 MONGO_FAIL_POINT_DEFINE(clientIsLoadBalancedPeer);
 MONGO_FAIL_POINT_DEFINE(isConnectedToProxyUnixSocketOverride);
-MONGO_FAIL_POINT_DEFINE(skipProxyProtocolParsing);
+MONGO_FAIL_POINT_DEFINE(proxyUnixDomainSocketPeerCredentialValidationOverride);
 
 namespace {
 
@@ -236,21 +236,7 @@ CommonAsioSession::CommonAsioSession(
     }
 
     try {
-        auto makeUnixRemote = [&] {
-#ifndef _WIN32
-            const int unixSockPort = parsePortFromUnixSockPath(_localAddr.toString(true));
-            if (unixSockPort == -1) {
-                return HostAndPort(_remoteAddr.toString(true));
-            }
-            // Unix socket paths are not in host:port format, so the HostAndPort ctor can't parse
-            // the port. Explicitly specify the port instead.
-            return HostAndPort(_remoteAddr.toString(false), unixSockPort);
-#else
-            return HostAndPort(_remoteAddr.toString(true));
-#endif
-        };
-
-        _remote = _remoteAddr.isIP() ? HostAndPort(_remoteAddr.toString(true)) : makeUnixRemote();
+        _remote = HostAndPort(_remoteAddr.toString(true));
         _restrictionEnvironment = RestrictionEnvironment(_remoteAddr, _localAddr);
     } catch (...) {
         LOGV2_DEBUG(9079003,
@@ -290,6 +276,29 @@ bool CommonAsioSession::isLoadBalancerPeer() const {
 bool CommonAsioSession::isConnectedToProxyUnixSocket() const {
     return _isConnectedToProxyUnixSocket ||
         MONGO_unlikely(isConnectedToProxyUnixSocketOverride.shouldFail());
+}
+
+Status CommonAsioSession::validateProxyUnixSocketPeerPermissions() {
+#ifndef _WIN32
+    if (auto fp = proxyUnixDomainSocketPeerCredentialValidationOverride.scoped();
+        MONGO_unlikely(fp.isActive()))
+        if (auto data = fp.getData()["data"]; data.ok())
+            if (auto code = data["code"]; code.ok())
+                return Status(static_cast<ErrorCodes::Error>(code.numberInt()), "Failpoint result");
+
+    struct ucred credentials;
+    auto handle = getSocket().native_handle();
+    socklen_t optLen = sizeof(credentials);
+    if (::getsockopt(handle, SOL_SOCKET, SO_PEERCRED, &credentials, &optLen) != 0)
+        return Status(ErrorCodes::InternalError, errorMessage(lastSocketError()));
+    auto expectedUid = ::geteuid();
+    if (expectedUid != credentials.uid)
+        return Status(ErrorCodes::Unauthorized,
+                      fmt::format("Proxy unix domain socket peer UID mismatch: expected {}, got {}",
+                                  expectedUid,
+                                  credentials.uid));
+#endif
+    return Status::OK();
 }
 
 void CommonAsioSession::setisLoadBalancerPeer(bool helloHasLoadBalancedOption) {
@@ -547,10 +556,6 @@ auto CommonAsioSession::getSocket() -> GenericSocket& {
 }
 
 ExecutorFuture<void> CommonAsioSession::parseProxyProtocolHeader(const ReactorHandle& reactor) {
-    if (MONGO_unlikely(skipProxyProtocolParsing.shouldFail())) {
-        return ExecutorFuture<void>(reactor);
-    }
-
     invariant(_isIngressSession);
     invariant(reactor);
     const Backoff kExponentialBackoff(Milliseconds(gProxyProtocolMaximumWaitBackoffMillis.load()),
