@@ -1051,6 +1051,8 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
           // Sanitize storage engine options to remove options which might not apply to this node.
           // See SERVER-68122.
           auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+          const bool shouldGenerateInternalIdents =
+              oplogEntry.indexBuildMethod == IndexBuildMethodEnum::kHybrid;
           for (auto& indexBuildInfo : oplogEntry.indexes) {
               indexBuildInfo.spec =
                   getObjWithSanitizedStorageEngineOptions(opCtx, indexBuildInfo.spec);
@@ -1058,7 +1060,9 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
                   indexBuildInfo.indexIdent =
                       storageEngine->generateNewIndexIdent(entry.getNss().dbName());
               }
-              indexBuildInfo.setInternalIdents(*storageEngine);
+              if (shouldGenerateInternalIdents) {
+                  indexBuildInfo.setInternalIdents(*storageEngine);
+              }
           }
 
           IndexBuildsCoordinator::ApplicationMode applicationMode =
@@ -2777,7 +2781,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
         }
         default: {
             // Commands are processed in applyCommand_inlock().
-            invariant(false, str::stream() << "Unsupported opType " << OpType_serializer(opType));
+            invariant(false, str::stream() << "Unsupported opType " << idl::serialize(opType));
         }
     }
 
@@ -2841,8 +2845,7 @@ Status applyContainerOperation_inlock(OperationContext* opCtx,
         }
         default:
             uasserted(10704705,
-                      str::stream()
-                          << "Unsupported opType: " << OpType_serializer(op->getOpType()));
+                      str::stream() << "Unsupported opType: " << idl::serialize(op->getOpType()));
     }
 
     if (!s.isOK())

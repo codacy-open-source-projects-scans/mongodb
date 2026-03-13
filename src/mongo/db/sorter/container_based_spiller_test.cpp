@@ -574,16 +574,17 @@ TEST_P(ContainerBasedSpillerTest, Spill) {
         stats,
         ns.dbName(),
         sorter::kLatestChecksumVersion,
-        /*batchSize=*/GetParam()};
+        /*batchSize=*/GetParam(),
+        testSpillingMinAvailableDiskSpaceBytes};
 
     std::vector<std::pair<IntWrapper, NullValue>> data{{50, {}}, {100, {}}, {75, {}}, {125, {}}};
     std::span span{data};
 
-    auto it1 = spiller.spill(SortOptions{},
+    auto it1 = spiller.spill(SortOptions{}.TempDir("/tmp"),
                              SorterSpiller<IntWrapper, NullValue, IWComparator>::Settings{},
                              span.subspan(0, 2),
                              0);
-    auto it2 = spiller.spill(SortOptions{},
+    auto it2 = spiller.spill(SortOptions{}.TempDir("/tmp"),
                              SorterSpiller<IntWrapper, NullValue, IWComparator>::Settings{},
                              span.subspan(2, 2),
                              0);
@@ -621,7 +622,8 @@ TEST_P(ContainerBasedSpillerTest, MergeSpills) {
         containerStats,
         ns.dbName(),
         sorter::kLatestChecksumVersion,
-        /*batchSize=*/GetParam()};
+        /*batchSize=*/GetParam(),
+        testSpillingMinAvailableDiskSpaceBytes};
 
     std::vector<std::pair<IntWrapper, NullValue>> data{
         {50, {}}, {100, {}}, {75, {}}, {125, {}}, {25, {}}};
@@ -629,23 +631,23 @@ TEST_P(ContainerBasedSpillerTest, MergeSpills) {
 
     std::vector<std::shared_ptr<sorter::Iterator<IntWrapper, NullValue>>> iterators;
     iterators.push_back(
-        spiller.spill(SortOptions{},
+        spiller.spill(SortOptions{}.TempDir("/tmp"),
                       SorterSpiller<IntWrapper, NullValue, IWComparator>::Settings{},
                       span.subspan(0, 2),
                       0));
     iterators.push_back(
-        spiller.spill(SortOptions{},
+        spiller.spill(SortOptions{}.TempDir("/tmp"),
                       SorterSpiller<IntWrapper, NullValue, IWComparator>::Settings{},
                       span.subspan(2, 2),
                       0));
     iterators.push_back(
-        spiller.spill(SortOptions{},
+        spiller.spill(SortOptions{}.TempDir("/tmp"),
                       SorterSpiller<IntWrapper, NullValue, IWComparator>::Settings{},
                       span.subspan(4, 1),
                       0));
 
     SorterStats sorterStats{nullptr};
-    spiller.mergeSpills(SortOptions{},
+    spiller.mergeSpills(SortOptions{}.TempDir("/tmp"),
                         SorterSpiller<IntWrapper, NullValue, IWComparator>::Settings{},
                         sorterStats,
                         iterators,
@@ -693,7 +695,8 @@ TEST_P(ContainerBasedSpillerTest, MergeSpillsMultiplePasses) {
         containerStats,
         ns.dbName(),
         sorter::kLatestChecksumVersion,
-        /*batchSize=*/GetParam()};
+        /*batchSize=*/GetParam(),
+        testSpillingMinAvailableDiskSpaceBytes};
 
     std::vector<std::pair<IntWrapper, NullValue>> data{{50, {}},
                                                        {100, {}},
@@ -710,14 +713,14 @@ TEST_P(ContainerBasedSpillerTest, MergeSpillsMultiplePasses) {
     std::vector<std::shared_ptr<sorter::Iterator<IntWrapper, NullValue>>> iterators;
     for (size_t i = 0; i < data.size(); ++i) {
         iterators.push_back(
-            spiller.spill(SortOptions{},
+            spiller.spill(SortOptions{}.TempDir("/tmp"),
                           SorterSpiller<IntWrapper, NullValue, IWComparator>::Settings{},
                           span.subspan(i, 1),
                           0));
     }
 
     SorterStats sorterStats{nullptr};
-    spiller.mergeSpills(SortOptions{},
+    spiller.mergeSpills(SortOptions{}.TempDir("/tmp"),
                         SorterSpiller<IntWrapper, NullValue, IWComparator>::Settings{},
                         sorterStats,
                         iterators,

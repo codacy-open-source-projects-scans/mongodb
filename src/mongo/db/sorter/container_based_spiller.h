@@ -36,6 +36,7 @@
 #include "mongo/db/storage/container.h"
 #include "mongo/db/storage/ident.h"
 #include "mongo/db/storage/recovery_unit.h"
+#include "mongo/db/storage/spill_util.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/util/assert_util.h"
@@ -371,10 +372,12 @@ public:
                           SorterContainerStats& stats,
                           boost::optional<DatabaseName> dbName,
                           SorterChecksumVersion checksumVersion,
-                          int64_t batchSize)
+                          int64_t batchSize,
+                          int64_t minAvailableDiskBytesToSpill)
         : SorterSpillerBase<Key, Value, Comparator>(
               std::make_unique<ContainerBasedSorterStorage<Key, Value>>(
-                  opCtx, ru, collection, container, stats, 1, std::move(dbName), checksumVersion)),
+                  opCtx, ru, collection, container, stats, 1, std::move(dbName), checksumVersion),
+              minAvailableDiskBytesToSpill),
           _opCtx(opCtx),
           _batchSize(batchSize) {}
 
@@ -391,10 +394,17 @@ public:
             for (size_t i = 0; i < oldIters.size(); i += numParallelSpills) {
                 auto count = std::min(numParallelSpills, oldIters.size() - i);
                 auto spillsToMerge = std::span(oldIters).subspan(i, count);
+
+                // For container-based spilling we append merged data back into the same container
+                // range, so we rely on _minAvailableDiskBytesToSpill as a lower bound instead of
+                // estimating per-merge byte usage.
+                uassertStatusOK(ensureSufficientDiskSpaceForSpilling(
+                    *opts.tempDir, static_cast<int64_t>(this->_minAvailableDiskBytesToSpill)));
+
                 auto mergeIterator = sorter::merge<Key, Value>(spillsToMerge, opts, comp);
                 auto writer = this->_storage->makeWriter(opts, settings);
 
-                int64_t deleteRangeStart = spillsToMerge.front()->getRange().getStartOffset();
+                int64_t deleteRangeStart = spillsToMerge.front()->getRange().getStart();
                 int64_t deleteRangeEnd = validateMergeSpillRanges<Key, Value>(spillsToMerge);
                 const int64_t numSourceRows = deleteRangeEnd - deleteRangeStart;
 

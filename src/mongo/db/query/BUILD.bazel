@@ -260,16 +260,6 @@ idl_generator(
 )
 
 mongo_cc_library(
-    name = "spill_util",
-    srcs = [
-        "//src/mongo/db/query/util:spill_util.cpp",
-    ],
-    deps = [
-        "//src/mongo/db/storage:disk_space_util",
-    ],
-)
-
-mongo_cc_library(
     name = "on_parameter_change_updaters",
     srcs = [
         "//src/mongo/db/query/plan_cache:sbe_plan_cache_on_parameter_change.cpp",
@@ -365,6 +355,20 @@ mongo_cc_library(
         "//src/mongo/db/query/compiler/physical_model/query_solution",
         "//src/mongo/db/query/plan_cache:query_plan_cache",
         "//src/third_party/s2",
+    ],
+)
+
+mongo_cc_library(
+    name = "query_planner_params",
+    srcs = [
+        "query_planner_params.cpp",
+        "wildcard_multikey_paths.cpp",
+    ],
+    deps = [
+        "collection_query_info",
+        "query_planner",
+        "//src/mongo/s/query:sharding_helpers",
+        "//src/mongo/s/query/exec:target_write_op",
     ],
 )
 
@@ -561,6 +565,21 @@ mongo_cc_library(
         ":canonical_query_base",
         ":query_test_service_context",
         "//src/mongo:base",
+    ],
+)
+
+mongo_cc_library(
+    name = "engine_selection",
+    srcs = [
+        "engine_selection.cpp",
+        "engine_selection_plan.cpp",
+        "//src/mongo/db/pipeline:sbe_pushdown.cpp",
+    ],
+    deps = [
+        "canonical_query_base",
+        "query_planner",
+        "query_planner_params",
+        "//src/mongo/db/pipeline",
     ],
 )
 
