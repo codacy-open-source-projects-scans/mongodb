@@ -33,6 +33,7 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/shard_role/shard_catalog/collection.h"
 #include "mongo/db/sorter/sorter.h"
+#include "mongo/db/sorter/sorter_template_defs.h"
 #include "mongo/db/storage/container.h"
 #include "mongo/db/storage/ident.h"
 #include "mongo/db/storage/recovery_unit.h"
@@ -322,22 +323,11 @@ public:
     };
 
     std::string getStorageIdentifier() override {
-        MONGO_UNIMPLEMENTED_TASSERT(11374701);
+        return _container.ident()->getIdent();
     };
 
     void keep() override {
         MONGO_UNIMPLEMENTED_TASSERT(11374702);
-    };
-
-    boost::optional<boost::filesystem::path> getSpillDirPath() override {
-        auto ident = _container.ident();
-        invariant(ident);
-        auto dir = ident::getDirectory(ident->getIdent());
-        boost::filesystem::path path{storageGlobalParams.dbpath};
-        if (!dir.empty()) {
-            path /= std::string{dir};
-        }
-        return path;
     };
 
     /**
@@ -399,7 +389,8 @@ public:
                 // range, so we rely on _minAvailableDiskBytesToSpill as a lower bound instead of
                 // estimating per-merge byte usage.
                 uassertStatusOK(ensureSufficientDiskSpaceForSpilling(
-                    *opts.tempDir, static_cast<int64_t>(this->_minAvailableDiskBytesToSpill)));
+                    this->getSpillDir(),
+                    static_cast<int64_t>(this->_minAvailableDiskBytesToSpill)));
 
                 auto mergeIterator = sorter::merge<Key, Value>(spillsToMerge, opts, comp);
                 auto writer = this->_storage->makeWriter(opts, settings);
@@ -433,6 +424,16 @@ public:
             oldIters.clear();
         }
     }
+
+    boost::filesystem::path getSpillDir() override {
+        std::string storageIdentifier = this->getStorage().getStorageIdentifier();
+        auto dir = ident::getDirectory(storageIdentifier);
+        boost::filesystem::path path{storageGlobalParams.dbpath};
+        if (!dir.empty()) {
+            path /= std::string{dir};
+        }
+        return path;
+    };
 
 private:
     ContainerBasedSorterStorage<Key, Value>& _containerBasedStorage() {

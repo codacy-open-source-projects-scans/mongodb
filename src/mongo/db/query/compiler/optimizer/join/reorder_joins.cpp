@@ -450,7 +450,7 @@ PerSubsetLevelEnumerationMode makeRandomizedEnumerationHint(
     };
 
     // Pick the shape of the tree & the join methods used.
-    std::vector<PerSubsetLevelEnumerationMode::SubsetLevelMode> modes;
+    std::vector<SubsetLevelMode> modes;
     modes.reserve(nodes.size());
     size_t level = 0;
     NodeSet prevSubset;
@@ -459,10 +459,11 @@ PerSubsetLevelEnumerationMode makeRandomizedEnumerationHint(
         bool isLeftChild = pickChildSide();
         auto method =
             overrideMethod ? *overrideMethod : pickMethod(node, prevSubset, isLeftChild, level);
-        modes.push_back(
-            {.level = level,
-             .mode = PlanEnumerationMode::HINTED,
-             .hint = JoinHint{.node = node, .method = method, .isLeftChild = isLeftChild}});
+        modes.push_back({level,
+                         // When a plan is fully hinted, we only have one option at each subset
+                         // anyway- pick the cheapest one.
+                         PlanEnumerationMode::CHEAPEST,
+                         JoinHint{.node = node, .method = method, .isLeftChild = isLeftChild}});
         level++;
         prevSubset.set(node);
     }

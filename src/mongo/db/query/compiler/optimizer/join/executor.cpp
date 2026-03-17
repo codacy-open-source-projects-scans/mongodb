@@ -36,6 +36,7 @@
 #include "mongo/db/query/compiler/optimizer/join/agg_join_model.h"
 #include "mongo/db/query/compiler/optimizer/join/cardinality_estimator.h"
 #include "mongo/db/query/compiler/optimizer/join/catalog_stats.h"
+#include "mongo/db/query/compiler/optimizer/join/hint.h"
 #include "mongo/db/query/compiler/optimizer/join/join_cost_estimator_impl.h"
 #include "mongo/db/query/compiler/optimizer/join/join_reordering_context.h"
 #include "mongo/db/query/compiler/optimizer/join/reorder_joins.h"
@@ -108,8 +109,9 @@ EnumerationStrategy getEnumerationStrategy(const QueryKnobConfiguration& qkc) {
     auto joinMethod = getJoinMethod(qkc.getJoinMethod());
 
     // Override the join method for all joins if specified by the 'internalJoinMethod' query knob.
-    auto methodHint =
-        joinMethod ? boost::optional<JoinHint>(JoinHint{0, *joinMethod, false}) : boost::none;
+    auto methodHint = joinMethod
+        ? boost::optional<JoinHint>(JoinHint{boost::none, *joinMethod, boost::none})
+        : boost::none;
 
     return {.planShape = getPlanTreeShape(qkc.getJoinPlanTreeShape()),
             .mode = getMode(minLevel, maxLevel, methodHint),

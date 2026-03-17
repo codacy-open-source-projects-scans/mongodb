@@ -260,7 +260,7 @@ export function runPlanStabilityPipelines(db, collName, pipelines) {
                     Object.fromEntries([
                         ["setParameter", 1],
                         ...Object.entries(paramsToRestore)
-                            .filter(([k, _]) => k != "ok")
+                            .filter(([k, _]) => k !== "ok" && k !== "operationTime" && k !== "$clusterTime")
                             .map(([param, value]) => [param, typeof value === "string" ? value : value["value"]]),
                     ]),
                 ),
