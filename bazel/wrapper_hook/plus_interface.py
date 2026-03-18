@@ -13,10 +13,8 @@ WRAPPER_CONFIG_MODE_FILE = f"{REPO_ROOT}/.tmp/mongo_wrapper_config_mode"
 sys.path.append(str(REPO_ROOT))
 
 from bazel.wrapper_hook.compiledb import (
-    SETUP_CLANG_TIDY_BUILD_TARGETS,
     clear_compiledb_posthook_state,
     generate_compiledb,
-    prepare_compiledb_posthook_args,
 )
 from bazel.wrapper_hook.lint import run_rules_lint
 from bazel.wrapper_hook.wrapper_debug import wrapper_debug
@@ -77,13 +75,53 @@ def _read_target_pattern_file(path):
         ]
 
 
-def swap_default_config(args, command, config_mode, compiledb_target, clang_tidy):
+def _parse_targets_and_flags(args, replacements, compiledb_targets, compiledb_only_targets):
+    build_flags = []
+    build_targets = []
+    target_pattern_file = None
+    parsing_targets = True
+    expect_target_pattern_file_arg = False
+
+    for arg in args:
+        if expect_target_pattern_file_arg:
+            target_pattern_file = arg
+            build_flags.append(arg)
+            expect_target_pattern_file_arg = False
+            continue
+        if arg == "--":
+            parsing_targets = False
+            continue
+        if arg in replacements:
+            continue
+        if parsing_targets and arg.startswith("-"):
+            if arg == "--target_pattern_file":
+                build_flags.append(arg)
+                expect_target_pattern_file_arg = True
+                continue
+            if arg.startswith("--target_pattern_file="):
+                target_pattern_file = arg.split("=", 1)[1]
+            if arg == "--config=compiledb-aspect":
+                arg = "--config=compiledb"
+            build_flags.append(arg)
+        elif parsing_targets:
+            if arg in compiledb_targets or arg in compiledb_only_targets:
+                continue
+            build_targets.append(arg)
+
+    return build_flags, build_targets, target_pattern_file
+
+
+def swap_default_config(
+    args, command, config_mode, compiledb_target, clang_tidy, user_specified_config
+):
     # Remember the user's last specified config mode to prevent invalidating cache on run or lint commands.
     if os.path.exists(f"{REPO_ROOT}/.bazelrc.local"):
         return config_mode
 
     try:
         if config_mode is None:
+            if user_specified_config:
+                return config_mode
             if os.path.exists(WRAPPER_CONFIG_MODE_FILE):
                 # Reset to fastbuild if it's been more than 2 days since the file was written,
                 # since we don't want users to stay locked on dbg/opt if they forgot to change it back
@@ -126,7 +164,6 @@ def test_runner_interface(
     skip_plus_interface = True
     compiledb_target = False
     setup_clang_tidy = False
-    compiledb_config = False
     clang_tidy = False
     lint_target = False
     persistent_compdb = True
@@ -161,13 +198,18 @@ def test_runner_interface(
         persistent_compdb = False
 
     config_mode = None
-    for arg in args:
+    user_specified_config = False
+    for index, arg in enumerate(args):
+        if index > 0 and args[index - 1] == "--config":
+            continue
         if arg in compiledb_targets:
             compiledb_target = True
             setup_clang_tidy = True
+            replacements[arg] = []
             skip_plus_interface = False
         if arg in compiledb_only_targets:
             compiledb_target = True
+            replacements[arg] = []
             skip_plus_interface = False
         if arg in lint_targets:
             lint_target = True
@@ -183,22 +225,30 @@ def test_runner_interface(
             replacements[arg] = []
             persistent_compdb = False
             skip_plus_interface = False
-        if "--config=" in arg:
-            val = arg.split("=")[1]
+        config_value = None
+        if arg.startswith("--config="):
+            config_value = arg.split("=", 1)[1]
+        elif arg == "--config" and index + 1 < len(args):
+            config_value = args[index + 1]
+        if config_value is not None:
+            user_specified_config = True
+            val = config_value
             if val in {"opt", "dbg", "fastbuild", "dbg_aubsan", "dbg_tsan"}:
                 config_mode = val
             if val == "clang-tidy":
                 clang_tidy = True
-            if val in {"compiledb", "compiledb-aspect"}:
-                compiledb_config = True
-                skip_plus_interface = False
         if arg.startswith(plus_starts):
             skip_plus_interface = False
         if arg.endswith("..."):
             catch_all_target = True
 
     config_mode = swap_default_config(
-        args, current_bazel_command, config_mode, compiledb_target, clang_tidy
+        args,
+        current_bazel_command,
+        config_mode,
+        compiledb_target,
+        clang_tidy,
+        user_specified_config,
     )
     clear_compiledb_posthook_state()
 
@@ -218,7 +268,17 @@ def test_runner_interface(
             except ValueError:
                 pass  # Non-integer value, let bazel handle the error
 
-    if compiledb_target and current_bazel_command != "build":
+    parsed_build_flags = None
+    parsed_build_targets = None
+    parsed_target_pattern_file = None
+    if current_bazel_command == "build" and compiledb_target:
+        parsed_build_flags, parsed_build_targets, parsed_target_pattern_file = (
+            _parse_targets_and_flags(
+                args[command_index + 1 :], replacements, compiledb_targets, compiledb_only_targets
+            )
+        )
+
+    if compiledb_target:
         generate_compiledb(
             args[0],
             persistent_compdb,
@@ -228,83 +288,12 @@ def test_runner_interface(
             setup_clang_tidy=setup_clang_tidy,
             startup_args=startup_args,
         )
-
-    if (compiledb_config or compiledb_target) and current_bazel_command == "build":
-        build_flags = []
-        build_targets = []
-        compiledb_requested_targets = None
-        target_pattern_file = None
-        parsing_targets = True
-        expect_target_pattern_file_arg = False
-        for arg in args[command_index + 1 :]:
-            if expect_target_pattern_file_arg:
-                target_pattern_file = arg
-                build_flags.append(arg)
-                expect_target_pattern_file_arg = False
-                continue
-            if arg == "--":
-                parsing_targets = False
-                continue
-            if arg in replacements:
-                continue
-            if parsing_targets and arg.startswith("-"):
-                if arg == "--target_pattern_file":
-                    build_flags.append(arg)
-                    expect_target_pattern_file_arg = True
-                    continue
-                if arg.startswith("--target_pattern_file="):
-                    target_pattern_file = arg.split("=", 1)[1]
-                if arg == "--config=compiledb-aspect":
-                    arg = "--config=compiledb"
-                build_flags.append(arg)
-            elif parsing_targets:
-                if arg in compiledb_targets or arg in compiledb_only_targets:
-                    continue
-                build_targets.append(arg)
-
-        if compiledb_target_scope:
-            build_targets = [compiledb_target_scope]
-            compiledb_requested_targets = list(build_targets)
-        elif target_pattern_file:
-            compiledb_requested_targets = _read_target_pattern_file(target_pattern_file)
-
-        if not build_targets and not target_pattern_file:
-            build_targets = ["//src/..."]
-
-        if compiledb_requested_targets is None:
-            compiledb_requested_targets = list(build_targets)
-
-        extra_build_targets = (
-            ["//:setup_clang_tidy"] + SETUP_CLANG_TIDY_BUILD_TARGETS[1:] if setup_clang_tidy else []
-        )
-
-        if platform.system() == "Windows":
-            generate_compiledb(
-                args[0],
-                persistent_compdb,
-                enterprise,
-                atlas,
-                requested_build_flags=build_flags,
-                requested_targets=compiledb_requested_targets,
-                extra_build_targets=extra_build_targets,
-                setup_clang_tidy=setup_clang_tidy,
-                startup_args=startup_args,
-            )
-            return ["build", "//:compiledb" if setup_clang_tidy else "//:compiledb_only"]
-
-        return prepare_compiledb_posthook_args(
-            bazel_bin=args[0],
-            startup_args=startup_args,
-            command=current_bazel_command,
-            build_flags=build_flags,
-            build_targets=build_targets,
-            compiledb_targets=compiledb_requested_targets,
-            extra_build_targets=extra_build_targets,
-            setup_clang_tidy=setup_clang_tidy,
-            persistent_compdb=persistent_compdb,
-            enterprise=enterprise,
-            atlas=atlas,
-        )
+        if (
+            current_bazel_command == "build"
+            and not parsed_build_targets
+            and not parsed_target_pattern_file
+        ):
+            return []
 
     if lint_target:
         for lint_arg in lint_targets:

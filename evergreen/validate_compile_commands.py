@@ -13,19 +13,29 @@ import sys
 import tempfile
 from typing import Any, Iterator
 
-default_dir = os.environ.get("BUILD_WORKSPACE_DIRECTORY")
-if not default_dir:
-    print(
-        "This script must be run though bazel. Please run 'bazel run //evergreen:validate_compile_commands' instead."
+STANDARD_COMPILE_COMMAND_KEYS = frozenset({"arguments", "command", "directory", "file", "output"})
+COMPILEDB_GENERATION_TARGETS = ["compiledb", "install-wiredtiger"]
+
+
+def _get_workspace_dir() -> str:
+    workspace_dir = os.environ.get("BUILD_WORKSPACE_DIRECTORY")
+    if workspace_dir:
+        return workspace_dir
+    raise RuntimeError(
+        "This script must be run through bazel. "
+        "Please run 'bazel run //evergreen:validate_compile_commands' instead."
     )
-    sys.exit(1)
 
-os.chdir(default_dir)
 
-if not os.path.exists("compile_commands.json"):
-    sys.stderr.write("The 'compile_commands.json' file was not found.\n")
-    sys.stderr.write("Attempting to run 'bazel build compiledb' to generate it.\n")
-    subprocess.run(["bazel", "build", "compiledb"], check=True)
+def _ensure_compiledb_exists(compdb_path: str) -> None:
+    if os.path.exists(compdb_path):
+        return
+    sys.stderr.write(f"The '{compdb_path}' file was not found.\n")
+    sys.stderr.write(
+        "Attempting to run "
+        f"'bazel build {' '.join(COMPILEDB_GENERATION_TARGETS)}' to generate it.\n"
+    )
+    subprocess.run(["bazel", "build", *COMPILEDB_GENERATION_TARGETS], check=True)
 
 
 def _parse_repo_env_from_bazelrc(bazelrc_path: str, var_name: str) -> str | None:
@@ -197,6 +207,63 @@ def _iter_compiledb_entries(path: str) -> Iterator[dict[str, Any]]:
             if pos > 1024 * 1024:
                 buf = buf[pos:]
                 pos = 0
+
+
+def _validate_compiledb_entry(entry: dict[str, Any], *, index: int) -> None:
+    extra_keys = sorted(set(entry) - STANDARD_COMPILE_COMMAND_KEYS)
+    if extra_keys:
+        raise ValueError(
+            f"compile_commands.json entry {index} has non-standard keys {extra_keys}. "
+            f"Only {sorted(STANDARD_COMPILE_COMMAND_KEYS)} are allowed by the Clang JSON "
+            "Compilation Database format."
+        )
+
+    directory = entry.get("directory")
+    if not isinstance(directory, str) or not directory:
+        raise ValueError(
+            f"compile_commands.json entry {index} must contain a non-empty string 'directory'."
+        )
+
+    file_name = entry.get("file")
+    if not isinstance(file_name, str) or not file_name:
+        raise ValueError(
+            f"compile_commands.json entry {index} must contain a non-empty string 'file'."
+        )
+
+    has_arguments = "arguments" in entry
+    has_command = "command" in entry
+    if has_arguments == has_command:
+        raise ValueError(
+            f"compile_commands.json entry {index} must contain exactly one of "
+            "'arguments' or 'command'."
+        )
+
+    if has_arguments:
+        arguments = entry["arguments"]
+        if (
+            not isinstance(arguments, list)
+            or not arguments
+            or not all(isinstance(arg, str) for arg in arguments)
+        ):
+            raise ValueError(
+                f"compile_commands.json entry {index} 'arguments' must be a non-empty "
+                "list of strings."
+            )
+
+    if has_command:
+        command = entry["command"]
+        if not isinstance(command, str) or not command:
+            raise ValueError(
+                f"compile_commands.json entry {index} 'command' must be a non-empty string."
+            )
+
+    if "output" in entry:
+        output = entry["output"]
+        if not isinstance(output, str) or not output:
+            raise ValueError(
+                f"compile_commands.json entry {index} 'output' must be a non-empty string "
+                "when present."
+            )
 
 
 def _hash_file_name(file_name: str) -> int:
@@ -595,7 +662,8 @@ def _select_entries_for_test_compile(path: str, n: int) -> tuple[int, list[dict[
     if n <= 0:
         total = 0
         selected: list[dict[str, Any]] = []
-        for entry in _iter_compiledb_entries(path):
+        for index, entry in enumerate(_iter_compiledb_entries(path), start=1):
+            _validate_compiledb_entry(entry, index=index)
             total += 1
             file_name = entry.get("file")
             if not isinstance(file_name, str):
@@ -609,7 +677,8 @@ def _select_entries_for_test_compile(path: str, n: int) -> tuple[int, list[dict[
     heap: list[tuple[int, str, str, int, dict[str, Any]]] = []
     total = 0
     seq = 0
-    for entry in _iter_compiledb_entries(path):
+    for index, entry in enumerate(_iter_compiledb_entries(path), start=1):
+        _validate_compiledb_entry(entry, index=index)
         total += 1
         file_name = entry.get("file")
         if not isinstance(file_name, str):
@@ -638,8 +707,17 @@ def _select_entries_for_test_compile(path: str, n: int) -> tuple[int, list[dict[
 
 
 def main() -> int:
+    try:
+        workspace_dir = _get_workspace_dir()
+    except RuntimeError as e:
+        print(e)
+        return 1
+
+    os.chdir(workspace_dir)
+
     cli_args = _parse_args()
     compdb_path = "compile_commands.json"
+    _ensure_compiledb_exists(compdb_path)
     try:
         selection_count = _determine_selection_count(
             default_count=10,
@@ -650,7 +728,11 @@ def main() -> int:
         sys.stderr.write(f"ERROR: {e}\n")
         return 1
 
-    total, selected = _select_entries_for_test_compile(compdb_path, n=selection_count)
+    try:
+        total, selected = _select_entries_for_test_compile(compdb_path, n=selection_count)
+    except ValueError as e:
+        sys.stderr.write(f"ERROR: {e}\n")
+        return 1
     if selection_count <= 0:
         random.shuffle(selected)
 
@@ -673,7 +755,7 @@ def main() -> int:
 
     out_root = os.environ.get(
         "VALIDATE_COMPILE_COMMANDS_OUT_DIR",
-        os.path.join(default_dir, ".validate_compile_commands_out"),
+        os.path.join(workspace_dir, ".validate_compile_commands_out"),
     )
     os.makedirs(out_root, exist_ok=True)
 
@@ -717,11 +799,11 @@ def main() -> int:
     max_workers = max(1, min(max_workers, len(work)))
 
     print(f"Running {len(work)} test compiles...", flush=True)
-    compile_env = _maybe_add_windows_toolchain_env(os.environ.copy(), repo_root=default_dir)
+    compile_env = _maybe_add_windows_toolchain_env(os.environ.copy(), repo_root=workspace_dir)
 
     def _run_one(item: tuple[str, str, list[str]]) -> tuple[str, int, list[str], str, str]:
         file_name, directory, test_args = item
-        _ensure_parent_dirs_exist_for_outputs(test_args, cwd=directory, repo_root=default_dir)
+        _ensure_parent_dirs_exist_for_outputs(test_args, cwd=directory, repo_root=workspace_dir)
         proc = subprocess.run(
             test_args, cwd=directory, env=compile_env, capture_output=True, text=True
         )

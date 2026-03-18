@@ -272,6 +272,20 @@ def _split_embedded_arg_options(args):
     return normalized
 
 
+def _build_final_compile_command_entry(
+    entry, arguments, repo_root_resolved, rewrite_exec_path, out_root_str, external_root_str
+):
+    compiledb_entry = {
+        "file": rewrite_exec_path(entry["file"], out_root_str, external_root_str),
+        "arguments": arguments,
+        "directory": repo_root_resolved,
+    }
+    output_file = entry.get("output")
+    if output_file:
+        compiledb_entry["output"] = rewrite_exec_path(output_file, out_root_str, external_root_str)
+    return compiledb_entry
+
+
 def prepare_compiledb_posthook_args(
     bazel_bin,
     startup_args,
@@ -798,19 +812,16 @@ def _generate_compiledb_via_aspect(
             input_file = entry["file"]
             args = rewrite_args(entry["arguments"], real_out_root_str, real_external_root_str)
             args = with_librdkafka_config_header(args, input_file, real_out_root_str)
-
-            compiledb_entry = {
-                "file": rewrite_exec_path(input_file, real_out_root_str, real_external_root_str),
-                "arguments": args,
-                "directory": repo_root_resolved,
-                "target": entry.get("target"),
-            }
-            output_file = entry.get("output")
-            if output_file:
-                compiledb_entry["output"] = rewrite_exec_path(
-                    output_file, real_out_root_str, real_external_root_str
+            output_json.append(
+                _build_final_compile_command_entry(
+                    entry,
+                    args,
+                    repo_root_resolved,
+                    rewrite_exec_path,
+                    real_out_root_str,
+                    real_external_root_str,
                 )
-            output_json.append(compiledb_entry)
+            )
 
         output_json.sort(key=compile_command_sort_key)
         write_compile_commands(output_json, REPO_ROOT / "compile_commands.json")
