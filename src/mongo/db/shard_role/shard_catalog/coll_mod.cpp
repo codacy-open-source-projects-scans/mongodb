@@ -44,6 +44,7 @@
 #include "mongo/db/global_catalog/type_collection.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
 #include "mongo/db/index_key_validate.h"
+#include "mongo/db/namespace_string_util.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/pipeline/change_stream_pre_and_post_images_options_gen.h"
 #include "mongo/db/profile_settings.h"
@@ -90,7 +91,6 @@
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
-#include "mongo/util/namespace_string_util.h"
 #include "mongo/util/overloaded_visitor.h"  // IWYU pragma: keep
 #include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
@@ -1055,23 +1055,20 @@ Status _collModInternal(OperationContext* opCtx,
             writableColl->setTimeseriesBucketingParametersChanged(opCtx, boost::none);
         }
 
-        // Fix any invalid index options for indexes belonging to this collection, only for empty
-        // collMod requests which are called during setFCV upgrade.
-        const auto removeDeprecatedFields = [&]() {
-            if (cmrNew.numModifications > 0) {
-                return false;
-            }
-
+        const auto isUpgrading = [&]() {
             if (!ServerGlobalParams::FCVSnapshot::isUpgradingOrDowngrading(version)) {
                 return false;
             }
-
             const auto transitionInfo = getTransitionFCVInfo(version);
             return transitionInfo.from < transitionInfo.to;
-        }();
+        };
+
+        // Indicates whether this is an empty collMod command invoked as part of a setFCV upgrade.
+        // Certain index repairs are performed exclusively during the upgrade process.
+        const bool isUpgradeRepair = (cmrNew.numModifications == 0) && isUpgrading();
 
         std::vector<std::string> indexesWithInvalidOptions =
-            writableColl->repairInvalidIndexOptions(opCtx, removeDeprecatedFields);
+            writableColl->repairInvalidIndexOptions(opCtx, isUpgradeRepair);
         for (const auto& indexWithInvalidOptions : indexesWithInvalidOptions) {
             const auto entry =
                 writableColl->getIndexCatalog()->findIndexByName(opCtx, indexWithInvalidOptions);

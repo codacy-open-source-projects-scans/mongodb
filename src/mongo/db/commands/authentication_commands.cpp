@@ -52,6 +52,7 @@
 #include "mongo/db/commands/authentication_commands_gen.h"
 #include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/database_name_util.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/server_feature_flags_gen.h"
@@ -62,7 +63,6 @@
 #include "mongo/rpc/op_msg.h"
 #include "mongo/transport/session.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/database_name_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/time_support.h"
 
@@ -162,13 +162,25 @@ std::unique_ptr<UserRequest> getX509UserRequest(OperationContext* opCtx, const U
         session = opCtx->getClient()->session();
     }
 
+    bool insertAuthenticatedMechanism =
+        gFeatureFlagUseInternalAuthzInsteadOfLDAP.isEnabledUseLastLTSFCVWhenUninitialized(
+            VersionContext::getDecoration(opCtx),
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
     if (!allowRolesFromX509Certificates || !session) {
+        if (insertAuthenticatedMechanism) {
+            return std::make_unique<UserRequestGeneral>(
+                username, boost::none, auth::kMechanismMongoX509);
+        }
         return std::make_unique<UserRequestGeneral>(username, boost::none);
     }
 
     auto sslPeerInfo = SSLPeerInfo::forSession(session);
     if (!sslPeerInfo || sslPeerInfo->roles().empty() ||
         (sslPeerInfo->subjectName().toString() != username.getUser())) {
+        if (insertAuthenticatedMechanism) {
+            return std::make_unique<UserRequestGeneral>(
+                username, boost::none, auth::kMechanismMongoX509);
+        }
         return std::make_unique<UserRequestGeneral>(username, boost::none);
     }
 
@@ -176,7 +188,8 @@ std::unique_ptr<UserRequest> getX509UserRequest(OperationContext* opCtx, const U
     auto roles = std::set<RoleName>();
     std::copy(peerRoles.begin(), peerRoles.end(), std::inserter(roles, roles.begin()));
 
-    return uassertStatusOK(UserRequestX509::makeUserRequestX509(username, roles, sslPeerInfo));
+    return uassertStatusOK(UserRequestX509::makeUserRequestX509(
+        username, roles, sslPeerInfo, true, insertAuthenticatedMechanism));
 }
 
 constexpr auto kX509AuthenticationDisabledMessage = "x.509 authentication is disabled."_sd;

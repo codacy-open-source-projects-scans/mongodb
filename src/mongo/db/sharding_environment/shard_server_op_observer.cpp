@@ -39,6 +39,7 @@
 #include "mongo/db/global_catalog/ddl/sharding_recovery_service.h"
 #include "mongo/db/global_catalog/type_shard_collection.h"
 #include "mongo/db/global_catalog/type_shard_identity.h"
+#include "mongo/db/namespace_string_util.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/balancer_stats_registry.h"
@@ -64,7 +65,6 @@
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/namespace_string_util.h"
 
 #include <memory>
 #include <utility>
@@ -564,8 +564,9 @@ void ShardServerOpObserver::onDelete(OperationContext* opCtx,
         shard_role_details::getRecoveryUnit(opCtx)->onCommit(
             [deletedNss = collCSDoc.getNss(),
              reason = collCSDoc.getReason().getOwned(),
-             clearDbMetadata = collCSDoc.getClearDbInfo()](OperationContext* opCtx,
-                                                           boost::optional<Timestamp>) {
+             clearDbMetadata = collCSDoc.getClearDbInfo(),
+             clearCollMetadata = collCSDoc.getClearCollMetadata()](OperationContext* opCtx,
+                                                                   boost::optional<Timestamp>) {
                 if (deletedNss.isDbOnly()) {
                     // Primaries take locks when writing to certain internal namespaces. It must
                     // be ensured that those locks are also taken on secondaries, when
@@ -623,7 +624,7 @@ void ShardServerOpObserver::onDelete(OperationContext* opCtx,
 
                     // Secondaries that are in oplog application must clear the collection
                     // filtering metadata before releasing the in-memory critical section.
-                    if (!opCtx->isEnforcingConstraints()) {
+                    if (!opCtx->isEnforcingConstraints() && clearCollMetadata) {
                         scopedCsr->clearFilteringMetadata_nonAuthoritative(opCtx);
                     }
 

@@ -101,7 +101,7 @@ protected:
     void _removeStateDocument(OperationContext* opCtx);
 
     /**
-     * Create an `OperationContext`. Provided for consistency with `ShardingDDLCoordinator`,
+     * Create an `OperationContext`. Provided for consistency with `ShardingCoordinator`,
      * which provides a similar method which also sets the `ForwardableOperationMetadata`.
      * Prefer this to `cc().makeOperationContext()`.
      */
@@ -209,8 +209,7 @@ protected:
         }
         _updateStateDocumentWith(opCtx, [&](StateDoc& doc) {
             ConfigsvrCoordinatorMetadata newMetadata = doc.getConfigsvrCoordinatorMetadata();
-            newMetadata.setSession(
-                ConfigsvrCoordinatorSession(*osi->getSessionId(), *osi->getTxnNumber()));
+            newMetadata.setSession(CoordinatorSession(*osi->getSessionId(), *osi->getTxnNumber()));
             doc.setConfigsvrCoordinatorMetadata(newMetadata);
         });
     }

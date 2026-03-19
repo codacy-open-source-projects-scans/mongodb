@@ -36,10 +36,11 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/global_catalog/ddl/create_collection_coordinator_document_gen.h"
 #include "mongo/db/global_catalog/ddl/sharded_ddl_commands_gen.h"
+#include "mongo/db/global_catalog/ddl/sharding_coordinator_service.h"
 #include "mongo/db/global_catalog/ddl/sharding_ddl_coordinator.h"
-#include "mongo/db/global_catalog/ddl/sharding_ddl_coordinator_service.h"
 #include "mongo/db/global_catalog/shard_key_pattern.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/namespace_string_util.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/write_ops/write_ops.h"
 #include "mongo/db/s/config/initial_split_policy.h"
@@ -52,7 +53,6 @@
 #include "mongo/util/cancellation.h"
 #include "mongo/util/future.h"
 #include "mongo/util/modules.h"
-#include "mongo/util/namespace_string_util.h"
 #include "mongo/util/uuid.h"
 
 #include <memory>
@@ -110,7 +110,7 @@ public:
     using CoordDoc = CreateCollectionCoordinatorDocument;
     using Phase = CreateCollectionCoordinatorPhaseEnum;
 
-    CreateCollectionCoordinator(ShardingDDLCoordinatorService* service, const BSONObj& initialState)
+    CreateCollectionCoordinator(ShardingCoordinatorService* service, const BSONObj& initialState)
         : RecoverableShardingDDLCoordinator(service, "CreateCollectionCoordinator", initialState),
           _request(_doc.getShardsvrCreateCollectionRequest()),
           _critSecReason(BSON("command"

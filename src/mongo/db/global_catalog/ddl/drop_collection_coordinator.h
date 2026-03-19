@@ -35,10 +35,11 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/global_catalog/ddl/drop_collection_coordinator_document_gen.h"
+#include "mongo/db/global_catalog/ddl/sharding_coordinator_gen.h"
+#include "mongo/db/global_catalog/ddl/sharding_coordinator_service.h"
 #include "mongo/db/global_catalog/ddl/sharding_ddl_coordinator.h"
-#include "mongo/db/global_catalog/ddl/sharding_ddl_coordinator_gen.h"
-#include "mongo/db/global_catalog/ddl/sharding_ddl_coordinator_service.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/namespace_string_util.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/write_ops/write_ops.h"
 #include "mongo/db/shard_role/shard_catalog/drop_collection.h"
@@ -47,7 +48,6 @@
 #include "mongo/util/cancellation.h"
 #include "mongo/util/future.h"
 #include "mongo/util/modules.h"
-#include "mongo/util/namespace_string_util.h"
 
 #include <memory>
 #include <string>
@@ -63,7 +63,7 @@ public:
     using StateDoc = DropCollectionCoordinatorDocument;
     using Phase = DropCollectionCoordinatorPhaseEnum;
 
-    DropCollectionCoordinator(ShardingDDLCoordinatorService* service, const BSONObj& initialState)
+    DropCollectionCoordinator(ShardingCoordinatorService* service, const BSONObj& initialState)
         : RecoverableShardingDDLCoordinator(service, "DropCollectionCoordinator", initialState),
           _critSecReason(BSON("command"
                               << "dropCollection"
