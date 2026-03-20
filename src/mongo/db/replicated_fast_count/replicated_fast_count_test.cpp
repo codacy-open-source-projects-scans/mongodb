@@ -34,6 +34,7 @@
 #include "mongo/db/repl/apply_ops.h"
 #include "mongo/db/repl/apply_ops_command_info.h"
 #include "mongo/db/repl/oplog_entry.h"
+#include "mongo/db/repl/oplog_entry_test_helpers.h"
 #include "mongo/db/repl/oplog_interface_local.h"
 #include "mongo/db/replicated_fast_count/replicated_fast_count_delta_utils.h"
 #include "mongo/db/replicated_fast_count/replicated_fast_count_enabled.h"
@@ -69,7 +70,7 @@ protected:
         _fastCountManager = &ReplicatedFastCountManager::get(_opCtx->getServiceContext());
         // Allow for control over when we write to our internal collection for testing. We only
         // write to the internal collection when we explicitly call
-        // ReplicatedFastCountManager::flushSync_ForTest().
+        // ReplicatedFastCountManager::flushSync().
         _fastCountManager->disablePeriodicWrites_ForTest();
 
         setUpReplicatedFastCount(_opCtx);
@@ -112,9 +113,6 @@ protected:
     BSONObj sampleDocForInsert = BSON("_id" << 0 << "x" << 0);
     BSONObj sampleDocForUpdate = BSON("_id" << 0 << "x" << 0 << "y" << 0);
 };
-
-const NamespaceString replicatedFastCountStoreNss =
-    NamespaceString::makeGlobalConfigCollection(NamespaceString::kReplicatedFastCountStore);
 
 const std::function<BSONObj(int)> docGeneratorForInsert = [](int i) {
     return BSON("_id" << i << "x" << i);
@@ -226,13 +224,13 @@ TEST_F(ReplicatedFastCountTest, DirtyMetadataWrittenToInternalCollection) {
 
     // Verify that the committed changes have not been written to the internal fast count collection
     // yet.
-    replicated_fast_count_test_helpers::checkFastCountMetadataInInternalCollection(
+    replicated_fast_count_test_helpers::checkFastCountMetadataInFastCountStoreCollection(
         _opCtx,
         _uuid1,
         /*expectPersisted=*/false,
         /*expectedCount=*/0,
         /*expectedSize=*/0);
-    replicated_fast_count_test_helpers::checkFastCountMetadataInInternalCollection(
+    replicated_fast_count_test_helpers::checkFastCountMetadataInFastCountStoreCollection(
         _opCtx,
         _uuid2,
         /*expectPersisted=*/false,
@@ -242,13 +240,13 @@ TEST_F(ReplicatedFastCountTest, DirtyMetadataWrittenToInternalCollection) {
     // Manually trigger an iteration to write dirty metadata to the internal collection.
     _fastCountManager->flushSync(_opCtx);
 
-    replicated_fast_count_test_helpers::checkFastCountMetadataInInternalCollection(
+    replicated_fast_count_test_helpers::checkFastCountMetadataInFastCountStoreCollection(
         _opCtx,
         _uuid1,
         /*expectPersisted=*/true,
         numDocsColl1,
         numDocsColl1 * sampleDocForInsert.objsize());
-    replicated_fast_count_test_helpers::checkFastCountMetadataInInternalCollection(
+    replicated_fast_count_test_helpers::checkFastCountMetadataInFastCountStoreCollection(
         _opCtx,
         _uuid2,
         /*expectPersisted=*/true,
@@ -282,15 +280,14 @@ TEST_F(ReplicatedFastCountTest, DirtyMetadataWrittenAsSingleApplyOpsEntry) {
 
     _fastCountManager->flushSync(_opCtx);
 
-    auto applyOpsEntries =
-        replicated_fast_count_test_helpers::getApplyOpsForNss(_opCtx, replicatedFastCountStoreNss);
+    auto applyOpsEntries = replicated_fast_count_test_helpers::getApplyOpsForNss(
+        _opCtx, replicated_fast_count_test_helpers::replicatedFastCountStoreNss);
 
     EXPECT_EQ(applyOpsEntries.size(), 1u);
     auto& applyOpsEntry = applyOpsEntries.front();
 
     replicated_fast_count_test_helpers::assertFastCountApplyOpsMatches(
         applyOpsEntry,
-        replicatedFastCountStoreNss,
         {
             {_uuid1,
              replicated_fast_count_test_helpers::FastCountOpType::kInsert,
@@ -368,7 +365,7 @@ TEST_F(ReplicatedFastCountTest, UpdatesWrittenToApplyOpsCorrectly) {
     _fastCountManager->flushSync(_opCtx);
 
     auto applyOpsEntry = replicated_fast_count_test_helpers::getLatestApplyOpsForNss(
-        _opCtx, replicatedFastCountStoreNss);
+        _opCtx, replicated_fast_count_test_helpers::replicatedFastCountStoreNss);
 
     const int64_t sizeDelta = sampleDocForUpdate.objsize() - sampleDocForInsert.objsize();
     const int64_t newExpectedSizeColl1 =
@@ -378,7 +375,6 @@ TEST_F(ReplicatedFastCountTest, UpdatesWrittenToApplyOpsCorrectly) {
 
     replicated_fast_count_test_helpers::assertFastCountApplyOpsMatches(
         applyOpsEntry,
-        replicatedFastCountStoreNss,
         {
             {_uuid1,
              replicated_fast_count_test_helpers::FastCountOpType::kUpdate,
@@ -436,7 +432,7 @@ TEST_F(ReplicatedFastCountTest, MixedUpdatesAndInsertInApplyOps) {
     _fastCountManager->flushSync(_opCtx);
 
     auto applyOpsEntry = replicated_fast_count_test_helpers::getLatestApplyOpsForNss(
-        _opCtx, replicatedFastCountStoreNss);
+        _opCtx, replicated_fast_count_test_helpers::replicatedFastCountStoreNss);
 
     const int64_t sizeDelta = sampleDocForUpdate.objsize() - sampleDocForInsert.objsize();
     const int64_t newExpectedSizeColl1 =
@@ -444,7 +440,6 @@ TEST_F(ReplicatedFastCountTest, MixedUpdatesAndInsertInApplyOps) {
 
     replicated_fast_count_test_helpers::assertFastCountApplyOpsMatches(
         applyOpsEntry,
-        replicatedFastCountStoreNss,
         {
             {_uuid1,
              replicated_fast_count_test_helpers::FastCountOpType::kUpdate,
@@ -514,9 +509,9 @@ TEST_F(ReplicatedFastCountTest, InitializePopulatesMetadataFromExistingInternalC
         wuow.commit();
     }
 
-    replicated_fast_count_test_helpers::checkFastCountMetadataInInternalCollection(
+    replicated_fast_count_test_helpers::checkFastCountMetadataInFastCountStoreCollection(
         _opCtx, uuid1, /*expectPersisted=*/true, expectedCount1, expectedSize1);
-    replicated_fast_count_test_helpers::checkFastCountMetadataInInternalCollection(
+    replicated_fast_count_test_helpers::checkFastCountMetadataInFastCountStoreCollection(
         _opCtx, uuid2, /*expectPersisted=*/true, expectedCount2, expectedSize2);
 
     replicated_fast_count_test_helpers::checkCommittedFastCountChanges(
@@ -597,7 +592,7 @@ TEST_F(ReplicatedFastCountTest, DirtyWriteNotLostIfWrittenAfterMetadataSnapshot)
     _fastCountManager->flushSync(_opCtx);
 
     // Verify that all of our writes were persisted to disk.
-    replicated_fast_count_test_helpers::checkFastCountMetadataInInternalCollection(
+    replicated_fast_count_test_helpers::checkFastCountMetadataInFastCountStoreCollection(
         _opCtx,
         _uuid1,
         /*expectPersisted=*/true,
@@ -629,6 +624,60 @@ BSONObj makeApplyOpsUpdateOp(const NamespaceString& nss,
 BSONObj makeApplyOpsDeleteOp(const NamespaceString& nss, const UUID& uuid, int id) {
     return BSON("op" << "d"
                      << "ns" << nss.ns_forTest() << "ui" << uuid << "o" << BSON("_id" << id));
+}
+
+TEST_F(ReplicatedFastCountTest, CheckApplyOpsStructureAcceptsValidApplyOps) {
+    auto uuid = UUID::gen();
+    NamespaceString innerNss = NamespaceString::createNamespaceString_forTest("test", "coll");
+    auto insertOp = repl::MutableOplogEntry::makeInsertOperation(
+        innerNss, uuid, docGeneratorForInsert(0), BSON("_id" << 0));
+    OperationSessionInfo sessionInfo;
+    repl::OpTime opTime(Timestamp(1, 1), 1);
+    auto applyOpsEntry = repl::makeApplyOpsOplogEntry(opTime,
+                                                      {insertOp},
+                                                      sessionInfo,
+                                                      /*wallClockTime=*/Date_t::now(),
+                                                      /*stmtIds=*/{},
+                                                      /*prevOpTime=*/repl::OpTime());
+    EXPECT_TRUE(replicated_fast_count_test_helpers::isApplyOpsEntryStructureValid(applyOpsEntry));
+}
+
+TEST_F(ReplicatedFastCountTest, CheckApplyOpsStructureRejectsNonCommandApplyOpsEntry) {
+    auto uuid = UUID::gen();
+    NamespaceString innerNss = NamespaceString::createNamespaceString_forTest("test", "coll");
+    auto insertOp = repl::MutableOplogEntry::makeInsertOperation(
+        innerNss, uuid, docGeneratorForInsert(0), BSON("_id" << 0));
+
+    OperationSessionInfo sessionInfo;
+    repl::OpTime opTime(Timestamp(1, 1), 1);
+
+    auto validApplyOpsEntry = repl::makeApplyOpsOplogEntry(opTime,
+                                                           {insertOp},
+                                                           sessionInfo,
+                                                           /*wallClockTime=*/Date_t::now(),
+                                                           /*stmtIds=*/{},
+                                                           /*prevOpTime=*/repl::OpTime());
+
+    BSONObj validApplyOpsBSON = validApplyOpsEntry.getEntry().toBSON();
+    BSONObjBuilder bob;
+
+    // Mutate the applyOps entry to make the top-level entry something other than "c".
+    for (auto&& elem : validApplyOpsBSON) {
+        if (elem.fieldNameStringData() == repl::OplogEntry::kOpTypeFieldName) {
+            bob.append(repl::OplogEntry::kOpTypeFieldName, "i");
+        } else {
+            bob.append(elem);
+        }
+    }
+
+    auto invalidApplyOpsBSON = bob.obj();
+
+    auto swBad = repl::OplogEntry::parse(invalidApplyOpsBSON);
+    ASSERT_OK(swBad.getStatus());
+    auto badApplyOpsEntry = swBad.getValue();
+
+    EXPECT_FALSE(
+        replicated_fast_count_test_helpers::isApplyOpsEntryStructureValid(badApplyOpsEntry));
 }
 
 TEST_F(ReplicatedFastCountTest, ApplyOpsInsertsAreCorrectlyAccountedFor) {
@@ -927,6 +976,78 @@ TEST_F(ReplicatedFastCountTest, ReplicatedFastCountTracksNonLocalInternalCollect
     }
 }
 
+TEST_F(ReplicatedFastCountTest, FlushWritesToTimestampCollection) {
+    RAIIServerParameterControllerForTest featureFlag("featureFlagReplicatedFastCount", true);
+
+    const int numDocsColl = 5;
+
+    replicated_fast_count_test_helpers::insertDocs(_opCtx,
+                                                   _fastCountManager,
+                                                   _nss1,
+                                                   numDocsColl,
+                                                   /*startingCount=*/0,
+                                                   /*startingSize=*/0,
+                                                   docGeneratorForInsert,
+                                                   sampleDocForInsert);
+
+    // There should be no records in the timestamps collection before we flush.
+    replicated_fast_count_test_helpers::checkFastCountMetadataInTimestampsCollection(
+        _opCtx, /*stripe=*/0, /*expectPersisted=*/false, Timestamp());
+
+    Timestamp firstAllDurableTs =
+        _opCtx->getServiceContext()->getStorageEngine()->getAllDurableTimestamp();
+
+    _fastCountManager->flushSync(_opCtx);
+
+    replicated_fast_count_test_helpers::checkFastCountMetadataInTimestampsCollection(
+        _opCtx, /*stripe=*/0, /*expectPersisted=*/true, firstAllDurableTs);
+
+    // Insert more docs and flush again, and check that the stored timestamp advances.
+    replicated_fast_count_test_helpers::insertDocs(_opCtx,
+                                                   _fastCountManager,
+                                                   _nss1,
+                                                   numDocsColl,
+                                                   /*startingCount=*/numDocsColl,
+                                                   /*startingSize=*/numDocsColl *
+                                                       sampleDocForInsert.objsize(),
+                                                   docGeneratorForInsert,
+                                                   sampleDocForInsert);
+
+    Timestamp secondAllDurableTs =
+        _opCtx->getServiceContext()->getStorageEngine()->getAllDurableTimestamp();
+
+    _fastCountManager->flushSync(_opCtx);
+
+    replicated_fast_count_test_helpers::checkFastCountMetadataInTimestampsCollection(
+        _opCtx, /*stripe=*/0, /*expectPersisted=*/true, secondAllDurableTs);
+}
+
+TEST_F(ReplicatedFastCountTest, WritesToTimestampCollectionReflectedInApplyOps) {
+    RAIIServerParameterControllerForTest featureFlag("featureFlagReplicatedFastCount", true);
+
+    const int numDocsColl = 5;
+
+    replicated_fast_count_test_helpers::insertDocs(_opCtx,
+                                                   _fastCountManager,
+                                                   _nss1,
+                                                   numDocsColl,
+                                                   /*startingCount=*/0,
+                                                   /*startingSize=*/0,
+                                                   docGeneratorForInsert,
+                                                   sampleDocForInsert);
+    const Timestamp allDurableTs =
+        _opCtx->getServiceContext()->getStorageEngine()->getAllDurableTimestamp();
+
+    _fastCountManager->flushSync(_opCtx);
+
+    replicated_fast_count_test_helpers::ExpectedFastCountTimestampsOp expectedOp{0, allDurableTs};
+
+    auto applyOpsEntry = replicated_fast_count_test_helpers::getLatestApplyOpsForNss(
+        _opCtx, replicated_fast_count_test_helpers::replicatedFastCountStoreTimestampsNss);
+
+    replicated_fast_count_test_helpers::assertFastCountTimestampsApplyOpsMatches(applyOpsEntry,
+                                                                                 expectedOp);
+};
 /**
  * Tests that operations with replicated size and count are logged with 'sizeMetadata' (information
  * stored in the top-level 'm' field) in their oplog entries.
@@ -1074,7 +1195,18 @@ TEST_F(SizeMetadataLoggingTest, BasicGroupCommit) {
     replicated_fast_count_test_helpers::assertOpsMatchSpecs(innerEntries, expectedOps);
 }
 
-using ReplicatedFastCountDeltaUtilsTest = ReplicatedFastCountTest;
+class ReplicatedFastCountDeltaUtilsTest : public ReplicatedFastCountTest {
+protected:
+    CollectionAcquisition acquireCollForWrite(const NamespaceString& nss) {
+        return acquireCollection(
+            _opCtx,
+            CollectionAcquisitionRequest(nss,
+                                         PlacementConcern(boost::none, ShardVersion::UNTRACKED()),
+                                         repl::ReadConcernArgs::get(_opCtx),
+                                         AcquisitionPrerequisites::kWrite),
+            MODE_IX);
+    }
+};
 
 repl::OplogEntrySizeMetadata makeOperationSizeMetadata(int32_t replicatedSizeDelta) {
     repl::OplogEntrySizeMetadata m;
@@ -1202,6 +1334,347 @@ TEST_F(ReplicatedFastCountDeltaUtilsTest,
     ASSERT_FALSE(replicated_fast_count::extractSizeCountDeltaForOp(insertOpLocalNs).has_value());
 }
 
+TEST_F(ReplicatedFastCountDeltaUtilsTest, ExtractSizeCountDeltaForApplyOpsInsertsSingleUUID) {
+    RAIIServerParameterControllerForTest featureFlag("featureFlagReplicatedFastCount", true);
+    const std::vector<BSONObj> docs{
+        BSON("_id" << 0),
+        BSON("_id" << 1),
+        BSON("_id" << 2),
+    };
+
+    // Confirm this starts with an empty collection.
+    ASSERT_EQ(CollectionSizeCount{},
+              replicated_fast_count_test_helpers::scanForAccurateSizeCount(_opCtx, _nss1));
+    {
+        // Insert documents and confirm the aggregation.
+        auto acq = acquireCollForWrite(_nss1);
+        WriteUnitOfWork wuow{_opCtx, WriteUnitOfWork::kGroupForPossiblyRetryableOperations};
+        ASSERT_OK(Helpers::insert(_opCtx, acq.getCollectionPtr(), docs));
+        wuow.commit();
+    }
+
+    // Size and count were both 0 before the operation, so we expect the deltas to aggregate to the
+    // totals.
+    CollectionSizeCount totalCollSizeCount0 =
+        replicated_fast_count_test_helpers::scanForAccurateSizeCount(_opCtx, _nss1);
+
+    // Validate extracted deltas for first round of applyOps.
+    const auto deltas0 = replicated_fast_count::extractSizeCountDeltasForApplyOps(
+        replicated_fast_count_test_helpers::getLatestApplyOpsForNss(_opCtx, _nss1));
+    ASSERT_EQ(1u, deltas0.size());
+    ASSERT_TRUE(deltas0.contains(_uuid1));
+    ASSERT_EQ(totalCollSizeCount0, deltas0.at(_uuid1));
+
+    // Insert documents into a non-empty collection to demonstrate correct delta computation.
+    const std::vector<BSONObj> docsNewInserts{
+        BSON("_id" << 3),
+        BSON("_id" << 4 << "x" << 7),
+    };
+    {
+        auto acq = acquireCollForWrite(_nss1);
+        WriteUnitOfWork wuow{_opCtx, WriteUnitOfWork::kGroupForPossiblyRetryableOperations};
+        ASSERT_OK(Helpers::insert(_opCtx, acq.getCollectionPtr(), docsNewInserts));
+        wuow.commit();
+    }
+    const auto totalCollSizeCount1 =
+        replicated_fast_count_test_helpers::scanForAccurateSizeCount(_opCtx, _nss1);
+    const auto expectedDeltas1 = totalCollSizeCount1 - totalCollSizeCount0;
+
+    // Validate extracted deltas for second round of applyOps.
+    const auto deltas1 = replicated_fast_count::extractSizeCountDeltasForApplyOps(
+        replicated_fast_count_test_helpers::getLatestApplyOpsForNss(_opCtx, _nss1));
+    ASSERT_EQ(1u, deltas1.size());
+    ASSERT_TRUE(deltas1.contains(_uuid1));
+    ASSERT_EQ(expectedDeltas1, deltas1.at(_uuid1));
+}
+
+TEST_F(ReplicatedFastCountDeltaUtilsTest, ExtractSizeCountDeltaForApplyOpsUpdatesSingleUUID) {
+    RAIIServerParameterControllerForTest featureFlag("featureFlagReplicatedFastCount", true);
+    const std::vector<BSONObj> docs{
+        BSON("_id" << 0),
+        BSON("_id" << 1),
+        BSON("_id" << 2),
+    };
+
+    {
+        // Pre-populate collection
+        auto acq = acquireCollForWrite(_nss1);
+        WriteUnitOfWork wuow{_opCtx, WriteUnitOfWork::kGroupForPossiblyRetryableOperations};
+        ASSERT_OK(Helpers::insert(_opCtx, acq.getCollectionPtr(), docs));
+        wuow.commit();
+    }
+    CollectionSizeCount originalSizeCount =
+        replicated_fast_count_test_helpers::scanForAccurateSizeCount(_opCtx, _nss1);
+
+    {
+        // Update 2 of the documents.
+        auto collAcq = acquireCollForWrite(_nss1);
+        WriteUnitOfWork wuow{_opCtx, WriteUnitOfWork::kGroupForPossiblyRetryableOperations};
+        Helpers::update(
+            _opCtx, collAcq, BSON("_id" << 0), BSON("$set" << BSON("greeting" << "Howdy")));
+        Helpers::update(
+            _opCtx, collAcq, BSON("_id" << 2), BSON("$set" << BSON("greeting" << "Hi")));
+        wuow.commit();
+    }
+
+    CollectionSizeCount sizeCountAfterUpdates =
+        replicated_fast_count_test_helpers::scanForAccurateSizeCount(_opCtx, _nss1);
+    const auto expectedDeltas = sizeCountAfterUpdates - originalSizeCount;
+
+    const auto deltas = replicated_fast_count::extractSizeCountDeltasForApplyOps(
+        replicated_fast_count_test_helpers::getLatestApplyOpsForNss(_opCtx, _nss1));
+    ASSERT_EQ(1u, deltas.size());
+    ASSERT_TRUE(deltas.contains(_uuid1));
+    ASSERT_EQ(expectedDeltas, deltas.at(_uuid1));
+}
+
+TEST_F(ReplicatedFastCountDeltaUtilsTest, ExtractSizeCountDeltaForApplyOpsDeletesSingleUUID) {
+    RAIIServerParameterControllerForTest featureFlag("featureFlagReplicatedFastCount", true);
+    const std::vector<BSONObj> docs{
+        BSON("_id" << 0),
+        BSON("_id" << 1),
+        BSON("_id" << 2),
+    };
+
+    {
+        // Pre-populate collection
+        auto acq = acquireCollForWrite(_nss1);
+        WriteUnitOfWork wuow{_opCtx, WriteUnitOfWork::kGroupForPossiblyRetryableOperations};
+        ASSERT_OK(Helpers::insert(_opCtx, acq.getCollectionPtr(), docs));
+        wuow.commit();
+    }
+    CollectionSizeCount originalSizeCount =
+        replicated_fast_count_test_helpers::scanForAccurateSizeCount(_opCtx, _nss1);
+
+    {
+        // Delete 2 of the documents.
+        auto collAcq = acquireCollForWrite(_nss1);
+        WriteUnitOfWork wuow{_opCtx, WriteUnitOfWork::kGroupForPossiblyRetryableOperations};
+        const std::vector<BSONObj> removeFilters{BSON("_id" << 0), BSON("_id" << 2)};
+        for (const auto& docFilter : removeFilters) {
+            const auto rid = Helpers::findOne(_opCtx, collAcq, docFilter);
+            ASSERT_FALSE(rid.isNull());
+            Helpers::deleteByRid(_opCtx, collAcq, rid);
+        }
+        wuow.commit();
+    }
+
+    CollectionSizeCount sizeCountAfterUpdates =
+        replicated_fast_count_test_helpers::scanForAccurateSizeCount(_opCtx, _nss1);
+    const auto expectedDeltas = sizeCountAfterUpdates - originalSizeCount;
+
+    const auto deltas = replicated_fast_count::extractSizeCountDeltasForApplyOps(
+        replicated_fast_count_test_helpers::getLatestApplyOpsForNss(_opCtx, _nss1));
+    ASSERT_EQ(1u, deltas.size());
+    ASSERT_TRUE(deltas.contains(_uuid1));
+    ASSERT_EQ(expectedDeltas, deltas.at(_uuid1));
+}
+
+TEST_F(ReplicatedFastCountDeltaUtilsTest, ExtractSizeCountDeltaForApplyOpsMultiOpsSingleUUID) {
+    RAIIServerParameterControllerForTest featureFlag("featureFlagReplicatedFastCount", true);
+    const BSONObj doc0 = BSON("_id" << 0 << "x" << "0");
+    const BSONObj doc1 = BSON("_id" << 1 << "x" << "0");
+
+    {
+        auto collAcq = acquireCollForWrite(_nss1);
+        WriteUnitOfWork wuow{_opCtx, WriteUnitOfWork::kGroupForPossiblyRetryableOperations};
+        // Insert doc0 and doc1.
+        ASSERT_OK(
+            Helpers::insert(_opCtx, collAcq.getCollectionPtr(), std::vector<BSONObj>{doc0, doc1}));
+
+        // Update doc0.
+        Helpers::update(_opCtx, collAcq, BSON("_id" << 0), BSON("$set" << BSON("y" << 0)));
+
+        // Delete doc1.
+        const auto rid = Helpers::findOne(_opCtx, collAcq, BSON("_id" << 1));
+        ASSERT_FALSE(rid.isNull());
+        Helpers::deleteByRid(_opCtx, collAcq, rid);
+
+        wuow.commit();
+    }
+
+    // Expected Result: Only an updated doc0 exists in the collection.
+    const auto expectedDeltas =
+        replicated_fast_count_test_helpers::scanForAccurateSizeCount(_opCtx, _nss1);
+    ASSERT_EQ(1, expectedDeltas.count);
+    ASSERT_NE(expectedDeltas.size, doc0.objsize());
+
+    // Deltas correctly account for inserts, update, and delete which impact each other.
+    const auto deltas = replicated_fast_count::extractSizeCountDeltasForApplyOps(
+        replicated_fast_count_test_helpers::getLatestApplyOpsForNss(_opCtx, _nss1));
+    ASSERT_EQ(1u, deltas.size());
+    ASSERT_TRUE(deltas.contains(_uuid1));
+    ASSERT_EQ(expectedDeltas, deltas.at(_uuid1));
+}
+
+TEST_F(ReplicatedFastCountDeltaUtilsTest, ExtractSizeCountDeltaForApplyOpsMultiUUID) {
+    RAIIServerParameterControllerForTest featureFlag("featureFlagReplicatedFastCount", true);
+    const BSONObj doc1 = BSON("_id" << 0 << "x" << "0");
+    const BSONObj doc2 = BSON("_id" << 1 << "x" << "0" << "y" << 1);
+
+    // Both collections begin empty.
+    ASSERT_EQ(CollectionSizeCount{},
+              replicated_fast_count_test_helpers::scanForAccurateSizeCount(_opCtx, _nss1));
+    ASSERT_EQ(CollectionSizeCount{},
+              replicated_fast_count_test_helpers::scanForAccurateSizeCount(_opCtx, _nss2));
+
+    {
+        // In a grouped applyOps, insert one document into each collection.
+        auto collAcq = acquireCollForWrite(_nss1);
+        auto collAcq2 = acquireCollForWrite(_nss2);
+        WriteUnitOfWork wuow{_opCtx, WriteUnitOfWork::kGroupForPossiblyRetryableOperations};
+        ASSERT_OK(Helpers::insert(_opCtx, collAcq.getCollectionPtr(), doc1));
+        ASSERT_OK(Helpers::insert(_opCtx, collAcq2.getCollectionPtr(), doc2));
+
+        wuow.commit();
+    }
+
+    // Expected deltas are the total count and size since the collections began empty.
+    const auto expectedDeltas1 =
+        replicated_fast_count_test_helpers::scanForAccurateSizeCount(_opCtx, _nss1);
+    const auto expectedDeltas2 =
+        replicated_fast_count_test_helpers::scanForAccurateSizeCount(_opCtx, _nss2);
+    ASSERT_EQ(expectedDeltas1.count, 1);
+    ASSERT_EQ(expectedDeltas1.size, doc1.objsize());
+    ASSERT_EQ(expectedDeltas2.count, 1);
+    ASSERT_EQ(expectedDeltas2.size, doc2.objsize());
+
+    // Extract applyOps deltas and verify.
+    auto deltas = replicated_fast_count::extractSizeCountDeltasForApplyOps(
+        replicated_fast_count_test_helpers::getLatestApplyOpsForNss(_opCtx, _nss1));
+    ASSERT_EQ(deltas.size(), 2u);
+    ASSERT_TRUE(deltas.contains(_uuid1));
+    ASSERT_TRUE(deltas.contains(_uuid2));
+    ASSERT_EQ(deltas.at(_uuid1), expectedDeltas1);
+    ASSERT_EQ(deltas.at(_uuid2), expectedDeltas2);
+}
+
+TEST_F(ReplicatedFastCountDeltaUtilsTest,
+       ExtractSizeCountDeltaForApplyOpsDoesNotAcceptNonApplyOps) {
+    repl::OplogEntry ungroupedInsertOplogEntry{
+        repl::DurableOplogEntry{repl::DurableOplogEntryParams{
+            .opTime = repl::OpTime(),
+            .opType = repl::OpTypeEnum::kInsert,
+            .nss = _nss1,
+            .oField = BSONObj(),
+            .wallClockTime = Date_t::now(),
+        }}};
+
+    // applyOps extraction enforces the input is an applyOps type.
+    ASSERT_THROWS_CODE(
+        replicated_fast_count::extractSizeCountDeltasForApplyOps(ungroupedInsertOplogEntry),
+        DBException,
+        12116000);
+}
+
+TEST_F(ReplicatedFastCountDeltaUtilsTest,
+       ExtractSizeCountDeltaForApplyOpsRequiresUUIDSpecification) {
+    // Replicated count and size is tracked per collection through the UUID. Tests that an applyOps
+    // oplog entry with an inner op missing the collection's UUID fails to parse the replicated fast
+    // count.
+    const auto adminDbName = DatabaseName::createDatabaseName_forTest(boost::none, "admin");
+    const NamespaceString adminCmdNss =
+        NamespaceString::createNamespaceString_forTest("admin", "$cmd");
+
+    const BSONObj docA = BSON("_id" << 0 << "x" << "0");
+    BSONObj insertOpMissingUUID = BSON("op" << "i"
+                                            << "ns" << _nss1.ns_forTest() << "o" << docA << "m"
+                                            << BSON("sz" << docA.objsize()));
+    BSONObj applyOpsCmd = BSON("applyOps" << BSON_ARRAY(insertOpMissingUUID));
+
+    repl::OplogEntry applyOpsEntryMissingInnerUi{
+        repl::DurableOplogEntry{repl::DurableOplogEntryParams{
+            .opTime = repl::OpTime(),
+            .opType = repl::OpTypeEnum::kCommand,
+            .nss = adminCmdNss,
+            .oField = applyOpsCmd,
+            .wallClockTime = Date_t::now(),
+        }}};
+
+    // applyOps extraction requires a UUID for each inner op with size tracking.
+    ASSERT_THROWS_CODE(
+        replicated_fast_count::extractSizeCountDeltasForApplyOps(applyOpsEntryMissingInnerUi),
+        DBException,
+        12116001);
+}
+
+TEST_F(ReplicatedFastCountDeltaUtilsTest, ExtractSizeCountDeltaForNestedApplyOpsMultiUUID) {
+    // Nested applyOps are allowed from user commands. Tests that extraction of replicated size and
+    // count works across nested applyOps for multiple collections.
+    RAIIServerParameterControllerForTest featureFlag("featureFlagReplicatedFastCount", true);
+
+    const BSONObj docA = BSON("_id" << 0 << "x" << "0");
+    const BSONObj docB = BSON("_id" << 1 << "x" << "0" << "y" << 1);
+
+    // Admin command namespace for applyOps commands.
+    const auto adminDbName = DatabaseName::createDatabaseName_forTest(boost::none, "admin");
+    const NamespaceString adminCmdNss =
+        NamespaceString::createNamespaceString_forTest("admin", "$cmd");
+
+    // The resulting BSON structure is:
+    //
+    // {
+    //   applyOps: [   // Top-level array: contains the first-level applyOps command
+    //     {
+    //       op: "c",
+    //       ns: "admin.$cmd",
+    //       o: {
+    //         applyOps: [
+    //           <insert docB into _nss1>,
+    //           {
+    //             op: "c",
+    //             ns: "admin.$cmd",
+    //             o: {
+    //               applyOps: [
+    //                 <insert docA into _nss1>,
+    //                 <insert docA into _nss2>
+    //               ]
+    //             }
+    //           }
+    //         ]
+    //       }
+    //     }
+    //   ]
+    // }
+    BSONObj innerMostInsertNs1 = BSON("op" << "i"
+                                           << "ns" << _nss1.ns_forTest() << "ui" << _uuid1 << "o"
+                                           << docA << "m" << BSON("sz" << docA.objsize()));
+    BSONObj innerMostInsertNs2 = BSON("op" << "i"
+                                           << "ns" << _nss2.ns_forTest() << "ui" << _uuid2 << "o"
+                                           << docA << "m" << BSON("sz" << docA.objsize()));
+    BSONObj nestedInnerApplyOpsCmdOp =
+        BSON("op" << "c"
+                  << "ns" << adminCmdNss.ns_forTest() << "o"
+                  << BSON("applyOps" << BSON_ARRAY(innerMostInsertNs1 << innerMostInsertNs2)));
+    BSONObj firstLevelInsert = BSON("op" << "i"
+                                         << "ns" << _nss1.ns_forTest() << "ui" << _uuid1 << "o"
+                                         << docA << "m" << BSON("sz" << docB.objsize()));
+    BSONObj firstLevelApplyOpsCmdOp =
+        BSON("op" << "c"
+                  << "ns" << adminCmdNss.ns_forTest() << "o"
+                  << BSON("applyOps" << BSON_ARRAY(firstLevelInsert << nestedInnerApplyOpsCmdOp)));
+    BSONObj topLevelApplyOpsCmd = BSON("applyOps" << BSON_ARRAY(firstLevelApplyOpsCmdOp));
+
+    repl::OplogEntry applyOpsEntry{repl::DurableOplogEntry{repl::DurableOplogEntryParams{
+        .opTime = repl::OpTime(),
+        .opType = repl::OpTypeEnum::kCommand,
+        .nss = adminCmdNss,
+        .oField = topLevelApplyOpsCmd,
+        .wallClockTime = Date_t::now(),
+    }}};
+
+    const CollectionSizeCount expectedDeltasNss1{docA.objsize() + docB.objsize(), 2};
+    const CollectionSizeCount expectedDeltasNss2{docA.objsize(), 1};
+
+    const auto deltas = replicated_fast_count::extractSizeCountDeltasForApplyOps(applyOpsEntry);
+
+    ASSERT_EQ(deltas.size(), 2u);
+    ASSERT_TRUE(deltas.contains(_uuid1));
+    ASSERT_TRUE(deltas.contains(_uuid2));
+    ASSERT_EQ(deltas.at(_uuid1), expectedDeltasNss1);
+    ASSERT_EQ(deltas.at(_uuid2), expectedDeltasNss2);
+}
+
 using ReplicatedFastCountDeathTest = ReplicatedFastCountTest;
 
 // TODO SERVER-120203: Re-enable this test.
@@ -1216,4 +1689,4 @@ using ReplicatedFastCountDeathTest = ReplicatedFastCountTest;
 // }
 
 }  // namespace
-};  // namespace mongo
+}  // namespace mongo
