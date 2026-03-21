@@ -131,6 +131,7 @@ rules:
           - incompatible_oscrypto
           - incompatible_ppc
           - incompatible_s390x
+          - incompatible_amazon_linux2
           - incompatible_aubsan
           - incompatible_tsan
           - incompatible_debug_mode
@@ -187,14 +188,6 @@ rules:
             "streams_aspio_utilities",
             "streams_externaljs",
             "streams_aspio_pubsub",
-            "streams_sanitizer_gen",
-            "streams_https_sanitizer",
-            "streams_lambda_sanitizer",
-            "streams_kinesis_sanitizer",
-            "streams_s3_sanitizer",
-            "streams_build_and_push",
-            "streams_build_and_push_break_glass",
-            "streams_build_debug",
             # TODO: remove these exceptions when SERVER-94573 is resolved
             "selinux_rhel9_enterprise",
             "selinux_rhel8_org",
