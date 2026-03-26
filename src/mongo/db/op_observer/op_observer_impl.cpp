@@ -330,20 +330,19 @@ std::vector<repl::IndexIdents> buildIndexIdentsForO2(OperationContext* opCtx,
         if (isPrimaryDrivenIndexBuildEnabled(VersionContext::getDecoration(opCtx))) {
             invariant(indexBuildInfo.sorterIdent);
             invariant(indexBuildInfo.sideWritesIdent);
-            invariant(indexBuildInfo.skippedRecordsTrackerIdent);
+            invariant(indexBuildInfo.skippedRecordsIdent);
             invariant(
                 !(indexBuildInfo.spec["unique"].trueValue() ||
                   IndexDescriptor::isIdIndexPattern(indexBuildInfo.spec.getObjectField("key"))) ||
-                indexBuildInfo.constraintViolationsTrackerIdent);
+                indexBuildInfo.constraintViolationsIdent);
 
             repl::InternalIdents internalIdents;
             internalIdents.setSorterIdent(*indexBuildInfo.sorterIdent);
             internalIdents.setSideWritesIdent(*indexBuildInfo.sideWritesIdent);
-            internalIdents.setSkippedRecordsTrackerIdent(
-                *indexBuildInfo.skippedRecordsTrackerIdent);
-            if (indexBuildInfo.constraintViolationsTrackerIdent) {
-                internalIdents.setConstraintViolationsTrackerIdent(
-                    *indexBuildInfo.constraintViolationsTrackerIdent);
+            internalIdents.setSkippedRecordsIdent(*indexBuildInfo.skippedRecordsIdent);
+            if (indexBuildInfo.constraintViolationsIdent) {
+                internalIdents.setConstraintViolationsIdent(
+                    *indexBuildInfo.constraintViolationsIdent);
             }
             indexIdents.setInternalIdents(std::move(internalIdents));
         }
@@ -1301,16 +1300,14 @@ BSONObj buildContainerOpObject(std::variant<int64_t, std::span<const char>> key,
 }
 
 OpTimeBundle logContainerInsert(OperationContext* opCtx,
-                                const NamespaceString& ns,
-                                const UUID& uuid,
                                 StringData container,
                                 std::variant<int64_t, std::span<const char>> key,
                                 std::span<const char> value,
                                 OperationLogger& logger) {
+    const auto& ns = NamespaceString::kContainerNamespace;
     MutableOplogEntry entry;
     entry.setTid(ns.tenantId());
     entry.setNss(ns);
-    entry.setUuid(uuid);
     entry.setContainer(container);
     entry.setOpType(repl::OpTypeEnum::kContainerInsert);
     entry.setObject(buildContainerOpObject(key, value));
@@ -1323,12 +1320,11 @@ OpTimeBundle logContainerInsert(OperationContext* opCtx,
 }
 
 void _onContainerInsert(OperationContext* opCtx,
-                        const NamespaceString& ns,
-                        const UUID& collUUID,
                         StringData ident,
                         std::variant<int64_t, std::span<const char>> key,
                         std::span<const char> value,
                         OperationLogger& logger) {
+    const auto& ns = NamespaceString::kContainerNamespace;
     auto oplogDisabled = repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, ns);
     auto txnParticipant = TransactionParticipant::get(opCtx);
     auto inMultiDocumentTransaction =
@@ -1341,7 +1337,6 @@ void _onContainerInsert(OperationContext* opCtx,
         op.setVersionContextIfHasOperationFCV(VersionContext::getDecoration(opCtx));
         op.setTid(ns.tenantId());
         op.setNss(ns);
-        op.setUuid(collUUID);
         op.setContainer(ident);
         op.setObject(buildContainerOpObject(key, value));
         return op;
@@ -1365,24 +1360,22 @@ void _onContainerInsert(OperationContext* opCtx,
         return;
     }
 
-    auto opTime = logContainerInsert(opCtx, ns, collUUID, ident, key, value, logger);
+    auto opTime = logContainerInsert(opCtx, ident, key, value, logger);
 
     SessionTxnRecord sessionTxnRecord;
     sessionTxnRecord.setLastWriteOpTime(opTime.writeOpTime);
     sessionTxnRecord.setLastWriteDate(opTime.wallClockTime);
-    onWriteOpCompleted(opCtx, {kUninitializedStmtId}, sessionTxnRecord, ns);
+    // We don't have any StmtId's so we don't need to call onWriteOpCompleted().
 }
 
 OpTimeBundle logContainerDelete(OperationContext* opCtx,
-                                const NamespaceString& ns,
-                                const UUID& uuid,
                                 StringData container,
                                 std::variant<int64_t, std::span<const char>> key,
                                 OperationLogger& logger) {
+    const auto& ns = NamespaceString::kContainerNamespace;
     MutableOplogEntry entry;
     entry.setTid(ns.tenantId());
     entry.setNss(ns);
-    entry.setUuid(uuid);
     entry.setContainer(container);
     entry.setOpType(repl::OpTypeEnum::kContainerDelete);
     entry.setObject(buildContainerOpObject(key));
@@ -1395,11 +1388,10 @@ OpTimeBundle logContainerDelete(OperationContext* opCtx,
 }
 
 void _onContainerDelete(OperationContext* opCtx,
-                        const NamespaceString& ns,
-                        const UUID& collUUID,
                         StringData ident,
                         std::variant<int64_t, std::span<const char>> key,
                         OperationLogger& logger) {
+    const auto& ns = NamespaceString::kContainerNamespace;
     auto oplogDisabled = repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, ns);
     auto txnParticipant = TransactionParticipant::get(opCtx);
     auto inMultiDocumentTransaction =
@@ -1412,7 +1404,6 @@ void _onContainerDelete(OperationContext* opCtx,
         op.setVersionContextIfHasOperationFCV(VersionContext::getDecoration(opCtx));
         op.setTid(ns.tenantId());
         op.setNss(ns);
-        op.setUuid(collUUID);
         op.setContainer(ident);
         op.setObject(buildContainerOpObject(key));
         return op;
@@ -1436,48 +1427,38 @@ void _onContainerDelete(OperationContext* opCtx,
         return;
     }
 
-    auto opTime = logContainerDelete(opCtx, ns, collUUID, ident, key, logger);
+    auto opTime = logContainerDelete(opCtx, ident, key, logger);
 
     SessionTxnRecord sessionTxnRecord;
     sessionTxnRecord.setLastWriteOpTime(opTime.writeOpTime);
     sessionTxnRecord.setLastWriteDate(opTime.wallClockTime);
-    onWriteOpCompleted(opCtx, {kUninitializedStmtId}, sessionTxnRecord, ns);
+    // We don't have any StmtId's so we don't need to call onWriteOpCompleted().
 }
 
 }  // namespace
 
 void OpObserverImpl::onContainerInsert(OperationContext* opCtx,
-                                       const NamespaceString& ns,
-                                       const UUID& collUUID,
                                        StringData ident,
                                        int64_t key,
                                        std::span<const char> value) {
-    _onContainerInsert(opCtx, ns, collUUID, ident, key, value, *_operationLogger);
+    _onContainerInsert(opCtx, ident, key, value, *_operationLogger);
 }
 
 void OpObserverImpl::onContainerInsert(OperationContext* opCtx,
-                                       const NamespaceString& ns,
-                                       const UUID& collUUID,
                                        StringData ident,
                                        std::span<const char> key,
                                        std::span<const char> value) {
-    _onContainerInsert(opCtx, ns, collUUID, ident, key, value, *_operationLogger);
+    _onContainerInsert(opCtx, ident, key, value, *_operationLogger);
+}
+
+void OpObserverImpl::onContainerDelete(OperationContext* opCtx, StringData ident, int64_t key) {
+    _onContainerDelete(opCtx, ident, key, *_operationLogger);
 }
 
 void OpObserverImpl::onContainerDelete(OperationContext* opCtx,
-                                       const NamespaceString& ns,
-                                       const UUID& collUUID,
-                                       StringData ident,
-                                       int64_t key) {
-    _onContainerDelete(opCtx, ns, collUUID, ident, key, *_operationLogger);
-}
-
-void OpObserverImpl::onContainerDelete(OperationContext* opCtx,
-                                       const NamespaceString& ns,
-                                       const UUID& collUUID,
                                        StringData ident,
                                        std::span<const char> key) {
-    _onContainerDelete(opCtx, ns, collUUID, ident, key, *_operationLogger);
+    _onContainerDelete(opCtx, ident, key, *_operationLogger);
 }
 
 void OpObserverImpl::onInternalOpMessage(

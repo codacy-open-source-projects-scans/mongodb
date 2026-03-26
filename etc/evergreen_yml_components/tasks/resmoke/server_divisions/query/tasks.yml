@@ -828,6 +828,18 @@ tasks:
       - func: "run tests"
 
   - <<: *task_template
+    name: change_streams_whole_cluster_passthrough_v2
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+      ]
+    commands:
+      - func: "do setup"
+      - func: "run tests"
+
+  - <<: *task_template
     name: change_streams_whole_cluster_secondary_reads_sharded_collections
     tags:
       [
@@ -972,6 +984,32 @@ tasks:
         vars:
           suite: disagg_change_streams_secondary_reads_passthrough
           resmoke_jobs_max: 2
+
+  - <<: *task_template
+    name: disagg_change_streams_whole_cluster_passthrough
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "requires_extra_system_deps",
+      ]
+    commands:
+      - func: "do setup"
+      - func: "run tests"
+
+  - <<: *task_template
+    name: disagg_change_streams_whole_db_passthrough
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "requires_extra_system_deps",
+      ]
+    commands:
+      - func: "do setup"
+      - func: "run tests"
 
   - <<: *gen_task_template
     name: aggregation_mongos_pqs_fallback_gen
@@ -2018,6 +2056,7 @@ tasks:
         "incompatible_tsan",
         "incompatible_aubsan",
         "incompatible_debug_mode",
+        "exclude_from_sbe_variants",
       ]
     commands:
       - func: "initialize multiversion tasks"
@@ -2049,6 +2088,7 @@ tasks:
         "incompatible_tsan",
         "incompatible_aubsan",
         "incompatible_debug_mode",
+        "exclude_from_sbe_variants",
       ]
     commands:
       - func: "initialize multiversion tasks"
@@ -2080,6 +2120,7 @@ tasks:
         "incompatible_tsan",
         "incompatible_aubsan",
         "incompatible_debug_mode",
+        "exclude_from_sbe_variants",
       ]
     commands:
       - func: "initialize multiversion tasks"
@@ -2111,6 +2152,7 @@ tasks:
         "incompatible_tsan",
         "incompatible_aubsan",
         "incompatible_debug_mode",
+        "exclude_from_sbe_variants",
       ]
     commands:
       - func: "initialize multiversion tasks"
