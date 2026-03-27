@@ -991,6 +991,7 @@ tasks:
         "requires_execution_on_windows_patch_build",
         "requires_large_host",
         "requires_replicated_fast_count_recovery",
+        "has_bazel_target",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -1006,6 +1007,7 @@ tasks:
         "assigned_to_jira_team_server_integration",
         "release_critical",
         "requires_large_host",
+        "has_bazel_target",
       ]
     commands:
       - func: "do setup"
@@ -2463,6 +2465,7 @@ tasks:
       - func: "run tests"
         vars:
           suite: timeseries_write_pbt
+          resmoke_args: "--fastCheckParameters=${fastCheckParameters|}"
 
   ################################################
   #           Disagg Storage tasks               #
@@ -2571,23 +2574,21 @@ tasks:
           # Running multiple jobs in parallel complicates getting a consistent view of the database via checkpoints.
           resmoke_jobs_max: 1
 
-  # TODO (SERVER-120736) Reenable suite with only passing tests.
-  # Disabling to complete SERVER-119891. Exclude all failing DSC tests/suites to force master patch builds to be green to enable autoreverter.
-  # - <<: *gen_task_template
-  #   name: disagg_retryable_writes_jscore_passthrough_gen
-  #   tags:
-  #     [
-  #       "assigned_to_jira_team_server_repl",
-  #       "default",
-  #       "large",
-  #       "clustered_collections",
-  #       "requires_extra_system_deps",
-  #     ]
-  #   commands:
-  #     - func: "generate resmoke tasks"
-  #       vars:
-  #         suite: disagg_retryable_writes_jscore_passthrough
-  #         use_large_distro: "true"
+  - <<: *gen_task_template
+    name: disagg_retryable_writes_jscore_passthrough_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_repl",
+        "default",
+        "large",
+        "clustered_collections",
+        "requires_extra_system_deps",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          suite: disagg_retryable_writes_jscore_passthrough
+          use_large_distro: "true"
 
   - <<: *gen_task_template
     name: disagg_concurrency_replication_gen

@@ -222,14 +222,14 @@ public:
         key.serializeForSorter(buffer);
         val.serializeForSorter(buffer);
 
-        const auto currentKey = _nextKey++;
         const auto size = static_cast<size_t>(buffer.len());
         const std::span<const char> value =
             size == 0 ? std::span<const char>{} : std::span<const char>(buffer.buf(), size);
 
         WriteUnitOfWork wuow(&_opCtx);
+        _ru.onRollback([this](OperationContext*) { --_nextKey; });
         uassertStatusOK(container_write::insert(
-            &_opCtx, _ru, _container, currentKey, value, container::ExistingKeyPolicy::overwrite));
+            &_opCtx, _ru, _container, _nextKey++, value, container::ExistingKeyPolicy::overwrite));
         wuow.commit();
 
         if (size > 0) {
@@ -366,6 +366,7 @@ public:
             for (size_t i = 0; i < oldIters.size(); i += numParallelSpills) {
                 auto count = std::min(numParallelSpills, oldIters.size() - i);
                 auto spillsToMerge = std::span(oldIters).subspan(i, count);
+                validateMergeSpillRanges<Key, Value>(spillsToMerge);
 
                 // For container-based spilling we append merged data back into the same container
                 // range, so we rely on _minAvailableDiskBytesToSpill as a lower bound instead of
@@ -378,7 +379,7 @@ public:
                 auto writer = this->_storage->makeWriter(opts, settings);
 
                 int64_t deleteRangeStart = spillsToMerge.front()->getRange().getStart();
-                int64_t deleteRangeEnd = validateMergeSpillRanges<Key, Value>(spillsToMerge);
+                int64_t deleteRangeEnd = spillsToMerge.back()->getRange().getEnd();
                 const int64_t numSourceRows = deleteRangeEnd - deleteRangeStart;
 
                 int64_t numSpilled = 0;

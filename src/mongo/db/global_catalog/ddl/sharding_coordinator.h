@@ -107,6 +107,8 @@ public:
 class MONGO_MOD_NEEDS_REPLACEMENT ShardingCoordinator
     : public repl::PrimaryOnlyService::TypedInstance<ShardingCoordinator> {
 public:
+    static inline const auto kExponentialBackoff = Backoff(Seconds(1), Milliseconds::max());
+
     explicit ShardingCoordinator(ShardingCoordinatorService* service,
                                  std::string name,
                                  const BSONObj& coorDoc);
@@ -165,10 +167,6 @@ public:
             : boost::none;
     }
 
-    const boost::optional<mongo::DatabaseVersion>& getDatabaseVersion() const {
-        return _databaseVersion;
-    }
-
 protected:
     const NamespaceString& originalNss() const {
         return _coordId.getNss();
@@ -179,10 +177,6 @@ protected:
             return bucketNss.get();
         }
         return originalNss();
-    }
-
-    virtual std::set<NamespaceString> _getAdditionalLocksToAcquire(OperationContext* opCtx) {
-        return {};
     }
 
     virtual ShardingCoordinatorMetadata const& metadata() const {
@@ -244,6 +238,18 @@ protected:
      */
     virtual CoordinatorStateDoc& getDoc() = 0;
 
+    virtual void _initialize(OperationContext* opCtx) = 0;
+
+    virtual void _checkCoordinatorPreconditions(OperationContext* opCtx,
+                                                bool afterAcquiringLocks) = 0;
+
+    virtual ExecutorFuture<void> _acquireLocksAsync(
+        OperationContext* opCtx,
+        std::shared_ptr<executor::ScopedTaskExecutor> executor,
+        const CancellationToken& token) = 0;
+
+    virtual void _releaseLocks(OperationContext* opCtx) = 0;
+
     virtual void appendCommandInfo(BSONObjBuilder* cmdInfoBuilder) const {}
 
     virtual BSONObjBuilder basicReportBuilder() const noexcept;
@@ -256,7 +262,6 @@ protected:
 
     const bool _recoveredFromDisk;
     const boost::optional<mongo::ForwardableOperationMetadata> _forwardableOpMetadata;
-    const boost::optional<mongo::DatabaseVersion> _databaseVersion;
     boost::optional<NamespaceString> _bucketNss;
 
     bool _firstExecution{
@@ -291,17 +296,6 @@ private:
     ExecutorFuture<bool> _removeDocumentUntillSuccessOrStepdown(
         std::shared_ptr<executor::TaskExecutor> executor);
 
-    ExecutorFuture<void> _acquireAllLocksAsync(
-        OperationContext* opCtx,
-        std::shared_ptr<executor::ScopedTaskExecutor> executor,
-        const CancellationToken& token);
-
-    template <typename T>
-    ExecutorFuture<void> _acquireLockAsync(std::shared_ptr<executor::ScopedTaskExecutor> executor,
-                                           const CancellationToken& token,
-                                           const T& resource,
-                                           LockMode lockMode);
-
     ExecutorFuture<void> _translateTimeseriesNss(
         std::shared_ptr<executor::ScopedTaskExecutor> executor, const CancellationToken& token);
 
@@ -311,15 +305,10 @@ private:
     SharedPromise<void> _constructionCompletionPromise;
     SharedPromise<void> _completionPromise;
 
-    // A Locker object works attached to an opCtx and it's destroyed once the opCtx gets out of
-    // scope. However, we must keep alive a unique Locker object during the whole
-    // ShardingCoordinator life to preserve the lock state among all the executor tasks.
-    std::unique_ptr<Locker> _locker;
-
-    std::stack<DDLLockManager::ScopedBaseDDLLock> _scopedLocks;
     std::shared_ptr<ShardingCoordinatorExternalState> _externalState;
 
-    friend class ShardingCoordinatorTest;
+    friend class ShardingDDLCoordinatorMixin;
+    friend class ShardingDDLCoordinatorTest;
 };
 
 class MONGO_MOD_UNFORTUNATELY_OPEN RecoverableShardingCoordinator

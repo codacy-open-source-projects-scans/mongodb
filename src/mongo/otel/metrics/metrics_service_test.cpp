@@ -33,8 +33,6 @@
 #include "mongo/otel/metrics/metrics_test_util.h"
 #include "mongo/unittest/unittest.h"
 
-#include <type_traits>
-
 #ifdef MONGO_CONFIG_OTEL
 #include <opentelemetry/metrics/provider.h>
 #include <opentelemetry/sdk/metrics/meter.h>
@@ -91,6 +89,30 @@ struct MetricCreator<Counter<double>> {
 };
 
 template <>
+struct MetricCreator<UpDownCounter<int64_t>> {
+    static UpDownCounter<int64_t>& create(MetricsService* svc,
+                                          MetricName name,
+                                          std::string desc,
+                                          MetricUnit unit,
+                                          MetricCreatorOptions options = {}) {
+        return svc->createInt64UpDownCounter(
+            name, std::move(desc), unit, {.inServerStatus = options.inServerStatus});
+    }
+};
+
+template <>
+struct MetricCreator<UpDownCounter<double>> {
+    static UpDownCounter<double>& create(MetricsService* svc,
+                                         MetricName name,
+                                         std::string desc,
+                                         MetricUnit unit,
+                                         MetricCreatorOptions options = {}) {
+        return svc->createDoubleUpDownCounter(
+            name, std::move(desc), unit, {.inServerStatus = options.inServerStatus});
+    }
+};
+
+template <>
 struct MetricCreator<Gauge<int64_t>> {
     static Gauge<int64_t>& create(MetricsService* svc,
                                   MetricName name,
@@ -139,8 +161,48 @@ struct MetricCreator<Histogram<double>> {
 };
 
 /**
+ * For each scalar metric type T (int64_t vs double within the same instrument family), maps T to
+ * the other width so tests can assert ObjectAlreadyExists when the same name is reused.
+ */
+template <typename T>
+struct AlternativeScalarWidthMetricType;
+
+template <>
+struct AlternativeScalarWidthMetricType<Counter<int64_t>> {
+    using type = Counter<double>;
+};
+template <>
+struct AlternativeScalarWidthMetricType<Counter<double>> {
+    using type = Counter<int64_t>;
+};
+template <>
+struct AlternativeScalarWidthMetricType<UpDownCounter<int64_t>> {
+    using type = UpDownCounter<double>;
+};
+template <>
+struct AlternativeScalarWidthMetricType<UpDownCounter<double>> {
+    using type = UpDownCounter<int64_t>;
+};
+template <>
+struct AlternativeScalarWidthMetricType<Gauge<int64_t>> {
+    using type = Gauge<double>;
+};
+template <>
+struct AlternativeScalarWidthMetricType<Gauge<double>> {
+    using type = Gauge<int64_t>;
+};
+template <>
+struct AlternativeScalarWidthMetricType<Histogram<int64_t>> {
+    using type = Histogram<double>;
+};
+template <>
+struct AlternativeScalarWidthMetricType<Histogram<double>> {
+    using type = Histogram<int64_t>;
+};
+
+/**
  * Type-parameterized test fixture for testing metric creation behavior
- * that is common across all metric types (Counter, Gauge, Histogram).
+ * that is common across all metric types (Counter, UpDownCounter, Gauge, Histogram).
  */
 template <typename T>
 class MetricCreationTest : public MetricsServiceTest {};
@@ -149,6 +211,8 @@ using testing::ElementsAre;
 using testing::ElementsAreArray;
 using MetricTypes = testing::Types<Counter<int64_t>,
                                    Counter<double>,
+                                   UpDownCounter<int64_t>,
+                                   UpDownCounter<double>,
                                    Gauge<int64_t>,
                                    Gauge<double>,
                                    Histogram<int64_t>,
@@ -211,10 +275,9 @@ TYPED_TEST(MetricCreationTest, ExceptionWhenSameNameButDifferentParameters) {
 TYPED_TEST(MetricCreationTest, ExceptionWhenSameNameButDifferentType) {
     MetricCreator<TypeParam>::create(
         this->metricsService.get(), MetricNames::kTest1, "description", MetricUnit::kSeconds);
-    // Choose a metric type that is different from the current type.
-    using DifferentType = std::conditional_t<std::is_same_v<TypeParam, Counter<int64_t>>,
-                                             Counter<double>,
-                                             Counter<int64_t>>;
+    // Same instrument family but int64_t vs double (or vice versa) must not register under one
+    // name.
+    using DifferentType = typename AlternativeScalarWidthMetricType<TypeParam>::type;
     ASSERT_THROWS_CODE(
         MetricCreator<DifferentType>::create(
             this->metricsService.get(), MetricNames::kTest1, "description", MetricUnit::kSeconds),
@@ -296,6 +359,28 @@ TEST_F(MetricsServiceTest, CreateCounterBeforeInitialization) {
     }
 }
 
+TEST_F(MetricsServiceTest, CreateUpDownCounterBeforeInitialization) {
+    auto& int64UpDown = metricsService->createInt64UpDownCounter(
+        MetricNames::kTest1, "description", MetricUnit::kSeconds);
+    auto& doubleUpDown = metricsService->createDoubleUpDownCounter(
+        MetricNames::kTest2, "description", MetricUnit::kSeconds);
+
+    OtelMetricsCapturer metricsCapturer(*metricsService);
+
+    if (metricsCapturer.canReadMetrics()) {
+        EXPECT_EQ(metricsCapturer.readInt64Counter(MetricNames::kTest1), 0);
+        EXPECT_EQ(metricsCapturer.readDoubleCounter(MetricNames::kTest2), 0.0);
+    }
+
+    int64UpDown.add(5);
+    doubleUpDown.add(5.0);
+
+    if (metricsCapturer.canReadMetrics()) {
+        EXPECT_EQ(metricsCapturer.readInt64Counter(MetricNames::kTest1), 5);
+        EXPECT_DOUBLE_EQ(metricsCapturer.readDoubleCounter(MetricNames::kTest2), 5.0);
+    }
+}
+
 TEST_F(MetricsServiceTest, CreateGaugeBeforeInitialization) {
     auto& int64Gauge =
         metricsService->createInt64Gauge(MetricNames::kTest1, "description", MetricUnit::kSeconds);
@@ -361,16 +446,26 @@ TEST_F(SerializeMetricsTest, SerializesMetrics) {
         MetricNames::kTest3, "description", MetricUnit::kSeconds, {.inServerStatus = true});
     auto& gauge = metricsService->createDoubleGauge(
         MetricNames::kTest4, "description", MetricUnit::kQueries, {.inServerStatus = true});
+    auto& int64UpDown = metricsService->createInt64UpDownCounter(
+        MetricNames::kTest5, "description", MetricUnit::kSeconds, {.inServerStatus = true});
+    auto& doubleUpDown = metricsService->createDoubleUpDownCounter(
+        MetricNames::kTest6, "description", MetricUnit::kSeconds, {.inServerStatus = true});
     int64Histogram.record(10);
     doubleHistogram.record(20);
     counter.add(1);
     gauge.set(0.33);
+    int64UpDown.add(4);
+    int64UpDown.add(-1);
+    doubleUpDown.add(2.0);
+    doubleUpDown.add(-0.5);
 
     BSONObjBuilder expectedBson;
     expectedBson.append("test_only.metric1_seconds", BSON("average" << 10.0 << "count" << 1));
     expectedBson.append("test_only.metric2_seconds", BSON("average" << 20.0 << "count" << 1));
     expectedBson.append("test_only.metric3_seconds", 1);
     expectedBson.append("test_only.metric4_queries", 0.33);
+    expectedBson.append("test_only.metric5_seconds", 3);
+    expectedBson.append("test_only.metric6_seconds", 1.5);
     expectedBson.doneFast();
 
     BSONObjBuilder builder;
@@ -460,6 +555,74 @@ TEST_F(CreateDoubleCounterTest, RecordsValues) {
     if (metricsCapturer.canReadMetrics()) {
         EXPECT_DOUBLE_EQ(metricsCapturer.readDoubleCounter(MetricNames::kTest1), 16.0);
         EXPECT_DOUBLE_EQ(metricsCapturer.readDoubleCounter(MetricNames::kTest2), 3.75);
+    }
+}
+
+
+using CreateInt64UpDownCounterTest = MetricsServiceTest;
+
+TEST_F(CreateInt64UpDownCounterTest, RecordsValues) {
+    OtelMetricsCapturer metricsCapturer(*metricsService);
+
+    UpDownCounter<int64_t>& u1 = metricsService->createInt64UpDownCounter(
+        MetricNames::kTest1, "description1", MetricUnit::kSeconds);
+
+    UpDownCounter<int64_t>& u2 = metricsService->createInt64UpDownCounter(
+        MetricNames::kTest2, "description2", MetricUnit::kBytes);
+
+    if (metricsCapturer.canReadMetrics()) {
+        EXPECT_EQ(metricsCapturer.readInt64Counter(MetricNames::kTest1), 0);
+        EXPECT_EQ(metricsCapturer.readInt64Counter(MetricNames::kTest2), 0);
+    }
+
+    u1.add(10);
+    u2.add(3);
+    u1.add(5);
+    u2.add(-1);
+    u1.add(-4);
+    u2.add(2);
+
+    if (metricsCapturer.canReadMetrics()) {
+        EXPECT_EQ(metricsCapturer.readInt64Counter(MetricNames::kTest1), 11);
+        EXPECT_EQ(metricsCapturer.readInt64Counter(MetricNames::kTest2), 4);
+    }
+
+    u1.add(-1);
+    if (metricsCapturer.canReadMetrics()) {
+        EXPECT_EQ(metricsCapturer.readInt64Counter(MetricNames::kTest1), 10);
+    }
+}
+
+using CreateDoubleUpDownCounterTest = MetricsServiceTest;
+
+TEST_F(CreateDoubleUpDownCounterTest, RecordsValues) {
+    OtelMetricsCapturer metricsCapturer(*metricsService);
+
+    UpDownCounter<double>& u1 = metricsService->createDoubleUpDownCounter(
+        MetricNames::kTest1, "description1", MetricUnit::kSeconds);
+
+    UpDownCounter<double>& u2 = metricsService->createDoubleUpDownCounter(
+        MetricNames::kTest2, "description2", MetricUnit::kBytes);
+
+    if (metricsCapturer.canReadMetrics()) {
+        EXPECT_EQ(metricsCapturer.readDoubleCounter(MetricNames::kTest1), 0.0);
+        EXPECT_EQ(metricsCapturer.readDoubleCounter(MetricNames::kTest2), 0.0);
+    }
+
+    u1.add(10.5);
+    u2.add(1.25);
+    u1.add(5.5);
+    u2.add(-0.5);
+    u2.add(1.25);
+
+    if (metricsCapturer.canReadMetrics()) {
+        EXPECT_DOUBLE_EQ(metricsCapturer.readDoubleCounter(MetricNames::kTest1), 16.0);
+        EXPECT_DOUBLE_EQ(metricsCapturer.readDoubleCounter(MetricNames::kTest2), 2.0);
+    }
+
+    u1.add(-0.5);
+    if (metricsCapturer.canReadMetrics()) {
+        EXPECT_DOUBLE_EQ(metricsCapturer.readDoubleCounter(MetricNames::kTest1), 15.5);
     }
 }
 
