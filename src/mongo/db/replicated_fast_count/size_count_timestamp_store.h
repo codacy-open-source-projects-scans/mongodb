@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2018-present MongoDB, Inc.
+ *    Copyright (C) 2026-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -26,16 +26,18 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
+
 #pragma once
 
-#include "mongo/base/concept/copy_assignable.h"
-#include "mongo/base/concept/copy_constructible.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/operation_context.h"
 
-namespace mongo {
-namespace concept {
-    /*!
-     * The Assignable concept models a type which can be copy assigned and copy constructed.
-     */
-    struct Assignable : CopyConstructible, CopyAssignable {};
-}  // namespace concept
-}  // namespace mongo
+#include <boost/optional/optional.hpp>
+
+namespace mongo::replicated_fast_count {
+
+class SizeCountTimestampStore {
+public:
+    [[nodiscard]] boost::optional<Timestamp> read(OperationContext* opCtx) const;
+};
+}  // namespace mongo::replicated_fast_count

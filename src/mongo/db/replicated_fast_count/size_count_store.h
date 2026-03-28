@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2018-present MongoDB, Inc.
+ *    Copyright (C) 2026-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -26,40 +26,34 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
+
 #pragma once
 
-#include "mongo/stdx/type_traits.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/util/uuid.h"
 
-#include <type_traits>
+#include <boost/optional/optional.hpp>
 
-namespace mongo {
-namespace concept {
+namespace mongo::replicated_fast_count {
+
+class SizeCountStore {
+public:
+    /**
+     * In-memory representation of the persisted `size` and `count` for a collection. The
+     * `timestamp` indicates when the `size` and `count` values were last known to be accurate.
+     */
+    struct Entry {
+        Timestamp timestamp{0, 0};
+        int64_t size{0};
+        int64_t count{0};
+    };
 
     /**
-     * The Constructable trait indicates whether `T` is constructible from `Constructible`.
+     * Returns the persisted size, count, and timestamp for the collection with `uuid`.
      *
-     * RETURNS: true if `T{ std::declval< Constructible >() }` is a valid expression and false
-     * otherwise.
+     * If no entry exists for `uuid`, read() returns boost::none.
      */
-    template <typename T, typename Constructible, typename = void>
-    struct is_constructible : std::false_type {};
-
-    template <typename T, typename Constructible>
-    struct is_constructible<T,
-                            Constructible,
-                            stdx::void_t<decltype(T{std::declval<Constructible<T>>()})>>
-        : std::true_type {};
-
-    /**
-     * The Constructable concept models a type which can be passed to a single-argument constructor
-     * of `T`. This is not possible to describe in the type `Constructible`.
-     *
-     * The expression: `T{ std::declval< Constructible< T > >() }` should be valid.
-     *
-     * This concept is more broadly applicable than `ConvertibleTo`.  `ConvertibleTo` uses implicit
-     * conversion, whereas `Constructible` uses direct construction.
-     */
-    template <typename T>
-    struct Constructible {};
-}  // namespace concept
-}  // namespace mongo
+    [[nodiscard]] boost::optional<Entry> read(OperationContext* opCtx, UUID uuid) const;
+};
+}  // namespace mongo::replicated_fast_count

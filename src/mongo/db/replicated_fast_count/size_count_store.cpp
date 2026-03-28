@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2018-present MongoDB, Inc.
+ *    Copyright (C) 2026-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -26,21 +26,33 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-#pragma once
 
-namespace mongo {
-namespace concept {
-    /**
-     * The CopyAssignable concept models a type which can be copy assigned.
-     *
-     * The expression: `copyAssignable= copyAssignable` should be valid.
-     */
-    struct CopyAssignable {
-        /**
-         * The copy assignment operator is required by `CopyAssignable`.
-         * NOTE: Copy Assignment is only required on lvalue targets of `CopyAssignable`.
-         */
-        CopyAssignable& operator=(const CopyAssignable&) &;
-    };
-}  // namespace concept
-}  // namespace mongo
+#include "mongo/db/replicated_fast_count/size_count_store.h"
+
+#include "mongo/db/record_id_helpers.h"
+#include "mongo/db/replicated_fast_count/replicated_fast_count_delta_utils.h"
+#include "mongo/db/shard_role/shard_catalog/clustered_collection_util.h"
+
+namespace mongo::replicated_fast_count {
+
+boost::optional<SizeCountStore::Entry> SizeCountStore::read(OperationContext* opCtx,
+                                                            UUID uuid) const {
+    const auto acquisition = acquireFastCountCollectionForRead(opCtx).value();
+    const CollectionPtr& coll = acquisition.getCollectionPtr();
+    const RecordId rid =
+        record_id_helpers::keyForDoc(BSON("_id" << uuid),
+                                     clustered_util::makeDefaultClusteredIdIndex().getIndexSpec(),
+                                     /*collator=*/nullptr)
+            .getValue();
+    Snapshotted<BSONObj> document;
+    if (!coll->findDoc(opCtx, rid, &document)) {
+        return boost::none;
+    }
+
+    const BSONObj& data = document.value();
+    return SizeCountStore::Entry{
+        .timestamp = data.getField(kValidAsOfKey).timestamp(),
+        .size = data.getField(kMetadataKey).Obj().getField(kSizeKey).Long(),
+        .count = data.getField(kMetadataKey).Obj().getField(kCountKey).Long()};
+}
+}  // namespace mongo::replicated_fast_count

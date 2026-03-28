@@ -41,6 +41,7 @@
 #include "mongo/bson/oid.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/client/dbclient_cursor.h"
+#include "mongo/db/change_stream_pre_images_collection_manager.h"
 #include "mongo/db/client.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/dbdirectclient.h"
@@ -112,6 +113,7 @@
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -581,6 +583,48 @@ protected:
         ASSERT_EQ(viewless && viewlessParam, isTimeseries);
     }
 
+    void testOnCreateCollRecordIdsReplicated(bool recordIdsReplicated) {
+        RAIIServerParameterControllerForTest replicateLocalCatalogInfoController(
+            "featureFlagReplicateLocalCatalogIdentifiers", true);
+        RAIIServerParameterControllerForTest recordIdsReplicatedController(
+            "featureFlagRecordIdsReplicated", true);
+
+        auto opCtxWrapper = cc().makeOperationContext();
+        auto opCtx = opCtxWrapper.get();
+
+        // Simulate catalog information for a normal collection with a standard '_id_' index.
+        ASSERT_TRUE(nss.isReplicated());
+        auto catalogIdentifier =
+            newCatalogIdentifier(opCtx, nss.dbName(), true /* includeIdIndexIdent */);
+        CollectionOptions options{.uuid = uuid};
+
+        OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
+        {
+            // Generate the create oplog entry.
+            VersionContext::FixedOperationFCVRegion fixedOfcvRegion(opCtx);
+            AutoGetCollection autoColl(opCtx, nss, MODE_X);
+            WriteUnitOfWork wuow(opCtx);
+            opObserver.onCreateCollection(opCtx,
+                                          nss,
+                                          options,
+                                          BSON("v" << 2 << "key" << BSON("_id_" << 1) << "name"
+                                                   << "_id_") /* idIndex */,
+                                          repl::getNextOpTime(opCtx),
+                                          catalogIdentifier,
+                                          false /* fromMigrate*/,
+                                          false,
+                                          recordIdsReplicated);
+            wuow.commit();
+        }
+
+        const auto oplogEntryBSON = getSingleOplogEntry(opCtx);
+        const auto oplogEntry = assertGet(OplogEntry::parse(oplogEntryBSON));
+        validateReplicatedCatalogIdentifier(
+            opCtx, oplogEntry, catalogIdentifier, /*catalogReplicationEnabled=*/true);
+        ASSERT_TRUE(oplogEntry.getObject().hasField("recordIdsReplicated"));
+        ASSERT_EQ(recordIdsReplicated, oplogEntry.getObject().getBoolField("recordIdsReplicated"));
+    }
+
     void testOnCreateCollClustered(bool catalogReplicationEnabled) {
         RAIIServerParameterControllerForTest replicateLocalCatalogInfoController(
             "featureFlagReplicateLocalCatalogIdentifiers", catalogReplicationEnabled);
@@ -695,6 +739,15 @@ TEST_F(OpObserverOnCreateCollectionTest,
     testOnCreateCollBasic(
         false /* catalogReplicationEnabled */, true /* viewless */, true /* viewlessParam */);
 }
+
+TEST_F(OpObserverOnCreateCollectionTest, createCollectionRecordIdsReplicatedFalse) {
+    testOnCreateCollRecordIdsReplicated(/*recordIdsReplicated=*/false);
+}
+
+TEST_F(OpObserverOnCreateCollectionTest, createCollectionRecordIdsReplicatedTrue) {
+    testOnCreateCollRecordIdsReplicated(/*recordIdsReplicated=*/true);
+}
+
 
 TEST_F(OpObserverOnCreateCollectionTest, ClusteredReplicatedCatalogIdentifiersEnabled) {
     testOnCreateCollClustered(true /* catalogReplicationEnabled */);
@@ -3102,8 +3155,11 @@ protected:
                 update->retryableFindAndModifyLocation =
                     RetryableFindAndModifyLocation::kSideCollection;
                 update->updateArgs->stmtIds = {1};
-                if (testCase.retryableOptions == kRecordInSideCollection) {
+                if (testCase.retryableOptions == kRecordInSideCollection &&
+                    testCase.oplogGroupType != kGroup) {
                     // 'getNextOpTimes' requires us to be inside a WUOW when reserving oplog slots.
+                    // Skip for grouped (batched) writes -- onBatchedWriteCommit handles its own
+                    // oplog slot reservation.
                     WriteUnitOfWork wuow(opCtx);
                     auto reservedSlots = repl::getNextOpTimes(opCtx, 3);
                     update->updateArgs->oplogSlots = reservedSlots;
@@ -3229,11 +3285,6 @@ TEST_F(OnUpdateOutputsTest, TestNonTransactionFundamentalOnUpdateOutputs) {
     for (std::size_t testIdx = 0; testIdx < _cases.size(); ++testIdx) {
         const auto& testCase = _cases[testIdx];
         logTestCase(testCase);
-
-        // TODO (SERVER-122524): Re-enable test cases with grouping.
-        if (testCase.oplogGroupType == kGroup) {
-            continue;
-        }
 
         auto opCtxRaii = cc().makeOperationContext();
         OperationContext* opCtx = opCtxRaii.get();
@@ -3477,6 +3528,12 @@ protected:
     // Reusable test for asserting batched writes with a single operation are not wrapped in
     // applyOps
     void testBatchedWriteSingleOplogEntryIsNotWrappedInApplyOps(auto opLoggingFn, bool isRetryable);
+
+    // Performs a batched insert within a WUOW, commits, and returns the resulting applyOps oplog
+    // entry.
+    repl::OplogEntry commitBatchedInserts(OperationContext* opCtx,
+                                          const CollectionPtr& coll,
+                                          const std::vector<bool>& fromMigrateFlags);
 };
 
 // Verifies that a WriteUnitOfWork with groupOplogEntries=kGroupForTransaction replicates its writes
@@ -4646,6 +4703,283 @@ TEST_F(BatchedWriteOutputsTest, TestSingleContainerDeleteIsNotInApplyOps) {
         },
         false /*isRetryable*/);
 }
+
+repl::OplogEntry BatchedWriteOutputsTest::commitBatchedInserts(
+    OperationContext* opCtx, const CollectionPtr& coll, const std::vector<bool>& fromMigrateFlags) {
+    WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::kGroupForPossiblyRetryableOperations);
+    ASSERT(BatchedWriteContext::get(opCtx).writesAreBatched());
+
+    std::vector<InsertStatement> inserts;
+    for (size_t i = 0; i < fromMigrateFlags.size(); ++i) {
+        inserts.emplace_back(BSON("_id" << static_cast<int>(i)));
+    }
+    bool allFromMigrate =
+        std::all_of(fromMigrateFlags.begin(), fromMigrateFlags.end(), [](bool v) { return v; });
+
+    opCtx->getServiceContext()->getOpObserver()->onInserts(opCtx,
+                                                           coll,
+                                                           inserts.begin(),
+                                                           inserts.end(),
+                                                           /*recordIds=*/{},
+                                                           /*fromMigrate=*/fromMigrateFlags,
+                                                           /*defaultFromMigrate=*/allFromMigrate);
+    wuow.commit();
+
+    auto oplogs = getNOplogEntries(opCtx, 1);
+    auto oplogEntry = unittest::assertGet(repl::OplogEntry::parse(oplogs.back()));
+    ASSERT(oplogEntry.getCommandType() == repl::OplogEntry::CommandType::kApplyOps);
+    return oplogEntry;
+}
+
+// Extracts sub-operations from an applyOps entry and verifies each sub-op's fromMigrate
+// value matches the expected flags.
+void assertSubOpsFromMigrate(const repl::OplogEntry& applyOpsEntry,
+                             const std::vector<bool>& expectedFromMigrate) {
+    std::vector<repl::OplogEntry> innerEntries;
+    repl::ApplyOps::extractOperationsTo(
+        applyOpsEntry, applyOpsEntry.getEntry().toBSON(), &innerEntries);
+    ASSERT_EQ(innerEntries.size(), expectedFromMigrate.size());
+    for (size_t i = 0; i < expectedFromMigrate.size(); ++i) {
+        ASSERT_EQ(innerEntries[i].getFromMigrate().value_or(false), expectedFromMigrate[i])
+            << "Mismatch at sub-op index " << i;
+    }
+}
+
+// Test that the applyOps wrapper's fromMigrate flag and per-sub-op fromMigrate values are correct
+// for all-true, mixed, and all-false cases.
+TEST_F(BatchedWriteOutputsTest, TestApplyOpsFromMigrateAllTrue) {
+    auto opCtxRaii = cc().makeOperationContext();
+    auto* opCtx = opCtxRaii.get();
+    reset(opCtx, _nss);
+    reset(opCtx, NamespaceString::kRsOplogNamespace);
+    AutoGetCollection autoColl(opCtx, _nss, MODE_IX);
+
+    std::vector<bool> flags = {true, true, true};
+    auto oplogEntry = commitBatchedInserts(opCtx, *autoColl, flags);
+
+    ASSERT_TRUE(oplogEntry.getFromMigrate().value_or(false));
+    assertSubOpsFromMigrate(oplogEntry, flags);
+}
+
+TEST_F(BatchedWriteOutputsTest, TestApplyOpsFromMigrateMixed) {
+    auto opCtxRaii = cc().makeOperationContext();
+    auto* opCtx = opCtxRaii.get();
+    reset(opCtx, _nss);
+    reset(opCtx, NamespaceString::kRsOplogNamespace);
+    AutoGetCollection autoColl(opCtx, _nss, MODE_IX);
+
+    std::vector<bool> flags = {false, true, false};
+    auto oplogEntry = commitBatchedInserts(opCtx, *autoColl, flags);
+
+    ASSERT_FALSE(oplogEntry.getFromMigrate().value_or(false));
+    assertSubOpsFromMigrate(oplogEntry, flags);
+}
+
+TEST_F(BatchedWriteOutputsTest, TestApplyOpsFromMigrateAllFalse) {
+    auto opCtxRaii = cc().makeOperationContext();
+    auto* opCtx = opCtxRaii.get();
+    reset(opCtx, _nss);
+    reset(opCtx, NamespaceString::kRsOplogNamespace);
+    AutoGetCollection autoColl(opCtx, _nss, MODE_IX);
+
+    std::vector<bool> flags = {false, false};
+    auto oplogEntry = commitBatchedInserts(opCtx, *autoColl, flags);
+
+    ASSERT_FALSE(oplogEntry.getFromMigrate().value_or(false));
+    assertSubOpsFromMigrate(oplogEntry, flags);
+}
+
+// Test that multiple OpObserver calls with different fromMigrate values in the same WUOW
+// are handled correctly. The applyOps.fromMigrate flag should be false if ANY operation
+// is not fromMigrate.
+TEST_F(BatchedWriteOutputsTest, TestMultipleOpObserverCallsWithMixedFromMigrate) {
+    auto opCtxRaii = cc().makeOperationContext();
+    auto* opCtx = opCtxRaii.get();
+    reset(opCtx, _nss);
+    reset(opCtx, NamespaceString::kRsOplogNamespace);
+    AutoGetCollection autoColl(opCtx, _nss, MODE_IX);
+
+    WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::kGroupForTransaction);
+    ASSERT(BatchedWriteContext::get(opCtx).writesAreBatched());
+
+    auto batchInsert = [&](std::vector<BSONObj> docs, bool fromMigrate) {
+        std::vector<InsertStatement> inserts;
+        for (auto& doc : docs) {
+            inserts.emplace_back(std::move(doc));
+        }
+        opCtx->getServiceContext()->getOpObserver()->onInserts(
+            opCtx,
+            *autoColl,
+            inserts.begin(),
+            inserts.end(),
+            /*recordIds=*/{},
+            /*fromMigrate=*/std::vector<bool>(inserts.size(), fromMigrate),
+            /*defaultFromMigrate=*/fromMigrate);
+    };
+
+    batchInsert({BSON("_id" << 1), BSON("_id" << 2)}, /*fromMigrate=*/true);
+    batchInsert({BSON("_id" << 3), BSON("_id" << 4)}, /*fromMigrate=*/false);
+    batchInsert({BSON("_id" << 5)}, /*fromMigrate=*/true);
+    wuow.commit();
+
+    auto oplogs = getNOplogEntries(opCtx, 1);
+    auto oplogEntry = assertGet(OplogEntry::parse(oplogs.back()));
+    ASSERT(oplogEntry.getCommandType() == OplogEntry::CommandType::kApplyOps);
+    ASSERT_FALSE(oplogEntry.getFromMigrate());
+    assertSubOpsFromMigrate(oplogEntry, {true, true, false, false, true});
+}
+
+// Test that different operation types (insert, update, delete) with mixed fromMigrate flags
+// are handled correctly in the same batch.
+TEST_F(BatchedWriteOutputsTest, TestMixedOperationTypesWithMixedFromMigrate) {
+    auto opCtxRaii = cc().makeOperationContext();
+    auto* opCtx = opCtxRaii.get();
+    reset(opCtx, _nss);
+    reset(opCtx, NamespaceString::kRsOplogNamespace);
+    AutoGetCollection autoColl(opCtx, _nss, MODE_IX);
+
+    WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::kGroupForTransaction);
+    ASSERT(BatchedWriteContext::get(opCtx).writesAreBatched());
+
+    // Insert with fromMigrate=true.
+    {
+        std::vector<InsertStatement> inserts;
+        inserts.emplace_back(BSON("_id" << 1));
+        opCtx->getServiceContext()->getOpObserver()->onInserts(opCtx,
+                                                               *autoColl,
+                                                               inserts.begin(),
+                                                               inserts.end(),
+                                                               /*recordIds=*/{},
+                                                               /*fromMigrate=*/{true},
+                                                               /*defaultFromMigrate=*/true);
+    }
+
+    // Delete with fromMigrate=false.
+    {
+        OplogDeleteEntryArgs args;
+        args.fromMigrate = false;
+        auto doc = BSON("_id" << 2);
+        opCtx->getServiceContext()->getOpObserver()->onDelete(
+            opCtx, *autoColl, kUninitializedStmtId, doc, getDocumentKey(*autoColl, doc), args);
+    }
+
+    // Update with fromMigrate=true.
+    {
+        const auto preImageDoc = BSON("_id" << 3);
+        CollectionUpdateArgs collUpdateArgs{preImageDoc};
+        collUpdateArgs.criteria = preImageDoc;
+        collUpdateArgs.update = BSON("$set" << BSON("data" << "x"));
+        collUpdateArgs.source = OperationSource::kFromMigrate;
+        auto args = OplogUpdateEntryArgs(&collUpdateArgs, *autoColl);
+        opCtx->getServiceContext()->getOpObserver()->onUpdate(opCtx, args);
+    }
+
+    wuow.commit();
+
+    auto oplogs = getNOplogEntries(opCtx, 1);
+    auto oplogEntry = assertGet(OplogEntry::parse(oplogs.back()));
+    ASSERT(oplogEntry.getCommandType() == OplogEntry::CommandType::kApplyOps);
+    ASSERT_FALSE(oplogEntry.getFromMigrate());
+
+    std::vector<repl::OplogEntry> innerEntries;
+    repl::ApplyOps::extractOperationsTo(oplogEntry, oplogEntry.getEntry().toBSON(), &innerEntries);
+    ASSERT_EQ(innerEntries.size(), 3);
+    ASSERT_EQ(innerEntries[0].getOpType(), repl::OpTypeEnum::kInsert);
+    ASSERT_TRUE(innerEntries[0].getFromMigrate());
+    ASSERT_EQ(innerEntries[1].getOpType(), repl::OpTypeEnum::kDelete);
+    ASSERT_FALSE(innerEntries[1].getFromMigrate());
+    ASSERT_EQ(innerEntries[2].getOpType(), repl::OpTypeEnum::kUpdate);
+    ASSERT_TRUE(innerEntries[2].getFromMigrate());
+}
+
+// Test that batched updates with mixed fromMigrate flags only record pre-images for
+// non-fromMigrate operations. This exercises the primary write path through
+// writeChangeStreamPreImagesForApplyOpsEntry.
+TEST_F(BatchedWriteOutputsTest, TestBatchedWritePreImagesWithMixedFromMigrate) {
+    auto opCtxRaii = cc().makeOperationContext();
+    auto* opCtx = opCtxRaii.get();
+
+    // Register the ChangeStreamPreImagesOpObserver to handle pre-image recording.
+    opObserverRegistry()->addObserver(std::make_unique<ChangeStreamPreImagesOpObserver>());
+
+    // Create the pre-images collection.
+    ChangeStreamPreImagesCollectionManager::get(opCtx).createPreImagesCollection(opCtx);
+
+    // Create a collection with pre-images enabled.
+    const auto preImageNss =
+        NamespaceString::createNamespaceString_forTest(boost::none, "test", "preimage_coll");
+    const auto preImageUuid = UUID::gen();
+    writeConflictRetry(opCtx, "createCollection", preImageNss, [&] {
+        shard_role_details::getRecoveryUnit(opCtx)->setTimestampReadSource(
+            RecoveryUnit::ReadSource::kNoTimestamp);
+        shard_role_details::getRecoveryUnit(opCtx)->abandonSnapshot();
+        WriteUnitOfWork wunit(opCtx);
+        AutoGetCollection collRaii(opCtx, preImageNss, MODE_X);
+        auto db = collRaii.ensureDbExists(opCtx);
+        CollectionOptions opts;
+        opts.uuid = preImageUuid;
+        opts.changeStreamPreAndPostImagesOptions.setEnabled(true);
+        invariant(db->createCollection(opCtx, preImageNss, opts));
+        wunit.commit();
+    });
+    reset(opCtx, NamespaceString::kRsOplogNamespace);
+
+    // Helper to build a batched update with a given fromMigrate source.
+    auto batchUpdate =
+        [&](OperationContext* opCtx, const CollectionPtr& coll, int id, OperationSource source) {
+            const auto preImageDoc = BSON("_id" << id << "x" << 0);
+            CollectionUpdateArgs collUpdateArgs{preImageDoc};
+            collUpdateArgs.criteria = BSON("_id" << id);
+            collUpdateArgs.update = BSON("$set" << BSON("x" << id));
+            collUpdateArgs.updatedDoc = BSON("_id" << id << "x" << id);
+            collUpdateArgs.source = source;
+            collUpdateArgs.changeStreamPreAndPostImagesEnabledForCollection = true;
+            auto args = OplogUpdateEntryArgs(&collUpdateArgs, coll);
+            opCtx->getServiceContext()->getOpObserver()->onUpdate(opCtx, args);
+        };
+
+    // Batched updates: doc0 is NOT fromMigrate, doc1 IS fromMigrate.
+    {
+        AutoGetCollection autoColl(opCtx, preImageNss, MODE_IX);
+        WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::kGroupForTransaction);
+        ASSERT(BatchedWriteContext::get(opCtx).writesAreBatched());
+
+        batchUpdate(opCtx, *autoColl, 0, OperationSource::kStandard);
+        batchUpdate(opCtx, *autoColl, 1, OperationSource::kFromMigrate);
+        wuow.commit();
+    }
+
+    auto oplogs = getNOplogEntries(opCtx, 1);
+    auto oplogEntry = assertGet(OplogEntry::parse(oplogs.back()));
+    ASSERT(oplogEntry.getCommandType() == OplogEntry::CommandType::kApplyOps);
+    ASSERT_FALSE(oplogEntry.getFromMigrate().value_or(false));
+
+    // Pre-image for doc0 (non-fromMigrate): should exist.
+    {
+        BSONObj container;
+        ChangeStreamPreImageId preImageId0{preImageUuid, oplogEntry.getOpTime().getTimestamp(), 0};
+        auto preImage = getChangeStreamPreImage(opCtx, preImageId0, &container);
+        ASSERT_BSONOBJ_EQ(preImage.getPreImage(), BSON("_id" << 0 << "x" << 0));
+    }
+
+    // Pre-image for doc1 (fromMigrate): should NOT exist.
+    {
+        auto preImagesCollection = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest(NamespaceString::kChangeStreamPreImagesNamespace,
+                                         PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
+                                         repl::ReadConcernArgs::get(opCtx),
+                                         AcquisitionPrerequisites::kRead),
+            MODE_IS);
+        ChangeStreamPreImageId preImageId1{preImageUuid, oplogEntry.getOpTime().getTimestamp(), 1};
+        auto doc = Helpers::findOneForTesting(opCtx,
+                                              preImagesCollection,
+                                              BSON("_id" << preImageId1.toBSON()),
+                                              /*invariantOnError=*/false);
+        ASSERT_TRUE(doc.isEmpty()) << "Pre-image should NOT be recorded for fromMigrate operation";
+    }
+}
+
 class OnDeleteOutputsTest : public OpObserverTest {
 
 protected:

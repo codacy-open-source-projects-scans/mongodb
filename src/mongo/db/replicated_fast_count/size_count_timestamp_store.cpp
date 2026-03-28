@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2018-present MongoDB, Inc.
+ *    Copyright (C) 2026-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -26,17 +26,13 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-#pragma once
 
-namespace mongo {
-namespace concept {
-    /**
-     * The CopyConstructable concept models a type which can be copy constructed.
-     *
-     * The expression: `CopyConstructible{ copyConstructible }` should be valid.
-     */
-    struct CopyConstructible {
-        CopyConstructible(const CopyConstructible&);
-    };
-}  // namespace concept
-}  // namespace mongo
+#include "mongo/db/replicated_fast_count/size_count_timestamp_store.h"
+
+namespace mongo::replicated_fast_count {
+
+boost::optional<Timestamp> SizeCountTimestampStore::read(OperationContext* opCtx) const {
+    // TODO(SERVER-122804): Implement.
+    return Timestamp(0, 0);
+}
+}  // namespace mongo::replicated_fast_count

@@ -82,10 +82,21 @@ namespace {
  */
 auto& plannerInvocationCount = *MetricBuilder<Counter64>{"query.planning.invocationCount"};
 
+/**
+ * Aggregation of the total number of times the classic subplanner chose the winning plan.
+ */
+auto& classicChoseWinningPlan =
+    *MetricBuilder<Counter64>{"query.subPlanner.classicChoseWinningPlan"};
+
 void inspectPlannerResult(
     const std::unique_ptr<PlannerInterface>& result,
     const boost::optional<QueryPlannerParams::ReplanningData>& replanningData) {
-    if (!replanningData.has_value()) {
+    // These assertions relate to replanning, so bail if the query did not replan.
+    // Also, these assertions do not apply to the deferred get_executor. The solution hash is
+    // checked after the plan ranking result is created, to update
+    // `replannedPlanIsCachedPlanCounter`.
+    if (!replanningData.has_value() ||
+        feature_flags::gFeatureFlagGetExecutorDeferredEngineChoice.isEnabled()) {
         return;
     }
 
@@ -150,6 +161,10 @@ void incrementPlannerInvocationCount() {
     plannerInvocationCount.increment();
 }
 
+void incrementClassicSubplannerChoseWinningPlan() {
+    classicChoseWinningPlan.increment();
+}
+
 std::unique_ptr<PlannerInterface> retryMakePlanner(
     std::unique_ptr<QueryPlannerParams> plannerParams,
     const MakePlannerParamsFn& makeQueryPlannerParams,
@@ -173,8 +188,10 @@ std::unique_ptr<PlannerInterface> retryMakePlanner(
             // The planner failed to generate a DISTINCT_SCAN for a distinct-like query. Remove
             // the distinct property and replan using SBE or subplanning as applicable.
             canonicalQuery->resetDistinct();
-            if (canonicalQuery->isSbeCompatible()) {
-                // Stages still need to be finalized for SBE since classic was used previously.
+            if (canonicalQuery->isSbeCompatible() &&
+                !feature_flags::gFeatureFlagGetExecutorDeferredEngineChoice.isEnabled()) {
+                // Stages still need to be finalized for SBE since classic was used previously. In
+                // the deferred get_executor, the stages are finalized during lowering.
                 finalizePipelineStages(pipeline, canonicalQuery);
             }
             return makePlanner(
