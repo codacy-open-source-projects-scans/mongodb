@@ -3167,7 +3167,8 @@ BSONObj WiredTigerKVEngine::setStorageTierToStorageOptions(const BSONObj& storag
         }
     }
 
-    const std::string disaggConfigString = "disaggregated=(storage_tier=" + value + ")";
+    const std::string disaggConfigString = "disaggregated=(storage_tier=" + value + ")" +
+        (value == "cold" ? ",leaf_page_max=128KB" : "");
 
     const auto newConfigString =
         (configString ? WiredTigerUtil::concatConfigs(disaggConfigString, *configString)
@@ -3181,6 +3182,29 @@ BSONObj WiredTigerKVEngine::setStorageTierToStorageOptions(const BSONObj& storag
             isValidConfigStringStatus.isOK());
 
     return WiredTigerUtil::setConfigStringToStorageOptions(storageEngineOptions, newConfigString);
+}
+
+boost::optional<std::string> WiredTigerKVEngine::getStorageTierFromStorageOptions(
+    const BSONObj& storageEngineOptions) const {
+    const auto configString =
+        WiredTigerUtil::getConfigStringFromStorageOptions(storageEngineOptions);
+    if (!configString) {
+        return boost::none;
+    }
+
+    WiredTigerConfigParser parser(*configString);
+    WT_CONFIG_ITEM disaggValue;
+    if (parser.get("disaggregated", &disaggValue) != 0) {
+        return boost::none;
+    }
+
+    WiredTigerConfigParser disaggParser(StringData(disaggValue.str, disaggValue.len));
+    WT_CONFIG_ITEM storageTierValue;
+    if (disaggParser.get("storage_tier", &storageTierValue) != 0) {
+        return boost::none;
+    }
+
+    return std::string(storageTierValue.str, storageTierValue.len);
 }
 
 BSONObj WiredTigerKVEngine::getSanitizedStorageOptionsForSecondaryReplication(
