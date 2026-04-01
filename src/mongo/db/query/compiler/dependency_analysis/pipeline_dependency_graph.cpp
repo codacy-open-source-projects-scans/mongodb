@@ -322,12 +322,18 @@ struct FieldMetadata {
         return *this == FieldMetadata{};
     }
 
-    auto operator<=>(const FieldMetadata&) const = default;
+    bool operator==(const FieldMetadata&) const = default;
 
     /**
      * True if the value of this field can be type array.
      */
-    bool canFieldBeArray{true};
+    bool canFieldBeArray : 1 {true};
+
+    /**
+     * True if the value of this field is known to be the BSON missing value. I.e., the field is
+     * guaranteed to be absent.
+     */
+    bool knownToBeMissing : 1 {false};
 };
 
 // It's fine to change the assert and increase the size of the FieldMetadata, but there should be a
@@ -451,9 +457,9 @@ enum class FieldMatchType : uint8_t {
     kShadowed,
     /**
      * We did not find a matching field node, but we know that it could originate at the scope
-     * whose <missing> field we return.
-     * Example: lookup was for x.y, but the previous stage was a $replaceRoot which affects all
-     * fields. We return the <missing> field for the $replaceRoot scope.
+     * whose <missing> field we return. The <missing> field's metadata indicates whether the field
+     * is truly absent (knownToBeMissing=true, e.g. after inclusion projection) or merely unknown
+     * (knownToBeMissing=false, e.g. after $replaceRoot with an expression).
      */
     kMissing,
     /**
@@ -555,8 +561,9 @@ public:
                 return true;
             }
             case FieldMatchType::kMissing:
-                // If we do not know what this field is, we have to assume it can be an array.
-                return true;
+                // Check the <missing> field's metadata: if it's known to be BSON Missing, the
+                // field is definitely absent and cannot be an array. Otherwise, it's unknown.
+                return !_fields[fieldId].metadata.knownToBeMissing;
             case FieldMatchType::kBaseDocument:
                 return _canMainCollPathBeArray(path);
         }
@@ -591,11 +598,7 @@ private:
     void declareScope(StageId stage, ScopeId exhaustiveScope, ScopeId parentScope) {
         auto scopeId = _scopes.getNextId();
         auto missingField = _fields.append(Field{scopeId});
-        _scopes.append(Scope{
-            stage,
-            exhaustiveScope,
-            missingField,
-        });
+        _scopes.append(Scope{stage, exhaustiveScope, missingField});
         if (parentScope) {
             _scopes[scopeId].fields = _scopes[parentScope].fields;
         }
@@ -629,18 +632,18 @@ private:
         // Check if we already have 'a' in the current scope that we are building. If we do, we will
         // preserve any fields it may already contain.
         auto [existingBaseField, existingBaseFieldType] = lookupField(scope, basePath);
-        bool canReuseBaseField;
-        switch (existingBaseFieldType) {
-            case FieldMatchType::kExact:
-                canReuseBaseField = _fields[existingBaseField].declaringScope == scope &&
-                    _fields[existingBaseField].embeddedScope;
-                break;
-            case FieldMatchType::kShadowed:
-            case FieldMatchType::kMissing:
-            case FieldMatchType::kBaseDocument:
-                canReuseBaseField = false;
-                break;
-        }
+        bool canReuseBaseField = [&] {
+            switch (existingBaseFieldType) {
+                case FieldMatchType::kExact:
+                    return _fields[existingBaseField].declaringScope == scope &&
+                        _fields[existingBaseField].embeddedScope;
+                case FieldMatchType::kShadowed:
+                case FieldMatchType::kMissing:
+                case FieldMatchType::kBaseDocument:
+                    return false;
+            }
+            MONGO_UNREACHABLE_TASSERT(12227301);
+        }();
 
         // Scope for declaring 'b' field of 'a'.
         FieldId newBaseField;
@@ -751,8 +754,7 @@ private:
         // value that shadows any subpath. That is, the subfield that is being included is either
         // not known or is known to not exist. We currently don't properly distinguish between the
         // two, so we declare the field to avoid incorrect dependency tracking.
-        // TODO(SERVER-122273): Revisit this when we properly distinguish between unknown and
-        // missing fields.
+        // TODO(SERVER-119392): Track whether or not the parent field is known to be a scalar.
         if (shadowedByParent) {
             declareField(scope, path, {parentBaseField});
             return;
@@ -821,8 +823,9 @@ private:
         }
 
         if (scope.exhaustiveScope) {
-            // The exact field is not explicitly known in the graph but we know the scope that
-            // could have modified it.
+            // The field is not explicitly known in the graph but we know the scope that could
+            // have modified it. The <missing> field's metadata indicates whether the field is
+            // truly absent (knownToBeMissing) or merely unknown.
             return FieldMatch::missing(_scopes[scope.exhaustiveScope].missingField);
         }
 
@@ -929,12 +932,17 @@ private:
 
         document_transformation::describeTransformation(
             OverloadedVisitor{
-                [&](const ReplaceRoot&) {
+                [&](const ReplaceRoot& op) {
                     // All paths might be modified. This scope does not inherit the parent scope
-                    // fields. It also doesn't know all fields - all lookups will fail and we should
-                    // say we have no information about the field (as opposed to saying the field is
-                    // definitely missing like for kAllExcept).
+                    // fields. If 'isEmpty' is true (e.g. inclusion projection), any
+                    // field not explicitly added is truly missing. Otherwise (e.g. $replaceRoot
+                    // with expression), unknown fields may still exist.
                     declareScope(stage, scopeId /*exhaustiveScope*/, ScopeId::none());
+                    if (op.isEmpty()) {
+                        auto& missingField = _fields[_scopes[scopeId].missingField];
+                        missingField.metadata.knownToBeMissing = true;
+                        missingField.metadata.canFieldBeArray = false;
+                    }
                     tassert(
                         11996201, "Did not expect ReplaceRoot in this position", !hasDeclaredScope);
                     hasDeclaredScope = true;
@@ -1002,8 +1010,10 @@ private:
                                 break;
                             }
                             case FieldMatchType::kMissing: {
-                                // We don't know anything about the arrayness of missing/unknown
-                                // fields.
+                                // A truly missing field cannot be an array. An unknown field
+                                // might be.
+                                metadata.canFieldBeArray =
+                                    !_fields[oldPathField].metadata.knownToBeMissing;
                                 break;
                             }
                             case FieldMatchType::kShadowed: {
@@ -1070,7 +1080,7 @@ private:
     void processStage(boost::intrusive_ptr<DocumentSource> documentSource,
                       const DocumentSourceInfo& dsInfo) {
         StageId stageId = _stages.getNextId();
-        _dsToStageId.emplace(documentSource.get(), stageId);
+        _dsToStageId[documentSource.get()] = stageId;
 
         auto parentScopeId = _stages.empty() ? ScopeId::none() : _stages.back().scope;
         FieldDependencies dependencies = processStageDependencies(dsInfo, parentScopeId);
@@ -1129,32 +1139,20 @@ private:
     }
 
     /**
-     * Clears the DocumentSource <-> StageId mapping and rebuilds it, stopping at 'end'. Returns a
-     * StageId of the next stage after 'end'.
+     * Find the lowest ID stage, scope and field nodes corresponding to the given stage. These IDs
+     * can be used to determine the valid portion of a graph. If the range [container.begin(),
+     * stageIt) is valid, then so are [0, minId) for all node types.
      */
-    StageId clearAndRebuildMapping(const DocumentSourceContainer& container,
-                                   DocumentSourceContainer::const_iterator stageIt) {
-        _dsToStageId.clear();
-        // Rebuild mapping from begin to stageIt.
-        StageId index{0};
-        for (auto it = container.begin(); it != stageIt; it++) {
-            _dsToStageId.emplace(it->get(), index);
-            ++index.value;
-        }
-        return index;
-    }
-
-    /**
-     * Find the lowest ID scope and field nodes corresponding to the given stage.
-     * These IDs can be used to determine the valid portion of a graph.
-     * If the range [container.begin(), stageIt) is valid, then so are
-     * [0, minId) for all node types.
-     */
-    std::tuple<ScopeId, FieldId> earliestDescendants(StageId stageId) const {
-        if (stageId.value < 1) {
-            return {ScopeId{0}, FieldId{0}};
+    std::tuple<StageId, ScopeId, FieldId> earliestDescendants(
+        const DocumentSourceContainer& container,
+        DocumentSourceContainer::const_iterator stageIt) const {
+        // Compute the StageId of the first stage to invalidate. Stages before stageIt are
+        // unchanged, so their map entries and StageIds remain valid.
+        if (stageIt == container.begin()) {
+            return {StageId{0}, ScopeId{0}, FieldId{0}};
         }
 
+        StageId stageId = {getStageId(std::prev(stageIt)->get()).value + 1};
         ScopeId scopeId = _stages[stageId].nextNewScope;
         FieldId fieldId = scopeId == _scopes.getNextId()
             // No scope to invalidate so no fields to invalidate.
@@ -1162,7 +1160,7 @@ private:
             // Invalidate every field declared by or after the scope.
             : _scopes[scopeId].missingField;
 
-        return {scopeId, fieldId};
+        return {stageId, scopeId, fieldId};
     }
 
     /**
@@ -1170,11 +1168,8 @@ private:
      */
     void invalidate(const DocumentSourceContainer& container,
                     DocumentSourceContainer::const_iterator stageIt) {
-        // TODO(SERVER-119842): See if we can just leave the dangling entries
-        StageId invalidStage = clearAndRebuildMapping(container, stageIt);
-
         // Invalidate all nodes originating from the given stage.
-        auto [invalidScope, invalidField] = earliestDescendants(invalidStage);
+        auto [invalidStage, invalidScope, invalidField] = earliestDescendants(container, stageIt);
 
         // Clean up aliases for invalidated fields.
         absl::erase_if(_aliases,
@@ -1234,7 +1229,9 @@ private:
     // String interning pool. Each entry is a path component.
     StringPool _strings;
 
-    // Mapping between DocumentSource and StageId, recomputed when the graph is recomputed.
+    // Mapping between DocumentSource and StageId. May contain dangling entries for DocumentSources
+    // that have been removed from the pipeline. This is safe because this map is never iterated and
+    // is only ever queried with valid DocumentSource pointers.
     absl::flat_hash_map<const DocumentSource*, StageId> _dsToStageId;
 
     // Maps a FieldId to the collection path it aliases (as interned StringPool IDs).
@@ -1409,6 +1406,9 @@ private:
         BSONObjBuilder metaBuilder = bob.subobjStart("metadata");
         if (!metadata.canFieldBeArray) {
             metaBuilder.append("array", false);
+        }
+        if (metadata.knownToBeMissing) {
+            metaBuilder.append("missing", true);
         }
     }
 

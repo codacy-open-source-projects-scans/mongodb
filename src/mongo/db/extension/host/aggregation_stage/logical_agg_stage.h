@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2021-present MongoDB, Inc.
+ *    Copyright (C) 2026-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -26,32 +26,41 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
+#pragma once
 
+#include "mongo/db/exec/agg/stage.h"
+#include "mongo/db/pipeline/document_source.h"
+#include "mongo/util/modules.h"
 
-#include "mongo/db/storage/deferred_drop_record_store.h"
+#include <memory>
 
-#include "mongo/bson/timestamp.h"
-#include "mongo/db/storage/ident.h"
-#include "mongo/db/storage/storage_engine.h"
-#include "mongo/logv2/log.h"
-#include "mongo/util/assert_util.h"
+namespace mongo::extension::host {
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
+/**
+ * Host-defined LogicalAggStage node.
+ *
+ * Wraps a DocumentSource such that a host-defined logical stage can forward information about the
+ * document source to the extension stage.
+ */
+class LogicalAggStage {
+public:
+    ~LogicalAggStage() = default;
 
-
-namespace mongo {
-DeferredDropRecordStore::~DeferredDropRecordStore() {
-    if (_keep) {
-        return;
+    std::string_view getName() const {
+        return _stageName;
     }
-    try {
-        _storageEngine->addDropPendingIdent(
-            Timestamp::min(), std::make_shared<Ident>(_rs->getIdent()), nullptr);
-    } catch (...) {
-        LOGV2_WARNING(6063900,
-                      "Caught exception deferring drop for temporary record store",
-                      "ident"_attr = _rs->getIdent(),
-                      "error"_attr = exceptionToStatus());
+
+    static inline std::unique_ptr<LogicalAggStage> make(DocumentSource* docSrc) {
+        return std::unique_ptr<LogicalAggStage>(new LogicalAggStage(docSrc));
     }
-}
-}  // namespace mongo
+
+protected:
+    LogicalAggStage(absl::Nonnull<DocumentSource*> documentSource)
+        : _documentSource(documentSource), _stageName(documentSource->getSourceName()) {}
+
+private:
+    DocumentSource* const _documentSource;
+    const std::string _stageName;
+};
+
+};  // namespace mongo::extension::host

@@ -56,10 +56,8 @@ namespace mongo {
 
 class MONGO_MOD_OPEN StorageEngineTest : public ServiceContextMongoDTest {
 public:
-    // Storage engine tests cover spill table creation and management, requiring the spill
-    // WiredTiger instance.
     explicit StorageEngineTest(Options options = {})
-        : ServiceContextMongoDTest(std::move(options).enableSpillEngine()),
+        : ServiceContextMongoDTest(std::move(options)),
           _storageEngine(getServiceContext()->getStorageEngine()) {}
 
     MDBCatalog::EntryIdentifier createCollection(OperationContext* opCtx,
@@ -109,17 +107,17 @@ public:
         return _storageEngine->makeSpillTable(opCtx, keyFormat, thresholdBytes);
     }
 
-    std::unique_ptr<TemporaryRecordStore> makeTemporary(OperationContext* opCtx) {
+    std::unique_ptr<RecordStore> makeTemporary(OperationContext* opCtx) {
         WriteUnitOfWork wuow(opCtx);
-        auto rs = _storageEngine->makeTemporaryRecordStore(
+        auto rs = _storageEngine->makeInternalRecordStore(
             opCtx, _storageEngine->generateNewInternalIdent(), KeyFormat::Long);
         wuow.commit();
         return rs;
     }
 
-    std::unique_ptr<TemporaryRecordStore> makeTemporaryClustered(OperationContext* opCtx) {
+    std::unique_ptr<RecordStore> makeTemporaryClustered(OperationContext* opCtx) {
         WriteUnitOfWork wuow(opCtx);
-        auto rs = _storageEngine->makeTemporaryRecordStore(
+        auto rs = _storageEngine->makeInternalRecordStore(
             opCtx, _storageEngine->generateNewInternalIdent(), KeyFormat::String);
         wuow.commit();
         return rs;

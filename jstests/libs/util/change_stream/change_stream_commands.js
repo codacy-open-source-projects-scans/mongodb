@@ -79,7 +79,7 @@ class Command {
     /**
      * Runs the command logic. Subclasses must override this.
      * Transient DDL errors are handled by the runCommand override
-     * (implicitly_retry_on_migration_in_progress.js) loaded by the suite.
+     * (implicitly_retry_on_migration_in_progress_fsm.js) loaded by the suite.
      * @param {Object} connection - The MongoDB connection.
      */
     execute(connection) {
@@ -602,6 +602,7 @@ class ShardCollectionCommand extends Command {
         const ns = `${this.dbName}.${this.collName}`;
 
         _configureZonesForShardSet(connection, ns, this.shardKey, this.shardSet);
+
         const shardCmd = {
             shardCollection: ns,
             key: this.shardKey,

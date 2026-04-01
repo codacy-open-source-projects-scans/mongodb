@@ -41,7 +41,6 @@
 #include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
 #include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/backup_cursor_hooks.h"
-#include "mongo/db/storage/deferred_drop_record_store.h"
 #include "mongo/db/storage/disk_space_monitor.h"
 #include "mongo/db/storage/ident.h"
 #include "mongo/db/storage/kv/kv_drop_pending_ident_reaper.h"
@@ -699,10 +698,9 @@ Status StorageEngineImpl::repairRecordStore(OperationContext* opCtx,
 std::unique_ptr<SpillTable> StorageEngineImpl::makeSpillTable(OperationContext* opCtx,
                                                               KeyFormat keyFormat,
                                                               int64_t thresholdBytes) {
-    invariant(_spillEngine, "Spill engine is disabled; cannot create spill tables in this context");
     auto ru = _spillEngine->newRecoveryUnit();
     auto rs =
-        _spillEngine->makeTemporaryRecordStore(*ru, ident::generateNewInternalIdent(), keyFormat);
+        _spillEngine->makeInternalRecordStore(*ru, ident::generateNewInternalIdent(), keyFormat);
     LOGV2_DEBUG(10380301, 1, "Created spill table", "ident"_attr = rs->getIdent());
 
     return std::make_unique<SpillTable>(std::move(ru),
@@ -737,10 +735,11 @@ void StorageEngineImpl::dropSpillTable(RecoveryUnit& ru, StringData ident) {
     }
 }
 
-std::unique_ptr<TemporaryRecordStore> StorageEngineImpl::makeTemporaryRecordStore(
-    OperationContext* opCtx, StringData ident, KeyFormat keyFormat) {
+std::unique_ptr<RecordStore> StorageEngineImpl::makeInternalRecordStore(OperationContext* opCtx,
+                                                                        StringData ident,
+                                                                        KeyFormat keyFormat) {
     tassert(10709200,
-            "Cannot use a non-internal ident to create a temporary RecordStore instance",
+            "Cannot use a non-internal ident to create an internal RecordStore instance",
             ident::isInternalIdent(ident));
 
     // When restarting an index build, the table from the original index build was added to the
@@ -748,16 +747,16 @@ std::unique_ptr<TemporaryRecordStore> StorageEngineImpl::makeTemporaryRecordStor
     uassertStatusOK(immediatelyCompletePendingDrop(opCtx, ident));
 
     auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
-    auto createTemporary = [&] {
-        return _engine->makeTemporaryRecordStore(ru, ident, keyFormat);
+    auto createInternal = [&] {
+        return _engine->makeInternalRecordStore(ru, ident, keyFormat);
     };
     std::unique_ptr<RecordStore> rs;
     try {
-        rs = createTemporary();
+        rs = createInternal();
     } catch (const ExceptionFor<ErrorCodes::ObjectAlreadyExists>&) {
         // ObjectAlreadyExists can happen if a table is created while a checkpoint is in progress,
         // as DDL operations being non-transactional means that the table *might* be included in the
-        // checkpoint despite not existing at the checkpoint's timestamp. Temporary idents are not
+        // checkpoint despite not existing at the checkpoint's timestamp. Internal idents are not
         // represented in the catalog, so if we collide we can just drop the on-disk table.
 
         // TODO (SERVER-114575): A layered drop can report success while not dropping the table. If
@@ -767,30 +766,23 @@ std::unique_ptr<TemporaryRecordStore> StorageEngineImpl::makeTemporaryRecordStor
         uassertStatusOK(_engine->dropIdent(ru, ident, false /* identHasSizeInfo */));
 
         try {
-            rs = createTemporary();
+            rs = createInternal();
         } catch (const ExceptionFor<ErrorCodes::ObjectAlreadyExists>&) {
-            auto existing = _engine->getTemporaryRecordStore(ru, ident, keyFormat);
+            auto existing = _engine->getInternalRecordStore(ru, ident, keyFormat);
             auto cursor = existing->getCursor(opCtx, ru);
             invariant(!cursor->next());
 
             LOGV2_DEBUG(11440001,
                         1,
-                        "Temporary ident already exists on disk after drop attempt; reusing "
+                        "Internal ident already exists on disk after drop attempt; reusing "
                         "existing ident",
                         "ident"_attr = ident);
             rs = std::move(existing);
         }
     }
 
-    LOGV2_DEBUG(22258, 1, "Created temporary record store", "ident"_attr = rs->getIdent());
-    return std::make_unique<DeferredDropRecordStore>(std::move(rs), this);
-}
-
-std::unique_ptr<TemporaryRecordStore> StorageEngineImpl::makeTemporaryRecordStoreFromExistingIdent(
-    OperationContext* opCtx, StringData ident, KeyFormat keyFormat) {
-    auto rs = _engine->getTemporaryRecordStore(
-        *shard_role_details::getRecoveryUnit(opCtx), ident, keyFormat);
-    return std::make_unique<DeferredDropRecordStore>(std::move(rs), this);
+    LOGV2_DEBUG(22258, 1, "Created internal record store", "ident"_attr = rs->getIdent());
+    return rs;
 }
 
 void StorageEngineImpl::setJournalListener(JournalListener* jl) {

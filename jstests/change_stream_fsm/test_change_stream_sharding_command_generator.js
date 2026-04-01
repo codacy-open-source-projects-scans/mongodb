@@ -35,6 +35,10 @@ import {
 } from "jstests/libs/util/change_stream/change_stream_sharding_utils.js";
 import {after, afterEach, before, describe, it} from "jstests/libs/mochalite.js";
 
+jsTest.log.info(
+    `test_change_stream_sharding_command_generator: using seed ${TEST_SEED} (to reproduce, rerun with this seed)`,
+);
+
 /**
  * Helper function to set up writer configuration.
  * @param {number} seed - Random seed for command generation
@@ -141,12 +145,9 @@ describe("ShardingCommandGenerator", function () {
         Writer.run(this.st.s, writerA, commandsA, TEST_SEED);
         Writer.run(this.st.s, writerB, commandsB, TEST_SEED);
 
-        // Parallel DDL commands compete for cluster-wide locks, so the cumulative
-        // time for both writers can exceed the default 90s locally.
-        const waitTimeoutMs = TestData?.inEvergreen ? undefined : 5 * 60 * 1000;
-        Connector.waitForDone(this.st.s, writerA, waitTimeoutMs);
+        Connector.waitForDone(this.st.s, writerA);
         const countA = this.st.s.getDB(dbNameA).getCollection(collName).countDocuments({});
-        Connector.waitForDone(this.st.s, writerB, waitTimeoutMs);
+        Connector.waitForDone(this.st.s, writerB);
         const countB = this.st.s.getDB(dbNameB).getCollection(collName).countDocuments({});
 
         assert.eq(countA, countB, "Both writers should produce same document count");

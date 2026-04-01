@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2021-present MongoDB, Inc.
+ *    Copyright (C) 2025-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -27,28 +27,14 @@
  *    it in the license file.
  */
 
-#pragma once
+#include "mongo/db/extension/host_connector/adapter/logical_agg_stage_adapter.h"
 
-#include "mongo/db/storage/record_store.h"
-#include "mongo/db/storage/storage_engine.h"
-#include "mongo/db/storage/temporary_record_store.h"
-#include "mongo/util/modules.h"
+namespace mongo::extension::host_connector {
 
-#include <memory>
-#include <utility>
-
-namespace MONGO_MOD_PUBLIC mongo {
-
-/**
- * Manages the lifetime of a TemporaryRecordStore that is eventually dropped after destruction.
- */
-class DeferredDropRecordStore final : public TemporaryRecordStore {
-public:
-    DeferredDropRecordStore(std::unique_ptr<RecordStore> rs, StorageEngine* storageEngine)
-        : TemporaryRecordStore(std::move(rs)), _storageEngine(storageEngine) {};
-    ~DeferredDropRecordStore() override;
-
-private:
-    StorageEngine* _storageEngine{nullptr};
-};
-}  // namespace MONGO_MOD_PUBLIC mongo
+::MongoExtensionByteView HostLogicalAggStageAdapter::_hostGetName(
+    const ::MongoExtensionLogicalAggStage* logicalStage) noexcept {
+    auto sv = static_cast<const HostLogicalAggStageAdapter*>(logicalStage)->getImpl().getName();
+    StringData sd{sv.data(), sv.length()};
+    return stringDataAsByteView(sd);
+}
+};  // namespace mongo::extension::host_connector

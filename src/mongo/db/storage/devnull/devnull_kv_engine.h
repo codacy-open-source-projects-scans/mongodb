@@ -85,13 +85,13 @@ public:
                                                 const RecordStore::Options& options,
                                                 boost::optional<UUID> uuid) override;
 
-    std::unique_ptr<RecordStore> getTemporaryRecordStore(RecoveryUnit& ru,
+    std::unique_ptr<RecordStore> getInternalRecordStore(RecoveryUnit& ru,
+                                                        StringData ident,
+                                                        KeyFormat keyFormat) override;
+
+    std::unique_ptr<RecordStore> makeInternalRecordStore(RecoveryUnit& ru,
                                                          StringData ident,
                                                          KeyFormat keyFormat) override;
-
-    std::unique_ptr<RecordStore> makeTemporaryRecordStore(RecoveryUnit& ru,
-                                                          StringData ident,
-                                                          KeyFormat keyFormat) override;
 
     Status createSortedDataInterface(
         const rss::PersistenceProvider&,
@@ -247,6 +247,13 @@ public:
                            StringData ident,
                            IdentKey key,
                            std::span<const char> value) override {
+        return Status::OK();
+    }
+
+    Status updateInIdent(RecoveryUnit& ru,
+                         StringData ident,
+                         IdentKey key,
+                         std::span<const char> value) override {
         return Status::OK();
     }
 

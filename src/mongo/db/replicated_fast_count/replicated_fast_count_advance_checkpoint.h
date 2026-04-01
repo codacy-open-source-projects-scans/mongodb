@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2018-present MongoDB, Inc.
+ *    Copyright (C) 2026-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -29,42 +29,20 @@
 
 #pragma once
 
-#include "mongo/db/storage/record_store.h"
-#include "mongo/util/modules.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/replicated_fast_count/size_count_store.h"
+#include "mongo/db/replicated_fast_count/size_count_timestamp_store.h"
 
-namespace MONGO_MOD_PUBLIC mongo {
-
+namespace mongo::replicated_fast_count {
 /**
- * Manages the lifetime of a temporary RecordStore. Unless keep() is called, the managed RecordStore
- * will be dropped after destruction.
+ * Scans the oplog for size and count deltas since the last checkpoint, accumulates absolute totals
+ * per collection, and persists the result to `sizeCountStore` and `timestampStore`.
+ *
+ * Guarantee: If new oplog entries were written since the last checkpoint, the `timestampStore`
+ * advances its global valid-as-of timestamp, even in absence of oplog entries with size and count
+ * deltas, to ensure forward progress through the oplog.
  */
-class TemporaryRecordStore {
-public:
-    explicit TemporaryRecordStore(std::unique_ptr<RecordStore> rs) : _rs(std::move(rs)) {}
-    virtual ~TemporaryRecordStore() {}
-
-    // Not copyable.
-    TemporaryRecordStore(const TemporaryRecordStore&) = delete;
-    TemporaryRecordStore& operator=(const TemporaryRecordStore&) = delete;
-
-    // Move constructor.
-    TemporaryRecordStore(TemporaryRecordStore&& other) = default;
-
-    // If called, the RecordStore will not be dropped when the TemporaryRecordStore is destructed.
-    void keep() {
-        _keep = true;
-    }
-
-    RecordStore* rs() {
-        return _rs.get();
-    }
-
-    const RecordStore* rs() const {
-        return _rs.get();
-    }
-
-protected:
-    std::unique_ptr<RecordStore> _rs;
-    bool _keep = false;
-};
-}  // namespace MONGO_MOD_PUBLIC mongo
+void advanceCheckpoint(OperationContext* opCtx,
+                       SizeCountStore& sizeCountStore,
+                       SizeCountTimestampStore& timestampStore);
+}  // namespace mongo::replicated_fast_count
