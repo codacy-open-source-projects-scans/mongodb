@@ -780,6 +780,9 @@ const internalCommandsMap = {
                 minimumOperationDurationMillis: NumberLong(0),
             },
         },
+        postcommand: (db) => {
+            db.getSiblingDB("config").localReshardingOperations.recipient.drop();
+        },
     },
     _shardsvrReshardRecipientClone: {
         testname: "_shardsvrReshardRecipientClone",
@@ -790,10 +793,10 @@ const internalCommandsMap = {
             donorShards: [],
         },
     },
-    _shardsvrReshardRecipientCriticalSectionStarted: {
-        testname: "_shardsvrReshardRecipientCriticalSectionStarted",
+    _shardsvrReshardingRecipientCriticalSectionStarted: {
+        testname: "_shardsvrReshardingRecipientCriticalSectionStarted",
         command: {
-            _shardsvrReshardRecipientCriticalSectionStarted: UUID(),
+            _shardsvrReshardingRecipientCriticalSectionStarted: UUID(),
         },
     },
     _shardsvrRefineCollectionShardKey: {

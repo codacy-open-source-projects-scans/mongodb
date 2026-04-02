@@ -31,6 +31,8 @@
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/replicated_fast_count/replicated_fast_count_manager.h"
 #include "mongo/db/replicated_fast_count/replicated_fast_size_count.h"
+#include "mongo/db/replicated_fast_count/size_count_store.h"
+#include "mongo/db/replicated_fast_count/size_count_timestamp_store.h"
 #include "mongo/db/rss/stub_persistence_provider.h"
 #include "mongo/util/uuid.h"
 
@@ -307,6 +309,7 @@ absl::flat_hash_map<UUID, CollectionSizeCount> extractSizeCountDeltasForApplyOps
     const repl::OplogEntry& applyOpsEntry, const boost::optional<UUID>& uuidFilter = boost::none);
 
 }  // namespace mongo::replicated_fast_count_test_helpers
+
 namespace mongo::replicated_fast_count::test_helpers {
 /**
  * Simple wrapper to ease creation and testing of replicated fast count and size.
@@ -330,4 +333,20 @@ repl::OplogEntry makeOplogEntry(Timestamp ts, NsAndUUID userColl, repl::OpTypeEn
  */
 void writeToOplog(OperationContext* opCtx, const repl::OplogEntry& oplogEntry);
 
+/**
+ * Inserts an entry into `store` for the provided `uuid`.
+ */
+// TODO(SERVER-122992): Assert return value is false.
+void insertSizeCountEntry(OperationContext* opCtx,
+                          SizeCountStore& store,
+                          UUID uuid,
+                          const SizeCountStore::Entry& entry);
+
+/**
+ * Inserts a timestamp into `store`.
+ */
+// TODO(SERVER-122992): Assert return value is false.
+void insertSizeCountTimestamp(OperationContext* opCtx,
+                              SizeCountTimestampStore& store,
+                              Timestamp timestamp);
 }  // namespace mongo::replicated_fast_count::test_helpers

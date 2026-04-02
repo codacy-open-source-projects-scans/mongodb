@@ -88,18 +88,14 @@ public:
         jCtx->catStats = {
             .collStats = {
                 {smallNss,
-                 CollectionStats{
-                     .logicalDataSizeBytes = collCards[smallNodeId].toDouble() * docSizeBytes,
-                     .onDiskSizeBytes = collCards[smallNodeId].toDouble() * docSizeBytes}},
+                 CollectionStats{collCards[smallNodeId].toDouble() * docSizeBytes,
+                                 collCards[smallNodeId].toDouble() * docSizeBytes}},
                 {largeNss,
-                 CollectionStats{
-                     .logicalDataSizeBytes = collCards[largeNodeId].toDouble() * docSizeBytes,
-                     .onDiskSizeBytes = collCards[largeNodeId].toDouble() * docSizeBytes}},
+                 CollectionStats{collCards[largeNodeId].toDouble() * docSizeBytes,
+                                 collCards[largeNodeId].toDouble() * docSizeBytes}},
                 {extremelySmallNss,
-                 CollectionStats{.logicalDataSizeBytes =
-                                     collCards[extremelySmallNodeId].toDouble() * docSizeBytes,
-                                 .onDiskSizeBytes =
-                                     collCards[extremelySmallNodeId].toDouble() * docSizeBytes}},
+                 CollectionStats{collCards[extremelySmallNodeId].toDouble() * docSizeBytes,
+                                 collCards[extremelySmallNodeId].toDouble() * docSizeBytes}},
             }};
 
         costEstimator = std::make_unique<JoinCostEstimatorImpl>(*jCtx, *cardEstimator);
@@ -255,6 +251,63 @@ TEST_F(JoinCostEstimatorTest, NLJLowerCostThanHashJoin) {
     auto hjCost = planEnumCtx->getJoinCostEstimator()->costHashJoinFragment(extremelySmallNode,
                                                                             extremelySmallNode);
     ASSERT_LT(nljCost, hjCost);
+}
+
+class IndexScanNDVCostTest : public JoinOrderingTestFixture {
+public:
+    void setUp() override {
+        JoinOrderingTestFixture::setUp();
+
+        nss = NamespaceString::createNamespaceString_forTest("test", "ndvTestColl");
+        constexpr double collCardValue = 1000.0;
+        constexpr double numDocsOutputValue = 200.0;
+        constexpr double docSizeBytes = 500.0;
+
+        auto cq = makeCanonicalQuery(nss);
+        nodeId = *graph.addNode(nss, std::move(cq), boost::none);
+
+        // Register an index scan QSN so that costIndexScanFragment can reach the NDV path.
+        auto* cqPtr = graph.getNode(nodeId).accessPath.get();
+        cbrCqQsns.emplace(cqPtr, makeIndexScanFetchPlan(nss, IndexBounds{}, {"a"}));
+
+        jCtx.emplace(makeContext());
+
+        SubsetCardinalities subsetCards{{makeNodeSet(nodeId), makeCard(numDocsOutputValue)}};
+        NodeCardinalities collCards{makeCard(collCardValue)};
+        cardEstimator =
+            std::make_unique<FakeJoinCardinalityEstimator>(*jCtx, subsetCards, collCards);
+
+        jCtx->catStats = {.collStats = {{nss,
+                                         CollectionStats{collCardValue * docSizeBytes,
+                                                         collCardValue * docSizeBytes}}}};
+
+        costEstimator = std::make_unique<JoinCostEstimatorImpl>(*jCtx, *cardEstimator);
+    }
+
+    NamespaceString nss;
+    NodeId nodeId;
+    boost::optional<JoinReorderingContext> jCtx;
+    std::unique_ptr<JoinCardinalityEstimator> cardEstimator;
+    std::unique_ptr<JoinCostEstimator> costEstimator;
+};
+
+// Verify that a non-multikey index scan costs less when NDV < numDocsOutput. A lower NDV means
+// fewer distinct sort-sparse IO groups, so numLogicalPageRequests (= NDV * selectivity) is smaller.
+TEST_F(IndexScanNDVCostTest, LowNDVHasLowerCostThanHighNDV) {
+    // Without sampling estimators the fallback is numLogicalPageRequests = numDocsOutput = 200.
+    auto costWithoutNDV = costEstimator->costIndexScanFragment(nodeId);
+
+    // With NDV = 50 (< numDocsOutput = 200):
+    //   numLogicalPageRequests = 50 * 200 / 1000 = 10 → lower cost.
+    auto fakeNdvEstimator = std::make_unique<FakeNdvEstimator>(makeCard(1000));
+    fakeNdvEstimator->addFakeNDVEstimate({FieldPath("a")}, makeCard(50));
+    SamplingEstimatorMap samplingEstimators;
+    samplingEstimators.emplace(nss, std::move(fakeNdvEstimator));
+    jCtx->samplingEstimators = &samplingEstimators;
+
+    auto costWithLowNDV = costEstimator->costIndexScanFragment(nodeId);
+
+    ASSERT_GT(costWithoutNDV, costWithLowNDV);
 }
 
 TEST(MackertLohmanTest, CollectionFitsInCache) {

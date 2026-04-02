@@ -217,11 +217,9 @@ CatalogStats createCatalogStats(OperationContext* opCtx, const MultipleCollectio
         auto* recordStore = coll->getRecordStore();
         // TODO SERVER-117620: set .pageSizeBytes.
         collStats.emplace(coll->ns(),
-                          CollectionStats{
-                              .logicalDataSizeBytes = static_cast<double>(recordStore->dataSize()),
-                              .onDiskSizeBytes = static_cast<double>(
-                                  recordStore->storageSize(ru) - recordStore->freeStorageSize(ru)),
-                          });
+                          CollectionStats{static_cast<double>(recordStore->dataSize()),
+                                          static_cast<double>(recordStore->storageSize(ru) -
+                                                              recordStore->freeStorageSize(ru))});
     });
     auto engine = opCtx->getServiceContext()->getStorageEngine();
     double cacheSizeBytes = engine->getCacheSizeMB() * 1024 * 1024;
@@ -315,7 +313,8 @@ StatusWith<JoinReorderedExecutorResult> getJoinReorderedExecutor(
     // Select access plans for each table in the join.
     auto yieldPolicy = PlanYieldPolicy::YieldPolicy::YIELD_AUTO;
     SamplingEstimatorMap samplingEstimators = makeSamplingEstimators(mca, model.graph, yieldPolicy);
-    auto swAccessPlans = singleTableAccessPlans(opCtx, mca, model.graph, samplingEstimators);
+    auto swAccessPlans = singleTableAccessPlans(
+        opCtx, mca, model.graph, samplingEstimators, expCtx->getExplain().has_value());
     if (!swAccessPlans.isOK()) {
         return swAccessPlans.getStatus();
     }
@@ -343,6 +342,7 @@ StatusWith<JoinReorderedExecutorResult> getJoinReorderedExecutor(
                               .perCollIdxs = std::move(indexesPerColl),
                               .catStats = createCatalogStats(opCtx, mca),
                               .uniqueFieldInfo = std::move(uniqueFieldInfo),
+                              .samplingEstimators = &samplingEstimators,
                               .explain = expCtx->getExplain().has_value()};
 
     JoinCardinalityEstimator cardEstimator(
