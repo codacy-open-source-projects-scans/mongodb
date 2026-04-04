@@ -2,9 +2,7 @@ test_kind: js_test
 
 selector:
   roots:
-    - src/mongo/db/modules/*/jstests/streams_kafka/*.js
-  exclude_files:
-    - src/mongo/db/modules/enterprise/jstests/streams_kafka/kafka_utils.js
+    - src/mongo/db/modules/*/jstests/streams/azure_blob_local/azure_parallel.js
 
 executor:
   fixture:
@@ -12,7 +10,6 @@ executor:
     mongod_options:
       bind_ip_all: ""
       set_parameters:
-        enableTestCommands: 1
         featureFlagStreams: true
         diagnosticDataCollectionEnabled: false
     num_nodes: 1

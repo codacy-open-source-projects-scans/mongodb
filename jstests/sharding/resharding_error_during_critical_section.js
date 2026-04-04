@@ -3,7 +3,7 @@
  * for responses for commands against donors or recipients in the critical section.
  *
  * @tags: [
- *   requires_fcv_83,
+ *   requires_fcv_90,
  *   featureFlagReshardingVerification,
  *   featureFlagReshardingSkipCloningAndApplyingIfApplicable,
  * ]
@@ -139,7 +139,7 @@ const cmdsToBlock = [
         numSkips: 0,
     },
     {
-        cmdName: "_shardsvrReshardingRecipientCriticalSectionStarted",
+        cmdName: "_shardsvrReshardRecipientCriticalSectionStarted",
         // No skipping.
         numSkips: 0,
     },

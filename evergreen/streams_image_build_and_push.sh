@@ -51,6 +51,9 @@ if [ "$DISTRO" != "amazon2023" ]; then
     mkdir -p ./dist-test/bin
     cp -L ./bazel-bin/src/mongo/db/mongod ./dist-test/bin/mongod
     cp -L ./bazel-bin/src/mongo/shell/mongo ./dist-test/bin/mongo
+    cp -L ./bazel-bin/src/mongo/s/mongos ./dist-test/bin/mongos
+    mkdir -p ./dist-test/bin/x509
+    cp -L ./bazel-bin/x509/*.pem ./dist-test/bin/x509/
     tar -czvf streams-binaries.tgz dist-test/
     exit 0
 fi
@@ -117,6 +120,9 @@ wait_for_job $VENV_PID "Full venv setup" "$LOGS_DIR/venv.log"
 mkdir -p ./dist-test/bin
 cp -L ./bazel-bin/src/mongo/db/mongod ./dist-test/bin/mongod
 cp -L ./bazel-bin/src/mongo/shell/mongo ./dist-test/bin/mongo
+cp -L ./bazel-bin/src/mongo/s/mongos ./dist-test/bin/mongos
+mkdir -p ./dist-test/bin/x509
+cp -L ./bazel-bin/x509/*.pem ./dist-test/bin/x509/
 
 attempts=0
 max_attempts=4
@@ -155,4 +161,33 @@ tar -tzvf streams-binaries.tgz
 
 if [ "$1" == "--push" ]; then
     docker push "$FULL_IMAGE_TAG"
+
+    # Create and push a docker manifest so the image can be pulled without
+    # specifying the architecture tag explicitly.
+    MANIFEST_SUFFIX=""
+
+    if [ "$DISTRO" == "amazon2023" ]; then
+        MANIFEST_SUFFIX="-al2023"
+    fi
+
+    if [ "$PATCH" ]; then
+        MANIFEST_SUFFIX="$MANIFEST_SUFFIX-$revision_order_id"
+    fi
+
+    for arg in "$@"; do
+        if [ "$arg" == "--break-glass" ]; then
+            MANIFEST_SUFFIX="${MANIFEST_SUFFIX}_break_glass"
+            break
+        fi
+    done
+
+    MANIFEST_TAG="$IMAGE:$GITSHA$MANIFEST_SUFFIX"
+
+    docker manifest create "$MANIFEST_TAG" \
+        "$IMAGE:$GITSHA-amd64$MANIFEST_SUFFIX"
+
+    docker manifest annotate "$MANIFEST_TAG" \
+        "$IMAGE:$GITSHA-amd64$MANIFEST_SUFFIX" --os linux --arch amd64
+
+    docker manifest push "$MANIFEST_TAG"
 fi
