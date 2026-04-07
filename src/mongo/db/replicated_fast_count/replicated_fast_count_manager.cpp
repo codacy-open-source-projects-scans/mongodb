@@ -119,7 +119,7 @@ int ReplicatedFastCountManager::_hydrateMetadataFromDisk(
     auto cursor = acquisition.getCollectionPtr()->getCursor(opCtx);
     while (auto record = cursor->next()) {
         Record& rec = *record;
-        UUID uuid = _UUIDForKey(rec.id);
+        UUID uuid = replicated_fast_count::UUIDFromFastCountStoreKey(rec.id);
         BSONObj data = rec.data.releaseToBson();
 
         ++numRecordsScanned;
@@ -228,6 +228,13 @@ bool ReplicatedFastCountManager::isRunning_ForTest() {
 
 void ReplicatedFastCountManager::_acquireAndFlush(OperationContext* opCtx,
                                                   const FastSizeCountMap& dirtyMetadata) {
+    // Flushing the logical size and metadata checkpoint is an internal maintenance operation that
+    // should not be blocked by admission control. Metadata checkpoint persistence must not fall
+    // behind to prevent compounding lag from impacting accurate and speedy reading and writing of
+    // collection sizes and counts.
+    ScopedAdmissionPriority<ExecutionAdmissionContext> skipTicketAcquisition(
+        opCtx, AdmissionContext::Priority::kExempt);
+
     auto acquisition = replicated_fast_count::acquireFastCountCollectionForWrite(opCtx);
     massert(ErrorCodes::NamespaceNotFound, "Expected fastcount collection to exist", acquisition);
 
@@ -276,7 +283,7 @@ void ReplicatedFastCountManager::_doFlush(OperationContext* opCtx,
                           metadataKey,
                           metadataVal.sizeCount,
                           metadataVal.validAsOf,
-                          _keyForUUID(metadataKey));
+                          replicated_fast_count::getFastCountStoreKey(metadataKey));
     }
     wuow.commit();
     _metrics.addWriteTimeMsTotal((Date_t::now() - startTime).count());
@@ -415,18 +422,6 @@ BSONObj ReplicatedFastCountManager::_getDocForWrite(const UUID& uuid,
                       << BSON(replicated_fast_count::kCountKey << sizeCount.count
                                                                << replicated_fast_count::kSizeKey
                                                                << sizeCount.size));
-}
-
-RecordId ReplicatedFastCountManager::_keyForUUID(const UUID& uuid) const {
-    auto key =
-        record_id_helpers::keyForDoc(BSON("_id" << uuid),
-                                     clustered_util::makeDefaultClusteredIdIndex().getIndexSpec(),
-                                     /*collator=*/nullptr);
-    return key.getValue();
-}
-
-UUID ReplicatedFastCountManager::_UUIDForKey(const RecordId key) const {
-    return UUID::parse(record_id_helpers::toBSONAs(key, "").firstElement()).getValue();
 }
 
 }  // namespace mongo
