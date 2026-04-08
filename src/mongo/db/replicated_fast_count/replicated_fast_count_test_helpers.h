@@ -135,7 +135,11 @@ class ReplicatedFastCountTestPersistenceProvider : public rss::StubPersistencePr
         return false;
     }
 
-    bool shouldTimestampTableCreations() const override {
+    bool usesSchemaEpochs() const override {
+        return false;
+    }
+
+    bool supportsPreservingPreparedTxnInPreciseCheckpoints() const override {
         return false;
     }
 };
@@ -327,6 +331,15 @@ repl::OplogEntry makeOplogEntry(Timestamp ts,
                                 repl::OpTypeEnum opType,
                                 int32_t sizeDelta);
 repl::OplogEntry makeOplogEntry(Timestamp ts, NsAndUUID userColl, repl::OpTypeEnum opType);
+
+/**
+ * Generates a truncateRange command oplog entry for the given collection UUID with the specified
+ * bytesDeleted and docsDeleted values.
+ */
+repl::OplogEntry makeTruncateRangeOplogEntry(Timestamp ts,
+                                             NsAndUUID userColl,
+                                             int64_t bytesDeleted,
+                                             int64_t docsDeleted);
 
 /**
  * Inserts `oplogEntry` into the oplog collection.

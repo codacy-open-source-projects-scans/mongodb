@@ -36,6 +36,7 @@
 #include "mongo/db/repl/apply_ops_command_info.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_interface_local.h"
+#include "mongo/db/repl/truncate_range_oplog_entry_gen.h"
 #include "mongo/db/replicated_fast_count/replicated_fast_count_delta_utils.h"
 #include "mongo/db/replicated_fast_count/replicated_fast_count_init.h"
 #include "mongo/db/replicated_fast_count/replicated_fast_count_manager.h"
@@ -292,9 +293,22 @@ void assertFastCountApplyOpsMatches(const repl::OplogEntry& applyOpsEntry,
         applyOpsEntry, applyOpsEntry.getEntry().toBSON(), &innerOperations);
     int seenFastCountOps = 0;
 
+    const auto timestampStoreNss = NamespaceString::makeGlobalConfigCollection(
+        NamespaceString::kReplicatedFastCountStoreTimestamps);
+
     for (const auto& innerEntry : innerOperations) {
+        if (innerEntry.getNss() == timestampStoreNss) {
+            // TODO SERVER-123384: Add explicit validation for the timestamp store writes.
+            //
+            // Timestamp-store ops are written alongside metadata ops in the same applyOps; skip
+            // them here since they aren't part of the per-collection metadata being validated.
+            continue;
+        }
+
         EXPECT_EQ(internalNss, innerEntry.getNss())
-            << "Found unexpected non-fast-count operation in applyOps payload";
+            << "Found unexpected non-fast-count operation in applyOps payload. "
+            << applyOpsEntry.toStringForLogging() << " Inner operation "
+            << innerEntry.toStringForLogging();
 
         EXPECT_EQ(repl::OplogEntry::CommandType::kNotCommand, innerEntry.getCommandType());
 
@@ -366,44 +380,10 @@ void assertFastCountApplyOpsMatches(const repl::OplogEntry& applyOpsEntry,
             case FastCountOpType::kUpdate: {
                 const auto& obj = innerEntry.getObject();
 
-                // Extract the size from the update diff. The diff algorithm may either use a
-                // subdiff for the meta object (smeta: {u: {sz: N}}) or replace the whole meta
-                // field as part of the top-level update (u: {meta: {sz: N}}), depending on which
-                // representation is more compact. In practice, the former will be used when we are
-                // updating only one field (sz) and the latter will be used when we replace both
-                // fields.
-                BSONElement sizeElem;
-                {
-                    auto diffField = obj.getField("diff");
-                    ASSERT_TRUE(diffField.isABSONObj())
-                        << "Expected 'diff' object in kUpdate op for UUID " << uuid << ": "
-                        << obj.toString();
-                    const BSONObj diffBson = diffField.Obj();
-
-                    const std::string smetaKey =
-                        "s" + std::string(replicated_fast_count::kMetadataKey);
-                    auto smetaField = diffBson.getField(smetaKey);
-                    if (smetaField.isABSONObj()) {
-                        // Subdiff format: {diff: {smeta: {u: {sz: N}}}}
-                        const BSONObj smetaBson = smetaField.Obj();
-                        auto uField = smetaBson.getField("u");
-                        if (uField.isABSONObj()) {
-                            const BSONObj uBson = uField.Obj();
-                            sizeElem = uBson.getField(replicated_fast_count::kSizeKey);
-                        }
-                    } else {
-                        // Full-replacement format: {diff: {u: {meta: {sz: N}}}}
-                        auto uField = diffBson.getField("u");
-                        if (uField.isABSONObj()) {
-                            const BSONObj uBson = uField.Obj();
-                            auto metaField = uBson.getField(replicated_fast_count::kMetadataKey);
-                            if (metaField.isABSONObj()) {
-                                const BSONObj metaBson = metaField.Obj();
-                                sizeElem = metaBson.getField(replicated_fast_count::kSizeKey);
-                            }
-                        }
-                    }
-                }
+                std::string kSubDiffSectionFieldPrefix = "s";
+                auto sizeElem =
+                    obj["diff"][kSubDiffSectionFieldPrefix + replicated_fast_count::kMetadataKey]
+                       ["u"][replicated_fast_count::kSizeKey];
                 EXPECT_TRUE(sizeElem.isNumber())
                     << "Size field not numeric for UUID " << uuid << ": " << sizeElem;
 
@@ -539,6 +519,22 @@ repl::OplogEntry makeOplogEntry(const Timestamp ts, NsAndUUID userColl, repl::Op
         .nss = userColl.nss,
         .uuid = userColl.uuid,
         .oField = BSONObj(),
+        .wallClockTime = Date_t::now(),
+    }};
+}
+
+repl::OplogEntry makeTruncateRangeOplogEntry(Timestamp ts,
+                                             NsAndUUID userColl,
+                                             int64_t bytesDeleted,
+                                             int64_t docsDeleted) {
+    TruncateRangeOplogEntry objectEntry(
+        userColl.nss, RecordId(), RecordId(), bytesDeleted, docsDeleted);
+    return repl::DurableOplogEntry{repl::DurableOplogEntryParams{
+        .opTime = repl::OpTime(ts, 1),
+        .opType = repl::OpTypeEnum::kCommand,
+        .nss = userColl.nss.getCommandNS(),
+        .uuid = userColl.uuid,
+        .oField = objectEntry.toBSON(),
         .wallClockTime = Date_t::now(),
     }};
 }

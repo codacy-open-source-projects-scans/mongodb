@@ -37,6 +37,8 @@
 #include "mongo/db/replicated_fast_count/replicated_fast_count_committer.h"
 #include "mongo/db/replicated_fast_count/replicated_fast_count_metrics.h"
 #include "mongo/db/replicated_fast_count/replicated_fast_size_count.h"
+#include "mongo/db/replicated_fast_count/size_count_store.h"
+#include "mongo/db/replicated_fast_count/size_count_timestamp_store.h"
 #include "mongo/db/shard_role/shard_catalog/collection.h"
 #include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/storage/snapshot.h"
@@ -140,6 +142,11 @@ public:
     CollectionSizeCount find(const UUID& uuid) const;
 
     /**
+     * Returns the persisted number of records (count) and data size for the collection with `uuid`.
+     */
+    CollectionSizeCount findPersisted(OperationContext* opCtx, const UUID& uuid) const;
+
+    /**
      * Signals the background thread to perform a flush.
      *
      * This flush involves snapshotting and writing dirty in-memory SizeCounts to the internal
@@ -172,7 +179,11 @@ public:
     bool isRunning_ForTest();
 
 private:
-    void _acquireAndFlush(OperationContext* opCtx, const FastSizeCountMap& dirtyMetadata);
+    /**
+     * Centralized point for flushing logic.
+     * TODO SERVER-123284: Remove 'dirtyMetadata' parameter once there is only one flush mechanism.
+     */
+    void _doFlush(OperationContext* opCtx, const FastSizeCountMap& dirtyMetadata);
 
     /**
      * Return a copy of a subset of _metadata, only including the dirty entries. Clears the dirty
@@ -181,11 +192,10 @@ private:
     FastSizeCountMap _getAndClearSnapshotOfDirtyMetadata(WithLock metadataLock);
 
     /**
-     * Write out dirtyMetadata to fastCountColl.
+     * Write out dirtyMetadata to the `config.fast_count_metadata_store`. TODO SERVER-123284: Remove
+     * these methods.
      */
-    void _doFlush(OperationContext* opCtx,
-                  const CollectionPtr& fastCountColl,
-                  const FastSizeCountMap& dirtyMetadata);
+    void _flushDirtyMetadata(OperationContext* opCtx, const FastSizeCountMap& dirtyMetadata);
 
     /**
      * Runs background thread, performing final flush.
@@ -200,7 +210,8 @@ private:
     void _flushPeriodicallyOnSignal();
 
     /**
-     * Write one collection's sizeCount to disk.
+     * Write one collection's sizeCount to disk. Note: These are specific to the legacy flush
+     * mechanism turned on and off by '_useLegacyFlush'. TODO SERVER-123284: Remove these methods.
      */
     void _writeOneMetadata(OperationContext* opCtx,
                            const CollectionPtr& fastCountColl,
@@ -236,6 +247,13 @@ private:
                             const CollectionSizeCount& sizeCount,
                             const Timestamp& validAsOfTS) const;
 
+    /**
+     * Generates a key (RecordId) into the fastcount collection given a user
+     * collection uuid.
+     */
+    RecordId _keyForUUID(const UUID& uuid) const;
+    UUID _UUIDForKey(RecordId key) const;
+
     // Metrics for the ReplicatedFastCountManager reported via both serverStatus and OTel.
     //
     // Metrics are shared between ReplicatedFastCountManager instances. We assume there is exactly
@@ -247,6 +265,29 @@ private:
     Atomic<bool> _isEnabled = false;
     stdx::condition_variable _backgroundThreadReadyForFlush;
     bool _isUnderTest = false;  // Used to force synchronous writes in tests.
+
+    /**
+     * When true, utilizes the legacy flush mechanism which flushes the dirtied in-memory `metadata`
+     * to the `config.fast_count_metadata_store`. Notably, this does not update
+     * `config.fast_count_metadata_timestamp_store`.
+     *
+     * When false, utilizes a more robust flush mechanism which advances the logical metadata
+     * checkpoint by writing to both `config.fast_count_metadata_store` and
+     * `config.fast_count_metadata_timestamp_store`.
+     *
+     * TODO SERVER-123284: Remove this flag and the legacy mechanism.
+     */
+    bool _useLegacyFlush{false};
+
+    /**
+     * Interface for reads / writes to the `config.fast_count_metadata_store`.
+     */
+    replicated_fast_count::SizeCountStore _sizeCountStore;
+
+    /**
+     * Interface for reads / writes to the `config.fast_count_metadata_timestamp_store`.
+     */
+    replicated_fast_count::SizeCountTimestampStore _timestampStore;
 
     /**
      * In-memory cache of committed fast sizes & counts since last checkpoint.
