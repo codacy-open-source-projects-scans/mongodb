@@ -818,15 +818,19 @@ typedef struct MongoExtensionLogicalAggStageVTable {
     /**
      * Populates outIsSortedByVectorSearchScore with true if the extension stage sorts by vector
      * search score, false otherwise. Intended to be used by the extension $vectorSearch stage.
+     *
+     * This method is deprecated and will be removed in a future API version.
      */
-    MongoExtensionStatus* (*is_stage_sorted_by_vector_search_score)(
+    MongoExtensionStatus* (*is_stage_sorted_by_vector_search_score_deprecated)(
         const MongoExtensionLogicalAggStage* logicalStage, bool* outIsSortedByVectorSearchScore);
 
     /**
      * Populates extractedLimitVal with the extracted limit value for the $vectorSearch extension
      * stage to use in its optimizations.
+     *
+     * This method is deprecated and will be removed in a future API version.
      */
-    MongoExtensionStatus* (*set_vector_search_limit_for_optimization)(
+    MongoExtensionStatus* (*set_vector_search_limit_for_optimization_deprecated)(
         MongoExtensionLogicalAggStage* logicalStage, long long* extractedLimitVal);
 
 
@@ -858,6 +862,18 @@ typedef struct MongoExtensionLogicalAggStageVTable {
     MongoExtensionStatus* (*evaluate_rule_transform)(MongoExtensionLogicalAggStage* logicalStage,
                                                      MongoExtensionByteView ruleName,
                                                      bool* result);
+
+    /**
+     * Returns the filter predicate that will be applied by the stage, if applicable. If the stage
+     * does not apply a filter, the output buffer is left as nullptr.
+     *
+     * This method is called by the host for determining which shards to target on source stages.
+     *
+     * Ownership of the output buffer is transferred to the caller.
+     */
+    MongoExtensionStatus* (*get_filter)(const MongoExtensionLogicalAggStage* logicalStage,
+                                        MongoExtensionByteBuf** output);
+
 } MongoExtensionLogicalAggStageVTable;
 
 /**

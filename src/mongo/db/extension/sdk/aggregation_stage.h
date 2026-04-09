@@ -80,11 +80,20 @@ public:
     virtual std::unique_ptr<LogicalAggStage> clone() const = 0;
     // Extension stages (like $vectorSearch) that do sort by vector search score should override
     // this and return true.
-    virtual bool isSortedByVectorSearchScore() const {
+    virtual bool isSortedByVectorSearchScore_deprecated() const {
         return false;
     }
 
-    void setExtractedLimitVal(boost::optional<long long> extractedLimitVal) {
+    /**
+     * Returns the filter predicate applied by this stage for shard targeting. Source stages that
+     * filter documents should override this to enable shard targeting. Returns an empty BSONObj by
+     * default (no filter).
+     */
+    virtual BSONObj getFilter() const {
+        return BSONObj();
+    }
+
+    void setExtractedLimitVal_deprecated(boost::optional<long long> extractedLimitVal) {
         _limit = extractedLimitVal;
     }
 
@@ -235,7 +244,7 @@ private:
         return wrapCXXAndConvertExceptionToStatus([&]() {
             const auto& impl =
                 static_cast<const ExtensionLogicalAggStageAdapter*>(extLogicalStage)->getImpl();
-            *outIsSortedByVectorSearchScore = impl.isSortedByVectorSearchScore();
+            *outIsSortedByVectorSearchScore = impl.isSortedByVectorSearchScore_deprecated();
         });
     }
 
@@ -243,7 +252,7 @@ private:
         ::MongoExtensionLogicalAggStage* extLogicalStage, long long* extractedLimitVal) {
         return wrapCXXAndConvertExceptionToStatus([&]() {
             auto& impl = static_cast<ExtensionLogicalAggStageAdapter*>(extLogicalStage)->getImpl();
-            impl.setExtractedLimitVal(
+            impl.setExtractedLimitVal_deprecated(
                 extractedLimitVal ? boost::optional<long long>(*extractedLimitVal) : boost::none);
         });
     }
@@ -270,6 +279,24 @@ private:
         });
     }
 
+    static ::MongoExtensionStatus* _extGetFilter(
+        const ::MongoExtensionLogicalAggStage* extLogicalStage,
+        ::MongoExtensionByteBuf** output) noexcept {
+        return wrapCXXAndConvertExceptionToStatus([&]() {
+            *output = nullptr;
+
+            const auto& impl =
+                static_cast<const ExtensionLogicalAggStageAdapter*>(extLogicalStage)->getImpl();
+
+            auto filter = impl.getFilter();
+            if (!filter.isEmpty()) {
+                // Only return something if we have a non-empty filter. A null output implies no
+                // filter. Allocate a buffer on the heap. Ownership is transferred to the caller.
+                *output = new ByteBuf(filter);
+            }
+        });
+    }
+
     static constexpr ::MongoExtensionLogicalAggStageVTable VTABLE = {
         .destroy = &_extDestroy,
         .get_name = &_extGetName,
@@ -278,10 +305,12 @@ private:
         .compile = &_extCompile,
         .get_distributed_plan_logic = &_extGetDistributedPlanLogic,
         .clone = &_extClone,
-        .is_stage_sorted_by_vector_search_score = &_extIsStageSortedByVectorSearchScore,
-        .set_vector_search_limit_for_optimization = &_extSetVectorSearchLimitForOptimization,
+        .is_stage_sorted_by_vector_search_score_deprecated = &_extIsStageSortedByVectorSearchScore,
+        .set_vector_search_limit_for_optimization_deprecated =
+            &_extSetVectorSearchLimitForOptimization,
         .evaluate_rule_precondition = &_extEvaluateRulePrecondition,
-        .evaluate_rule_transform = &_extEvaluateRuleTransform};
+        .evaluate_rule_transform = &_extEvaluateRuleTransform,
+        .get_filter = &_extGetFilter};
     std::unique_ptr<LogicalAggStage> _stage;
 };
 

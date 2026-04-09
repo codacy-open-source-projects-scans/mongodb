@@ -182,6 +182,10 @@ private:
         });
     }
 
+    static ::MongoExtensionStatus* _hostGetFilter(
+        const ::MongoExtensionLogicalAggStage* logicalStage,
+        ::MongoExtensionByteBuf** output) noexcept;
+
     static constexpr ::MongoExtensionLogicalAggStageVTable VTABLE = {
         .destroy = &_hostDestroy,
         .get_name = &_hostGetName,
@@ -190,10 +194,12 @@ private:
         .compile = &_hostCompile,
         .get_distributed_plan_logic = &_hostGetDistributedPlanLogic,
         .clone = &_hostClone,
-        .is_stage_sorted_by_vector_search_score = &_hostIsStageSortedByVectorSearchScore,
-        .set_vector_search_limit_for_optimization = &_hostSetVectorSearchLimitForOptimization,
+        .is_stage_sorted_by_vector_search_score_deprecated = &_hostIsStageSortedByVectorSearchScore,
+        .set_vector_search_limit_for_optimization_deprecated =
+            &_hostSetVectorSearchLimitForOptimization,
         .evaluate_rule_precondition = &_hostEvaluateRulePrecondition,
         .evaluate_rule_transform = &_hostEvaluateRuleTransform,
+        .get_filter = &_hostGetFilter,
     };
 
     std::unique_ptr<host::LogicalAggStage> _logicalAggStage;

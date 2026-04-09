@@ -85,6 +85,11 @@ buildvariants:
           - streams_aspio_iceberg_5
           - streams_aspio_utilities
           - streams_aspio_pubsub
+      - name: streams_s3_tests
+        execution_tasks:
+          - streams_s3_single
+          - streams_s3_parallel
+          - streams_s3_parallel_heavy
       - name: streams_azure_blob_tests
         execution_tasks:
           - streams_azure_blob_single
@@ -102,9 +107,6 @@ buildvariants:
         distros:
           - amazon2023.3-c5-24xlarge
       - name: streams_build_debug
-        distros:
-          - amazon2023.3-c5-24xlarge
-      - name: streams_build_and_push_break_glass
         distros:
           - amazon2023.3-c5-24xlarge
 
@@ -187,6 +189,11 @@ buildvariants:
           - streams_aspio_iceberg_5
           - streams_aspio_utilities
           - streams_aspio_pubsub
+      - name: streams_s3_tests
+        execution_tasks:
+          - streams_s3_single
+          - streams_s3_parallel
+          - streams_s3_parallel_heavy
       - name: streams_azure_blob_tests
         execution_tasks:
           - streams_azure_blob_single
@@ -204,8 +211,5 @@ buildvariants:
         distros:
           - amazon2023.3-arm64-xxxlarge
       - name: streams_build_debug
-        distros:
-          - amazon2023.3-arm64-xxxlarge
-      - name: streams_build_and_push_break_glass
         distros:
           - amazon2023.3-arm64-xxxlarge

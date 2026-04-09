@@ -442,6 +442,14 @@ export function getExtensionSearchUsedCount(conn) {
     return getExtensionMetric(conn, "search", "extensionSearchUsed");
 }
 
+export function getSearchInUnionWithKickbackRetryCount(conn) {
+    return getExtensionMetric(conn, "search", "inUnionWithKickbackRetries");
+}
+
+export function getSearchInHybridSearchKickbackRetryCount(conn) {
+    return getExtensionMetric(conn, "search", "inHybridSearchKickbackRetries");
+}
+
 /**
  * Sets up mongotmock responses needed for a $search or $searchMeta query on a view.
  *
@@ -454,7 +462,7 @@ export function getExtensionSearchUsedCount(conn) {
  *
  * TODO SERVER-123557: Add sharded topology support.
  */
-export function setUpSearchMocks(mongotMock, {coll, testDb, viewName, query, isSearchMeta, startingCursorId}) {
+export function setUpSearchMocks(mongotMock, {coll, testDb, viewName = null, query, isSearchMeta, startingCursorId}) {
     const collectionUUID = getUUIDFromListCollections(testDb, coll.getName());
     const collName = coll.getName();
     const dbName = testDb.getName();

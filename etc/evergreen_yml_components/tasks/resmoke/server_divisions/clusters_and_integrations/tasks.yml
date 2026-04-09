@@ -1988,7 +1988,6 @@ tasks:
         "sharding",
         "jscore",
         "common",
-        "has_bazel_target",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -2536,11 +2535,6 @@ tasks:
       ["assigned_to_jira_team_server_catalog_and_routing", "default", "jscore"]
     commands:
       - func: "generate resmoke tasks"
-        vars:
-          # Requires legacy timeseries (system.buckets) even in all feature flags variants
-          resmoke_args: >-
-            --disableFeatureFlags=featureFlagCreateViewlessTimeseriesCollections
-            --disableFeatureFlags=featureFlagBlockDirectSystemBucketsAccess
 
   - <<: *gen_task_template
     name: sharding_jscore_passthrough_with_dynamic_execution_control_gen
@@ -2748,13 +2742,6 @@ tasks:
       - func: "generate resmoke tasks"
         vars:
           use_large_distro: "true"
-          # TODO SERVER-112130 remove timeout override
-          exec_timeout_secs: 4800 # 80min
-          timeout_secs: 4800 # 80min
-          # Requires legacy timeseries (system.buckets) even in all feature flags variants
-          resmoke_args: >-
-            --disableFeatureFlags=featureFlagCreateViewlessTimeseriesCollections
-            --disableFeatureFlags=featureFlagBlockDirectSystemBucketsAccess
 
   # TODO(SERVER-108818): Remove this temporary suite.
   - <<: *gen_task_template
@@ -3328,6 +3315,27 @@ tasks:
           suite: disagg_sharded_colls_jscore_passthrough
           use_large_distro: "true"
           resmoke_jobs_max: 10
+
+  - <<: *jstestfuzz_template
+    name: disagg_resharding_fuzzer_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_cluster_scalability",
+        "default",
+        "resharding_fuzzer",
+        "require_npm",
+        "random_name",
+        "requires_extra_system_deps",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          <<: *jstestfuzz_config_vars
+          num_files: 10
+          num_tasks: 5
+          npm_command: resharding-fuzzer
+          jstestfuzz_vars: --numDonors 3 --numRecipients 3 --inPlace no
+          suite: disagg_resharding_fuzzer
 
   # TODO (SERVER-123074): Re-enable balancer related disagg suites
   #  - <<: *gen_task_template
