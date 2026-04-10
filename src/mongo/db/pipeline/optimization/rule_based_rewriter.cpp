@@ -124,7 +124,8 @@ PipelineRewriteContext::PipelineRewriteContext(
       _itr(startingPos.value_or(_container.begin())),
       _expCtx(expCtx),
       _registry(registration_detail::getPipelineRewriteRuleRegistry(
-          _expCtx.getOperationContext()->getServiceContext())) {}
+          _expCtx.getOperationContext()->getServiceContext())),
+      _depGraphCtx(expCtx, container) {}
 
 void PipelineRewriteContext::enqueueRules() {
     for (auto&& registration : _registry.getRules(current())) {
@@ -144,6 +145,20 @@ void PipelineRewriteContext::enqueueRules() {
 void PipelineRewriteContext::advance() {
     tassert(11010008, "Already at the end of the container", hasMore());
     _itr = std::next(_itr);
+}
+
+void PipelineRewriteContext::postTransform() {
+    // The transformation rules in Transforms modify the list at the current, next or previous
+    // position. The conservative approach with graph invalidation is to invalidate from the
+    // previous position onwards. This could potentially be improved if we keep track of this
+    // iterator.
+    _depGraphCtx.invalidateFrom(_itr == _container.begin() ? _container.begin() : std::prev(_itr));
+}
+
+const mongo::pipeline::dependency_graph::DependencyGraph&
+PipelineRewriteContext::getDependencyGraph() const {
+    DocumentSourceContainer::const_iterator itr = atLastStage() ? _itr : std::next(_itr);
+    return _depGraphCtx.getGraph(itr);
 }
 
 std::string PipelineRewriteContext::debugString() const {
@@ -195,6 +210,16 @@ bool Transforms::eraseNext(PipelineRewriteContext& ctx) {
     tassert(11010020, "Already at the last stage", !ctx.atLastStage());
     ctx._container.erase(std::next(ctx._itr));
     return false;
+}
+
+bool Transforms::eraseNthNext(PipelineRewriteContext& ctx, size_t n) {
+    if (n == 0)
+        return eraseCurrent(ctx);
+    tassert(12200603,
+            str::stream() << "Expected to have " << n << " next stages",
+            ctx.hasAtLeastNNextStages(n));
+    ctx._container.erase(std::next(ctx._itr, n));
+    return true;
 }
 
 bool Transforms::partialPushdown(PipelineRewriteContext& ctx,

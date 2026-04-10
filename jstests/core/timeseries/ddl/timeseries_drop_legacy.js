@@ -1,7 +1,7 @@
 /**
  * Test several conditions when dropping timeseries collections.
  *
- * TODO SERVER-111517: remove completely this test once 9.0 becomes last LTS. By then we will only have viewless tiemeseries collections.
+ * TODO SERVER-111517: remove completely this test once 9.0 becomes last LTS. By then we will only have viewless timeseries collections.
  *
  * @tags: [
  *   requires_timeseries,
@@ -17,9 +17,13 @@
  *   #  - The command is retryed, but now the main collection doesn't exist, so the buckets
  *   #    collection is dropped instead.
  *   requires_non_retryable_commands,
- *   featureFlagCreateViewlessTimeseriesCollections_incompatible,
  * ]
  */
+
+import {skipTestIfViewlessTimeseriesEnabled} from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
+
+skipTestIfViewlessTimeseriesEnabled(db);
 
 const timeseriesOptions = {
     timeseries: {timeField: "t"},
@@ -37,6 +41,29 @@ function getNewColl(db) {
 function getBucketsColl(db, coll) {
     const bucketsColl = db["system.buckets." + coll.getName()];
     return bucketsColl;
+}
+
+// Creates a system.buckets collection directly via applyOps on the primary mongod, bypassing the
+// cross-namespace timeseries conflict check. This is needed because since binary 9.0 the timeseries
+// creation path rejects creation of system.buckets.X when an incompatible X already exists.
+function createBucketsCollViaApplyOps(db, bucketsColl) {
+    const primary = FixtureHelpers.getPrimaryForNodeHostingDatabase(db);
+    const primaryDB = primary.getDB(db.getName());
+    assert.commandWorked(
+        primaryDB.runCommand({
+            applyOps: [
+                {
+                    op: "c",
+                    ns: db.getName() + ".$cmd",
+                    o: {
+                        create: bucketsColl.getName(),
+                        clusteredIndex: true,
+                        timeseries: {timeField: "t"},
+                    },
+                },
+            ],
+        }),
+    );
 }
 
 function assertExistsAndTypeIs(coll, expectedType) {
@@ -145,7 +172,7 @@ if (!TestData.implicitlyTrackUnshardedCollectionOnCreation && !TestData.runningW
     let bucketsColl = getBucketsColl(db, coll);
 
     assert.commandWorked(db.createView(coll.getName(), dummyCollection, []));
-    assert.commandWorked(db.createCollection(bucketsColl.getName(), timeseriesOptions));
+    createBucketsCollViaApplyOps(db, bucketsColl);
 
     assertExistsAndTypeIs(coll, "view");
     assertExistsAndTypeIs(bucketsColl, "collection");
@@ -166,7 +193,7 @@ jsTest.log("Case 6: view on another collection, buckets exists, drop by the buck
     let bucketsColl = getBucketsColl(db, coll);
 
     assert.commandWorked(db.createView(coll.getName(), dummyCollection, []));
-    assert.commandWorked(db.createCollection(bucketsColl.getName(), timeseriesOptions));
+    createBucketsCollViaApplyOps(db, bucketsColl);
 
     assertExistsAndTypeIs(coll, "view");
     assertExistsAndTypeIs(bucketsColl, "collection");
@@ -216,7 +243,7 @@ if (!TestData.implicitlyTrackUnshardedCollectionOnCreation && !TestData.runningW
     let bucketsColl = getBucketsColl(db, coll);
 
     assert.commandWorked(db.createCollection(coll.getName()));
-    assert.commandWorked(db.createCollection(bucketsColl.getName(), timeseriesOptions));
+    createBucketsCollViaApplyOps(db, bucketsColl);
 
     assertExistsAndTypeIs(coll, "collection");
     assertExistsAndTypeIs(bucketsColl, "collection");
@@ -238,7 +265,7 @@ if (!TestData.implicitlyTrackUnshardedCollectionOnCreation && !TestData.runningW
     let bucketsColl = getBucketsColl(db, coll);
 
     assert.commandWorked(db.createCollection(coll.getName()));
-    assert.commandWorked(db.createCollection(bucketsColl.getName(), timeseriesOptions));
+    createBucketsCollViaApplyOps(db, bucketsColl);
 
     assertExistsAndTypeIs(coll, "collection");
     assertExistsAndTypeIs(bucketsColl, "collection");

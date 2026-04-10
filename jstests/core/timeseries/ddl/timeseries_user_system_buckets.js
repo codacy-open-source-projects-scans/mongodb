@@ -14,12 +14,14 @@
  *   # Running shardCollection instead of createCollection returns different error types which are
  *   # not expected by the test
  *   assumes_unsharded_collection,
- *   # This test directly creates system.buckets collections which is rejected with viewless
- *   # timeseries. The relevant scenarios are covered in timeseries_create_collection.js.
- *   featureFlagCreateViewlessTimeseriesCollections_incompatible,
  *  ]
  */
-import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
+
+import {skipTestIfViewlessTimeseriesEnabled} from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
+
+// This test directly creates system.buckets collections which is rejected with viewless
+// timeseries. The relevant scenarios are covered in timeseries_create_collection.js.
+skipTestIfViewlessTimeseriesEnabled(db);
 
 const tsOptions = {
     timeField: "timestamp",
@@ -31,6 +33,8 @@ const tsOptions2 = {
 };
 const kColl = "coll";
 const kBucket = "system.buckets.coll";
+const isMultiversionSuite =
+    Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet) || Boolean(TestData.multiversionBinVersion);
 
 function createWorked(collName, tsOptions = {}) {
     if (Object.keys(tsOptions).length === 0) {
@@ -95,15 +99,10 @@ db.dropDatabase();
     jsTest.log("Case collection: standard / collection: bucket timeseries.");
     runTest(() => {
         createWorked(kColl);
-        if (FixtureHelpers.isMongos(db) || TestData.testingReplicaSetEndpoint) {
-            // TODO SERVER-87189 Replace this with commandFailed. Now we always pass from the
-            // coordinator to create a collection which will prevent from using a bucket nss if the
-            // main nss already exists.
-            createWorkedOrFailedWithCode(kBucket, tsOptions, ErrorCodes.NamespaceExists);
+        if (!isMultiversionSuite) {
+            createFailed(kBucket, tsOptions, ErrorCodes.NamespaceExists);
         } else {
-            // TODO SERVER-85855 creating bucket timeseries for a collection already created should
-            // fail.
-            createWorked(kBucket, tsOptions);
+            createWorkedOrFailedWithCode(kBucket, tsOptions, ErrorCodes.NamespaceExists);
         }
     });
 }
@@ -149,15 +148,10 @@ db.dropDatabase();
     jsTest.log("Case collection: bucket timeseries / collection: standard.");
     runTest(() => {
         createWorked(kBucket, tsOptions);
-        if (FixtureHelpers.isMongos(db) || TestData.testingReplicaSetEndpoint) {
-            // TODO SERVER-87189 Replace this with commandFailed. Now we always pass from the
-            // coordinator to create a collection which will prevent from using the main namespace
-            // if a bucket nss already exists.
-            createWorkedOrFailedWithCode(kColl, {}, ErrorCodes.NamespaceExists);
+        if (!isMultiversionSuite) {
+            createFailed(kColl, {}, ErrorCodes.NamespaceExists);
         } else {
-            // TODO SERVER-85855 creating a normal collection with an already created bucket
-            // timeseries should fail.
-            createWorked(kColl);
+            createWorkedOrFailedWithCode(kColl, {}, ErrorCodes.NamespaceExists);
         }
     });
 
@@ -186,8 +180,17 @@ db.dropDatabase();
     jsTest.log("Case collection: bucket timeseries / view: non timeseries.");
     runTest(() => {
         createWorked(kBucket, tsOptions);
-        // TODO SERVER-85855 change assert to ensure the creation fail
-        assert.commandWorked(db.runCommand({create: kColl, viewOn: "otherName", pipeline: []}));
+        if (!isMultiversionSuite) {
+            assert.commandFailedWithCode(
+                db.runCommand({create: kColl, viewOn: "otherName", pipeline: []}),
+                ErrorCodes.NamespaceExists,
+            );
+        } else {
+            assert.commandWorkedOrFailedWithCode(
+                db.runCommand({create: kColl, viewOn: "otherName", pipeline: []}),
+                ErrorCodes.NamespaceExists,
+            );
+        }
     });
 
     jsTest.log("Case collection: bucket timeseries / collection: bucket timeseries.");

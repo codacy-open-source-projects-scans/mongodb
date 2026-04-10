@@ -1745,6 +1745,40 @@ tasks:
           resmoke_args: --excludeWithAnyTags=uses_snapshot_read_concern
 
   - <<: *gen_task_template
+    name: disagg_sharded_jscore_txns_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_cluster_scalability",
+        "default",
+        "large",
+        "clustered_collections",
+        "requires_extra_system_deps",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          suite: disagg_sharded_jscore_txns
+          resmoke_jobs_max: 1
+
+  - <<: *gen_task_template
+    name: disagg_sharded_jscore_txns_without_snapshot_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_cluster_scalability",
+        "default",
+        "wo_snapshot",
+        "large",
+        "clustered_collections",
+        "requires_extra_system_deps",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          suite: disagg_sharded_jscore_txns
+          resmoke_jobs_max: 1
+          resmoke_args: --excludeWithAnyTags=uses_snapshot_read_concern
+
+  - <<: *gen_task_template
     name: sharded_multi_stmt_txn_jscore_passthrough_gen
     tags:
       [
@@ -2481,11 +2515,6 @@ tasks:
       ]
     commands:
       - func: "generate resmoke tasks"
-        vars:
-          # TODO(SERVER-109882): Enable viewless timeseries in upgrade/downgrade suites
-          resmoke_args: >-
-            --disableFeatureFlags=featureFlagCreateViewlessTimeseriesCollections
-            --disableFeatureFlags=featureFlagBlockDirectSystemBucketsAccess
 
   - <<: *gen_task_template
     name: fcv_upgrade_downgrade_retryable_writes_replica_sets_jscore_passthrough_gen
@@ -2787,10 +2816,6 @@ tasks:
       - func: "generate resmoke tasks"
         vars:
           use_large_distro: "true"
-          # TODO(SERVER-109882): Enable viewless timeseries in upgrade/downgrade suites
-          resmoke_args: >-
-            --disableFeatureFlags=featureFlagCreateViewlessTimeseriesCollections
-            --disableFeatureFlags=featureFlagBlockDirectSystemBucketsAccess
 
   - <<: *gen_task_template
     name: fcv_upgrade_downgrade_sharded_collections_jscore_passthrough_retryable_writes_gen
@@ -2818,11 +2843,6 @@ tasks:
       ]
     commands:
       - func: "generate resmoke tasks"
-        vars:
-          # TODO(SERVER-109882): Enable viewless timeseries in upgrade/downgrade suites
-          resmoke_args: >-
-            --disableFeatureFlags=featureFlagCreateViewlessTimeseriesCollections
-            --disableFeatureFlags=featureFlagBlockDirectSystemBucketsAccess
 
   - <<: *gen_task_template
     name: fcv_upgrade_downgrade_sharding_jscore_passthrough_retryable_writes_gen
@@ -3211,6 +3231,56 @@ tasks:
           resmoke_args: --excludeWithAnyTags=uses_snapshot_read_concern
 
   - <<: *gen_task_template
+    name: disagg_sharded_causally_consistent_jscore_txns_passthrough_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_catalog_and_routing",
+        "default",
+        "large",
+        "clustered_collections",
+        "requires_extra_system_deps",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          suite: disagg_sharded_causally_consistent_jscore_txns_passthrough
+          resmoke_jobs_max: 1
+
+  - <<: *gen_task_template
+    name: disagg_sharded_causally_consistent_read_concern_snapshot_passthrough_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_catalog_and_routing",
+        "default",
+        "large",
+        "clustered_collections",
+        "requires_extra_system_deps",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          suite: disagg_sharded_causally_consistent_read_concern_snapshot_passthrough
+          resmoke_jobs_max: 1
+
+  - <<: *gen_task_template
+    name: disagg_sharded_causally_consistent_jscore_txns_passthrough_without_snapshot_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_catalog_and_routing",
+        "default",
+        "wo_snapshot",
+        "large",
+        "clustered_collections",
+        "requires_extra_system_deps",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          suite: disagg_sharded_causally_consistent_jscore_txns_passthrough
+          resmoke_jobs_max: 1
+          resmoke_args: --excludeWithAnyTags=uses_snapshot_read_concern
+
+  - <<: *gen_task_template
     name: unsplittable_collections_created_on_any_shard_jscore_passthrough_gen
     # TODO SERVER-83445 Enable on non-all-feature-flag variants.
     tags:
@@ -3315,27 +3385,6 @@ tasks:
           suite: disagg_sharded_colls_jscore_passthrough
           use_large_distro: "true"
           resmoke_jobs_max: 10
-
-  - <<: *jstestfuzz_template
-    name: disagg_resharding_fuzzer_gen
-    tags:
-      [
-        "assigned_to_jira_team_server_cluster_scalability",
-        "default",
-        "resharding_fuzzer",
-        "require_npm",
-        "random_name",
-        "requires_extra_system_deps",
-      ]
-    commands:
-      - func: "generate resmoke tasks"
-        vars:
-          <<: *jstestfuzz_config_vars
-          num_files: 10
-          num_tasks: 5
-          npm_command: resharding-fuzzer
-          jstestfuzz_vars: --numDonors 3 --numRecipients 3 --inPlace no
-          suite: disagg_resharding_fuzzer
 
   # TODO (SERVER-123074): Re-enable balancer related disagg suites
   #  - <<: *gen_task_template

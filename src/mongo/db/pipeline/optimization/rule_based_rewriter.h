@@ -33,6 +33,7 @@
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/query/compiler/dependency_analysis/pipeline_dependency_graph.h"
 #include "mongo/db/query/compiler/rewrites/rule_based_rewriter.h"
 #include "mongo/db/service_context.h"
 #include "mongo/util/assert_util.h"
@@ -164,6 +165,8 @@ public:
     void advance() final;
     void enqueueRules() final;
 
+    void postTransform() final;
+
     template <size_t N>
     bool hasAtLeastNPrevStages() const {
         return std::distance(_container.begin(), _itr) >= static_cast<std::ptrdiff_t>(N);
@@ -184,10 +187,24 @@ public:
         return nthPrevStage<1>();
     }
 
-    boost::intrusive_ptr<DocumentSource> nextStage() const {
-        tassert(11010005, "Already at last stage", !atLastStage());
-        return *std::next(_itr);
+    bool hasAtLeastNNextStages(size_t n) const {
+        return std::distance(_itr, _container.end()) > static_cast<std::ptrdiff_t>(n);
     }
+
+    boost::intrusive_ptr<DocumentSource> nthNextStage(size_t n) const {
+        tassert(12200602,
+                str::stream() << "Expected to have " << n << " next stages",
+                hasAtLeastNNextStages(n));
+
+        auto itr = _itr;
+        std::advance(itr, n);
+        return *itr;
+    }
+
+    boost::intrusive_ptr<DocumentSource> nextStage() const {
+        return nthNextStage(1);
+    }
+
 
     bool atFirstStage() const {
         return _itr == _container.begin();
@@ -201,6 +218,8 @@ public:
         return _expCtx.getMainCollPathArrayness();
     }
 
+    const mongo::pipeline::dependency_graph::DependencyGraph& getDependencyGraph() const;
+
     ExpressionContext& getExpCtx() {
         return _expCtx;
     }
@@ -213,6 +232,8 @@ private:
 
     ExpressionContext& _expCtx;
     registration_detail::RuleRegistry& _registry;
+
+    mongo::pipeline::dependency_graph::DependencyGraphContext _depGraphCtx;
 
     friend struct Transforms;
 };
@@ -233,6 +254,7 @@ struct Transforms {
     static bool insertAfter(PipelineRewriteContext& ctx, DocumentSource& d);
     static bool eraseCurrent(PipelineRewriteContext& ctx);
     static bool eraseNext(PipelineRewriteContext& ctx);
+    static bool eraseNthNext(PipelineRewriteContext& ctx, size_t n);
 
     /**
      * Pushes 'pushdownPart' before the previous stage. Assumes that 'ctx.current()' is the match

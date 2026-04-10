@@ -2483,6 +2483,16 @@ tasks:
           suite: v1index_jscore_passthrough
 
   - <<: *task_template
+    name: timeseries_write_pbt_fixed_seed
+    tags: ["assigned_to_jira_team_server_execution", "default"]
+    commands:
+      - func: "do setup"
+      - func: "run tests"
+        vars:
+          suite: timeseries_write_pbt
+          resmoke_args: --fastCheckParameters='{"numRuns":25,"seed":42}'
+
+  - <<: *task_template
     name: timeseries_write_pbt
     tags:
       [
@@ -2495,7 +2505,37 @@ tasks:
       - func: "run tests"
         vars:
           suite: timeseries_write_pbt
-          resmoke_args: "--fastCheckParameters=${fastCheckParameters|}"
+          resmoke_args: "--fastCheckParameters='${fastCheckParameters|}'"
+
+  - <<: *task_template
+    name: timeseries_write_pbt_replset
+    tags:
+      [
+        "assigned_to_jira_team_server_execution",
+        "default",
+        "suggested_excluding_required__for_devprod_mitigation_only",
+      ]
+    commands:
+      - func: "do setup"
+      - func: "run tests"
+        vars:
+          suite: timeseries_write_pbt_replset
+          resmoke_args: "--fastCheckParameters='${fastCheckParameters|}'"
+
+  - <<: *task_template
+    name: timeseries_write_pbt_sharded
+    tags:
+      [
+        "assigned_to_jira_team_server_execution",
+        "default",
+        "suggested_excluding_required__for_devprod_mitigation_only",
+      ]
+    commands:
+      - func: "do setup"
+      - func: "run tests"
+        vars:
+          suite: timeseries_write_pbt_sharded
+          resmoke_args: "--fastCheckParameters='${fastCheckParameters|}'"
 
   ################################################
   #           Disagg Storage tasks               #

@@ -21,9 +21,21 @@
  * ]
  */
 import {TimeseriesAggTests} from "jstests/core/timeseries/libs/timeseries_agg_helpers.js";
-import {areViewlessTimeseriesEnabled} from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
+import {
+    runningWithViewlessTimeseriesUpgradeDowngrade,
+    isViewfulTimeseriesOnlySuite,
+} from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
 import {getRawOperationSpec, getTimeseriesCollForRawOps} from "jstests/libs/raw_operation_utils.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
+
+// TODO SERVER-112816: Remove this skip once $out over timeseries work properly
+// when executed concurrently with viewless timeseries FCV upgrade/downgrade.
+if (runningWithViewlessTimeseriesUpgradeDowngrade(db)) {
+    jsTest.log.info(
+        "Skipping test because it is not yet compatible with viewless timeseries FCV upgrade/downgrade (SERVER-112816)",
+    );
+    quit();
+}
 
 const numHosts = 10;
 const numIterations = 20;
@@ -79,7 +91,7 @@ function runOutAndCompareResults({
         validateCollectionOptions({expected: expectedTSOptions, actual: actualOptions});
 
         // TODO SERVER-101784 remove these checks once only viewless timeseries exist.
-        if (!areViewlessTimeseriesEnabled(testDB)) {
+        if (isViewfulTimeseriesOnlySuite(testDB)) {
             // Make sure we have both the buckets collection and the timeseries view.
             const bucketsColl = assert.commandWorked(
                 testDB.runCommand({listCollections: 1, filter: {name: "system.buckets." + outColl.getName()}}),
@@ -519,7 +531,7 @@ if (isV82OrLower) {
     let outCollName = outColl.getName();
     let rawDataSpec = {rawData: true};
 
-    if (!areViewlessTimeseriesEnabled(testDB)) {
+    if (isViewfulTimeseriesOnlySuite(testDB)) {
         outCollName = "system.buckets." + outCollName;
         rawDataSpec = {};
     }
