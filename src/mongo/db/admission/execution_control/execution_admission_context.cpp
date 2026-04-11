@@ -30,7 +30,11 @@
 #include "mongo/db/admission/execution_control/execution_admission_context.h"
 
 #include "mongo/db/admission/execution_control/execution_control_heuristic_parameters_gen.h"
+#include "mongo/db/client.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/server_feature_flags_gen.h"
+#include "mongo/db/service_context.h"
+#include "mongo/idl/generic_argument_gen.h"
 #include "mongo/logv2/log.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
@@ -87,6 +91,78 @@ ExecutionAdmissionContext& ExecutionAdmissionContext::operator=(
     _inMultiDocTxn.store(other._inMultiDocTxn.loadRelaxed());
     _wasInMultiDocTxn.store(other._wasInMultiDocTxn.loadRelaxed());
     return *this;
+}
+
+void ExecutionAdmissionContext::writeAsMetadata(OperationContext* opCtx, BSONObjBuilder* builder) {
+    // We use last LTS when uninitialized to prevent attaching a field that an old binary will not
+    // understand. This may result in normal priority being used for commands that specify some
+    // other priority during startup.
+    // TODO (SERVER-122847): Remove the feature flag check.
+    if (gExecutionControlRemoteSpecification.isEnabledUseLastLTSFCVWhenUninitialized(
+            VersionContext::getDecoration(opCtx),
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        switch (getPriority()) {
+            case AdmissionContext::Priority::kNormal:
+                break;
+            case AdmissionContext::Priority::kLow:
+                builder->append(
+                    GenericArguments::kExecutionAdmissionContextTypeFieldName,
+                    idlSerialize(admission::execution_control::ExecutionAdmissionTypeEnum::kLow));
+                return;
+            case AdmissionContext::Priority::kExempt:
+                builder->append(
+                    GenericArguments::kExecutionAdmissionContextTypeFieldName,
+                    idlSerialize(
+                        admission::execution_control::ExecutionAdmissionTypeEnum::kExempt));
+                return;
+            case AdmissionContext::Priority::kPrioritiesCount:
+            default:
+                MONGO_UNREACHABLE_TASSERT(12137301);
+        }
+        switch (getTaskType()) {
+            case TaskType::Default:
+                break;
+            case TaskType::Background:
+                builder->append(
+                    GenericArguments::kExecutionAdmissionContextTypeFieldName,
+                    idlSerialize(
+                        admission::execution_control::ExecutionAdmissionTypeEnum::kBackground));
+                return;
+            case TaskType::NonDeprioritizable:
+                builder->append(GenericArguments::kExecutionAdmissionContextTypeFieldName,
+                                idlSerialize(admission::execution_control::
+                                                 ExecutionAdmissionTypeEnum::kNonDeprioritizable));
+                return;
+            default:
+                MONGO_UNREACHABLE_TASSERT(12137302);
+        }
+    }
+}
+
+void ExecutionAdmissionContext::setFromMetadata(
+    OperationContext* opCtx,
+    const boost::optional<admission::execution_control::ExecutionAdmissionTypeEnum>& type) {
+    invariant(getPriority() == AdmissionContext::Priority::kNormal);
+    invariant(getTaskType() == TaskType::Default);
+    if (!type) {
+        return;
+    }
+    switch (*type) {
+        case admission::execution_control::ExecutionAdmissionTypeEnum::kExempt:
+            _priority.store(AdmissionContext::Priority::kExempt);
+            return;
+        case admission::execution_control::ExecutionAdmissionTypeEnum::kLow:
+            _priority.store(AdmissionContext::Priority::kLow);
+            return;
+        case admission::execution_control::ExecutionAdmissionTypeEnum::kBackground:
+            setTaskType(opCtx, TaskType::Background);
+            return;
+        case admission::execution_control::ExecutionAdmissionTypeEnum::kNonDeprioritizable:
+            setTaskType(opCtx, TaskType::NonDeprioritizable);
+            return;
+        default:
+            MONGO_UNREACHABLE_TASSERT(12137304);
+    }
 }
 
 boost::optional<ExecutionAdmissionContext::FinalizedStats> ExecutionAdmissionContext::finalizeStats(
@@ -302,5 +378,36 @@ admission::execution_control::ScopedTaskTypeBackground::ScopedTaskTypeBackground
 admission::execution_control::ScopedTaskTypeNonDeprioritizable::ScopedTaskTypeNonDeprioritizable(
     OperationContext* opCtx)
     : ScopedTaskTypeModifierBase(opCtx, ExecutionAdmissionContext::TaskType::NonDeprioritizable) {}
+
+namespace {
+
+/**
+ * ClientObserver that marks opCtxs created by priority port clients as non-deprioritizable.
+ * This persists for the lifetime of the opCtx without using a scoped guard, so background
+ * operations (e.g., index builds) that create their own opCtx on a separate thread are
+ * unaffected.
+ */
+class ExecutionAdmissionContextClientObserver final : public ServiceContext::ClientObserver {
+public:
+    void onCreateClient(Client*) override {}
+    void onDestroyClient(Client*) override {}
+
+    void onCreateOperationContext(OperationContext* opCtx) override {
+        if (opCtx->getClient()->isPriorityPortClient()) {
+            ExecutionAdmissionContext::get(opCtx).setTaskType(
+                opCtx, ExecutionAdmissionContext::TaskType::NonDeprioritizable);
+        }
+    }
+
+    void onDestroyOperationContext(OperationContext*) override {}
+};
+
+ServiceContext::ConstructorActionRegisterer registerExecutionAdmissionContextClientObserver{
+    "ExecutionAdmissionContextClientObserver", [](ServiceContext* service) {
+        service->registerClientObserver(
+            std::make_unique<ExecutionAdmissionContextClientObserver>());
+    }};
+
+}  // namespace
 
 }  // namespace mongo

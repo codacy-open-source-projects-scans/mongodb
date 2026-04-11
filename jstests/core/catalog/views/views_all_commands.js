@@ -200,6 +200,7 @@ let viewsCommandTests = {
     _shardsvrRecreateRangeDeletionTasksParticipant: {skip: isAnInternalCommand},
     _shardsvrRefineCollectionShardKey: {skip: isAnInternalCommand},
     _shardsvrCommitRefineCollectionShardKey: {skip: isAnInternalCommand},
+    _shardsvrCommitDropCollectionMetadata: {skip: isAnInternalCommand},
     _shardsvrRenameCollection: {skip: isAnInternalCommand},
     _shardsvrRenameCollectionParticipant: {skip: isAnInternalCommand},
     _shardsvrRenameCollectionParticipantUnblock: {skip: isAnInternalCommand},
@@ -284,7 +285,7 @@ let viewsCommandTests = {
     balancerStop: {skip: isUnrelated},
     buildInfo: {skip: isUnrelated},
     bulkWrite: {skip: isUnrelated},
-    captrunc: {skip: "removed"}, // TODO: (SERVER-94847): Remove this case.
+    captrunc: {skip: "removed"}, // TODO (SERVER-94847): Remove this case.
     changePrimary: {skip: "Tested in sharding/change_primary.js"},
     checkMetadataConsistency: {
         command: {checkMetadataConsistency: "view"},
@@ -596,6 +597,7 @@ let viewsCommandTests = {
     planCacheListFilters: {command: {planCacheListFilters: "view"}, expectFailure: true},
     planCacheSetFilter: {command: {planCacheSetFilter: "view"}, expectFailure: true},
     prepareTransaction: {skip: isUnrelated},
+    preventWritesForInsufficientDiskSpace: {skip: isUnrelated},
     profile: {skip: isUnrelated},
     recreateRangeDeletionTasks: {skip: isUnrelated},
     refineCollectionShardKey: {skip: isUnrelated},

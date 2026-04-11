@@ -151,6 +151,7 @@ const allCommands = {
     _shardsvrReshardRecipientCriticalSectionStarted: {skip: isAnInternalCommand},
     _shardsvrRefineCollectionShardKey: {skip: isAnInternalCommand},
     _shardsvrCommitRefineCollectionShardKey: {skip: isAnInternalCommand},
+    _shardsvrCommitDropCollectionMetadata: {skip: isAnInternalCommand},
     _shardsvrSetAllowMigrations: {skip: isAnInternalCommand},
     _shardsvrSetClusterParameter: {skip: isAnInternalCommand},
     _shardsvrSetUserWriteBlockMode: {skip: isAnInternalCommand},
@@ -1204,6 +1205,29 @@ const allCommands = {
         },
     },
     prepareTransaction: {skip: isAnInternalCommand},
+    preventWritesForInsufficientDiskSpace: {
+        checkFeatureFlag: "PreventWritesForInsufficientDiskSpace",
+        isShardSvrOnly: true,
+        doesNotRunOnStandalone: true,
+        isAdminCommand: true,
+        command: {
+            preventWritesForInsufficientDiskSpace: 1,
+            enabled: true,
+            allowDeletions: false,
+            reason: "InsufficientDiskSpace",
+        },
+        teardown: function (conn, fixture) {
+            const shardConn = fixture.shard0 ? fixture.shard0 : conn;
+            assert.commandWorked(
+                shardConn.getDB("admin").runCommand({
+                    preventWritesForInsufficientDiskSpace: 1,
+                    enabled: false,
+                    allowDeletions: false,
+                    reason: "InsufficientDiskSpace",
+                }),
+            );
+        },
+    },
     profile: {
         doesNotRunOnMongos: true,
         isAdminCommand: true,

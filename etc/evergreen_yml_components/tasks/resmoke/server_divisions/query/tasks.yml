@@ -673,6 +673,18 @@ tasks:
       - func: "run tests"
 
   - <<: *task_template
+    name: change_streams_multi_stmt_txn_passthrough_v2
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+      ]
+    commands:
+      - func: "do setup"
+      - func: "run tests"
+
+  - <<: *task_template
     name: change_streams_multi_stmt_txn_sharded_collections_passthrough
     tags:
       [
@@ -1024,6 +1036,32 @@ tasks:
 
   - <<: *task_template
     name: disagg_change_streams_multi_stmt_txn_mongos_passthrough_v2
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "requires_extra_system_deps",
+      ]
+    commands:
+      - func: "do setup"
+      - func: "run tests"
+
+  - <<: *task_template
+    name: disagg_change_streams_multi_stmt_txn_passthrough
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "requires_extra_system_deps",
+      ]
+    commands:
+      - func: "do setup"
+      - func: "run tests"
+
+  - <<: *task_template
+    name: disagg_change_streams_multi_stmt_txn_passthrough_v2
     tags:
       [
         "assigned_to_jira_team_server_query_execution",
@@ -1956,8 +1994,9 @@ tasks:
       - func: "do setup"
       - func: "run tests"
 
+  # --- change_streams_sharding_fsm: base (collection watch mode) ---
   - <<: *gen_task_template
-    name: change_streams_sharding_fsm_gen
+    name: change_streams_sharding_fsm_watch_collection_gen
     tags:
       [
         "assigned_to_jira_team_server_query_execution",
@@ -1972,12 +2011,447 @@ tasks:
           use_large_distro: "true"
 
   - <<: *gen_task_template
-    name: change_streams_sharding_fsm_bg_mutator_gen
+    name: change_streams_sharding_fsm_watch_db_gen
     tags:
       [
         "assigned_to_jira_team_server_query_execution",
         "default",
         "change_streams",
+        "requires_all_feature_flags",
+        "sharding",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  - <<: *gen_task_template
+    name: change_streams_sharding_fsm_watch_cluster_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "requires_all_feature_flags",
+        "sharding",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  # --- change_streams_sharding_fsm: batch_size_1 ---
+  - <<: *gen_task_template
+    name: change_streams_sharding_fsm_batch_size_1_watch_collection_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "requires_all_feature_flags",
+        "sharding",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  - <<: *gen_task_template
+    name: change_streams_sharding_fsm_batch_size_1_watch_db_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "requires_all_feature_flags",
+        "sharding",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  - <<: *gen_task_template
+    name: change_streams_sharding_fsm_batch_size_1_watch_cluster_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "requires_all_feature_flags",
+        "sharding",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  # --- change_streams_sharding_fsm: embedded (config shard) ---
+  - <<: *gen_task_template
+    name: change_streams_sharding_fsm_embedded_watch_collection_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "requires_all_feature_flags",
+        "sharding",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  - <<: *gen_task_template
+    name: change_streams_sharding_fsm_embedded_watch_db_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "requires_all_feature_flags",
+        "sharding",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  - <<: *gen_task_template
+    name: change_streams_sharding_fsm_embedded_watch_cluster_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "requires_all_feature_flags",
+        "sharding",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  # --- change_streams_sharding_fsm: batch_size_1 + embedded ---
+  - <<: *gen_task_template
+    name: change_streams_sharding_fsm_batch_size_1_embedded_watch_collection_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "requires_all_feature_flags",
+        "sharding",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  - <<: *gen_task_template
+    name: change_streams_sharding_fsm_batch_size_1_embedded_watch_db_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "requires_all_feature_flags",
+        "sharding",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  - <<: *gen_task_template
+    name: change_streams_sharding_fsm_batch_size_1_embedded_watch_cluster_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "requires_all_feature_flags",
+        "sharding",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  # --- change_streams_sharding_fsm: bg_mutator ---
+  - <<: *gen_task_template
+    name: change_streams_sharding_fsm_bg_mutator_watch_collection_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "requires_all_feature_flags",
+        "sharding",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  - <<: *gen_task_template
+    name: change_streams_sharding_fsm_bg_mutator_watch_db_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "requires_all_feature_flags",
+        "sharding",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  - <<: *gen_task_template
+    name: change_streams_sharding_fsm_bg_mutator_watch_cluster_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "requires_all_feature_flags",
+        "sharding",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  # --- change_streams_sharding_fsm: bg_mutator + batch_size_1 ---
+  - <<: *gen_task_template
+    name: change_streams_sharding_fsm_bg_mutator_batch_size_1_watch_collection_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "requires_all_feature_flags",
+        "sharding",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  - <<: *gen_task_template
+    name: change_streams_sharding_fsm_bg_mutator_batch_size_1_watch_db_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "requires_all_feature_flags",
+        "sharding",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  - <<: *gen_task_template
+    name: change_streams_sharding_fsm_bg_mutator_batch_size_1_watch_cluster_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "requires_all_feature_flags",
+        "sharding",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  # --- change_streams_sharding_fsm: bg_mutator + embedded ---
+  - <<: *gen_task_template
+    name: change_streams_sharding_fsm_bg_mutator_embedded_watch_collection_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "requires_all_feature_flags",
+        "sharding",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  - <<: *gen_task_template
+    name: change_streams_sharding_fsm_bg_mutator_embedded_watch_db_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "requires_all_feature_flags",
+        "sharding",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  - <<: *gen_task_template
+    name: change_streams_sharding_fsm_bg_mutator_embedded_watch_cluster_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "requires_all_feature_flags",
+        "sharding",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  # --- change_streams_sharding_fsm: bg_mutator + batch_size_1 + embedded ---
+  - <<: *gen_task_template
+    name: change_streams_sharding_fsm_bg_mutator_batch_size_1_embedded_watch_collection_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "requires_all_feature_flags",
+        "sharding",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  - <<: *gen_task_template
+    name: change_streams_sharding_fsm_bg_mutator_batch_size_1_embedded_watch_db_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "requires_all_feature_flags",
+        "sharding",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  - <<: *gen_task_template
+    name: change_streams_sharding_fsm_bg_mutator_batch_size_1_embedded_watch_cluster_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "requires_all_feature_flags",
+        "sharding",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  # --- change_streams_sharding_fsm: IRS ---
+  - <<: *gen_task_template
+    name: change_streams_sharding_fsm_irs_watch_collection_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "multiversion_incompatible",
+        "requires_all_feature_flags",
+        "sharding",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  - <<: *gen_task_template
+    name: change_streams_sharding_fsm_irs_watch_db_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "multiversion_incompatible",
+        "requires_all_feature_flags",
+        "sharding",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  - <<: *gen_task_template
+    name: change_streams_sharding_fsm_irs_watch_cluster_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "multiversion_incompatible",
+        "requires_all_feature_flags",
+        "sharding",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  # --- change_streams_sharding_fsm: pairwise IRS ---
+  - <<: *gen_task_template
+    name: change_streams_sharding_fsm_pairwise_irs_watch_collection_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "multiversion_incompatible",
+        "requires_all_feature_flags",
+        "sharding",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  - <<: *gen_task_template
+    name: change_streams_sharding_fsm_pairwise_irs_watch_db_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "multiversion_incompatible",
+        "requires_all_feature_flags",
+        "sharding",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  - <<: *gen_task_template
+    name: change_streams_sharding_fsm_pairwise_irs_watch_cluster_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "default",
+        "change_streams",
+        "multiversion_incompatible",
         "requires_all_feature_flags",
         "sharding",
       ]

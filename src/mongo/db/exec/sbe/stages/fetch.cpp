@@ -31,13 +31,13 @@
 
 #include "mongo/base/error_codes.h"
 #include "mongo/config.h"  // IWYU pragma: keep
+#include "mongo/db/admission/ticketing/admission_context.h"
 #include "mongo/db/client.h"
 #include "mongo/db/exec/sbe/expressions/compile_ctx.h"
 #include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/concurrency/admission_context.h"
 #include "mongo/util/overloaded_visitor.h"  // IWYU pragma: keep
 #include "mongo/util/str.h"
 
@@ -57,7 +57,7 @@ FetchStage::FetchStage(std::unique_ptr<PlanStage> child,
                        UUID collectionUuid,
                        DatabaseName dbName,
                        std::shared_ptr<FetchStageState> state,
-                       PlanYieldPolicy* yieldPolicy,
+                       PlanYieldPolicySBE* yieldPolicy,
                        PlanNodeId nodeId,
                        bool participateInTrialRunTracking)
     : PlanStage("fetch"_sd,

@@ -12,7 +12,8 @@
  * - Verifier: Driver that runs one or more test cases with a given context
  *
  * Test Cases:
- * - SingleReaderVerificationTestCase: Validates a single reader's events against a matcher
+ * - SingleReaderVerificationTestCase: Validates a single reader's events; supports
+ *   allowSkips for ignoreRemovedShards mode
  * - SequentialPairwiseFetchingTestCase: Compares two fetching strategies (e.g., v1 vs v2,
  *   or continuous vs fetch-one-and-resume)
  * - PrefixReadTestCase: Verifies resume-from-clusterTime and prefix correctness
@@ -62,14 +63,12 @@ class VerifierContext {
     }
 
     /**
-     * Get change events for a specific reader instance.
-     * Waits for the reader to complete before fetching events.
+     * Wait for a reader to finish, then return its recorded events.
      * @param {Mongo} conn - MongoDB connection
      * @param {string} instanceName - Name of the reader instance
      * @returns {Array} Array of change event records {changeEvent, cursorClosed}
      */
     getChangeEvents(conn, instanceName) {
-        // Ensure reader is done reading events before fetching them.
         Connector.waitForDone(conn, instanceName);
         return Connector.readAllChangeEvents(conn, instanceName);
     }
@@ -128,8 +127,9 @@ class VerifierContext {
 
     /**
      * Get unique cluster times from the oplog across all shards.
-     * Excludes config/admin/connector entries and empty-namespace entries
-     * which dominate the oplog and are irrelevant for resume testing.
+     * Excludes config/admin/control namespaces and empty-namespace entries
+     * to avoid resuming from cluster-internal operations that don't produce
+     * user-visible change events.
      * @private
      * @param {Timestamp} startTime - Only include cluster times >= this timestamp
      * @param {Timestamp} endTime - Only include cluster times <= this timestamp
@@ -205,11 +205,13 @@ function assertMatcherDone(matcher, events, ctx, readerInstanceName) {
         return;
     }
 
-    const mismatch = matcher.getMismatch();
+    const mismatch = matcher.getFirstMismatch();
     const commandTrace = ctx.getCommandTrace(readerInstanceName);
     const actualTypes = events.map((rec) => rec.changeEvent.operationType);
-    const expectedTypes = matcher.getExpectedOperationTypes();
-    const expectedInline = `[${expectedTypes.join(", ")}]`;
+    const expectedGroups = matcher.getExpectedOperationTypes();
+
+    const totalExpected = expectedGroups.reduce((s, g) => s + g.length, 0);
+    const expectedLines = expectedGroups.map((g, i) => `  stream ${i}(${g.length}): [${g.join(", ")}]`).join("\n");
     const actualInline = `[${actualTypes.join(", ")}]`;
 
     jsTest.log.info("FSM command trace (on mismatch)", {
@@ -222,8 +224,8 @@ function assertMatcherDone(matcher, events, ctx, readerInstanceName) {
         false,
         (mismatch
             ? `Event mismatch at index ${mismatch.index}: expected '${mismatch.expected}', got '${mismatch.actual}'`
-            : `Matched ${matcher.getMatchedCount()} of ${expectedTypes.length}`) +
-            `\nexpected(${expectedTypes.length}): ${expectedInline}` +
+            : `Matched ${matcher.getMatchedCount()} of ${totalExpected}`) +
+            `\nexpected(${totalExpected}):\n${expectedLines}` +
             `\nactual(${actualTypes.length}): ${actualInline}` +
             `\nGrep logs for "FSM command trace (on mismatch)" to see the full command sequence.`,
     );
@@ -275,33 +277,42 @@ class SequentialPairwiseFetchingTestCase {
 /**
  * Test case that verifies a single reader's events against expected patterns.
  *
- * This is the simplest test case - it just reads events from one instance
- * and verifies they match the expected patterns using the configured matcher.
- *
- * Used for basic change stream verification without comparing multiple strategies.
+ * In strict mode (default), all expected events must be matched in order.
+ * With allowSkips, uses matchesOrSkip() to tolerate missing events (e.g.
+ * from a removed shard with ignoreRemovedShards). In that mode only the
+ * relative ordering and presence of at least some events are checked.
  */
 class SingleReaderVerificationTestCase {
     /**
-     * Create a single reader verification test case.
      * @param {string} readerInstanceName - Instance name for the reader
+     * @param {Object} [opts]
+     * @param {boolean} [opts.allowSkips=false] - Use matchesOrSkip() instead of matches()
      */
-    constructor(readerInstanceName) {
+    constructor(readerInstanceName, {allowSkips = false} = {}) {
         this._readerInstanceName = readerInstanceName;
+        this._allowSkips = allowSkips;
     }
 
-    /**
-     * Run the verification test.
-     * @param {Mongo} conn - MongoDB connection
-     * @param {VerifierContext} ctx - Verifier context
-     */
     run(conn, ctx) {
         const events = ctx.getChangeEvents(conn, this._readerInstanceName);
-
-        // every() short-circuits on the first mismatch (matches() returns false), so
-        // the matcher stops advancing and records the failure point.
         const matcher = ctx.getChangeStreamMatcher(this._readerInstanceName);
-        events.every((rec) => matcher.matches(rec.changeEvent, rec.cursorClosed));
-        assertMatcherDone(matcher, events, ctx, this._readerInstanceName);
+
+        if (this._allowSkips) {
+            // No assertMatcherDone: with IRS, the removed shard may have held
+            // some expected events, so not all matchers will be exhausted.
+            events.forEach((rec, i) => {
+                assert(
+                    matcher.matchesOrSkip(rec.changeEvent, rec.cursorClosed),
+                    `${this._readerInstanceName}[${i}]: unexpected '${rec.changeEvent.operationType}' ` +
+                        `(ns: ${tojson(rec.changeEvent.ns)}) not in remaining expected events`,
+                );
+            });
+        } else {
+            // every() short-circuits on the first mismatch (matches() returns false), so
+            // the matcher stops advancing and records the failure point.
+            events.every((rec) => matcher.matches(rec.changeEvent, rec.cursorClosed));
+            assertMatcherDone(matcher, events, ctx, this._readerInstanceName);
+        }
     }
 }
 
@@ -309,7 +320,7 @@ class SingleReaderVerificationTestCase {
  * Test case that verifies prefix/resume correctness.
  *
  * Per spec: "Starting of a change stream from any cluster time test case"
- * 1. Compute cluster times from the test-DB oplog entries across all shards
+ * 1. Compute cluster times from oplog entries (excluding config/admin/control namespaces)
  * 2. Fetch change events continuously with the default reader
  * 3. Start a change stream from each cluster time and verify that `limit`
  *    fetched events match corresponding events from step 2
@@ -321,10 +332,11 @@ class SingleReaderVerificationTestCase {
 class PrefixReadTestCase {
     static kParallelReadersCount = 8;
 
-    constructor(readerInstanceName, limit) {
+    constructor(readerInstanceName, limit, {allowSkips = false} = {}) {
         assert(limit > 0, `limit must be a positive number, got ${limit}`);
         this._readerInstanceName = readerInstanceName;
         this._limit = limit;
+        this._allowSkips = allowSkips;
     }
 
     static _extractComparable(rec) {
@@ -396,8 +408,20 @@ class PrefixReadTestCase {
         }
 
         const matcher = ctx.getChangeStreamMatcher(this._readerInstanceName);
-        events.every((rec) => matcher.matches(rec.changeEvent, rec.cursorClosed));
-        assertMatcherDone(matcher, events, ctx, this._readerInstanceName);
+        if (this._allowSkips) {
+            // No assertMatcherDone: with IRS, the removed shard may have held
+            // some expected events, so not all matchers will be exhausted.
+            events.forEach((rec, i) => {
+                assert(
+                    matcher.matchesOrSkip(rec.changeEvent, rec.cursorClosed),
+                    `${this._readerInstanceName}[${i}]: unexpected '${rec.changeEvent.operationType}' ` +
+                        `(ns: ${tojson(rec.changeEvent.ns)}) not in remaining expected events`,
+                );
+            });
+        } else {
+            events.every((rec) => matcher.matches(rec.changeEvent, rec.cursorClosed));
+            assertMatcherDone(matcher, events, ctx, this._readerInstanceName);
+        }
     }
 }
 

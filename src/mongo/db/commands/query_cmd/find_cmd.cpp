@@ -37,6 +37,7 @@
 #include "mongo/client/read_preference.h"
 #include "mongo/crypto/fle_field_schema_gen.h"
 #include "mongo/db/admission/execution_control/execution_admission_context.h"
+#include "mongo/db/admission/ticketing/admission_context.h"
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_checks.h"
@@ -131,7 +132,6 @@
 #include "mongo/s/query_analysis_sampler_util.h"
 #include "mongo/transport/session.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/concurrency/admission_context.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/future.h"
@@ -612,16 +612,19 @@ public:
         void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* replyBuilder) override {
             CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
 
-            // TODO: SERVER-121373 remove this and provide a more generic way of marking remote
-            // operations as non-deprioritizable. Reads to system-critical collections issued
-            // remotely by internal clients should not be deprioritized:
+            // Reads to system-critical collections issued remotely by internal clients should not
+            // be deprioritized:
             // - Session collection reads in findRemovedSessions.
             // - Key collection refresh.
+            // TODO (SERVER-122847): Remove this code.
             const bool isSystemCriticalNss = (_ns == NamespaceString::kLogicalSessionsNamespace ||
                                               _ns == NamespaceString::kKeysCollectionNamespace);
             boost::optional<admission::execution_control::ScopedTaskTypeNonDeprioritizable>
                 systemCriticalTaskType;
-            if (isSystemCriticalNss && opCtx->getClient()->isInternalClient()) {
+            if (!gExecutionControlRemoteSpecification.isEnabledUseLastLTSFCVWhenUninitialized(
+                    VersionContext::getDecoration(opCtx),
+                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
+                isSystemCriticalNss && opCtx->getClient()->isInternalClient()) {
                 systemCriticalTaskType.emplace(opCtx);
             }
 
@@ -844,8 +847,6 @@ public:
                     "CanonicalQuery namespace should match catalog namespace",
                     cq->nss() == nss);
 
-            CurOp::get(opCtx)->debug().collectionType = collectionOrView->getCollectionType();
-
             // If we are running a query against a view or a timeseries collection, redirect this
             // query through the aggregation system.
             if (collectionOrView->isView() ||
@@ -854,6 +855,11 @@ public:
                 collectionOrView.reset();
                 return runFindAsAgg(opCtx, *cq, boost::none /* verbosity */, replyBuilder);
             }
+            // For the purposes of OpDebug's reporting, we only need 'collectionType' to distinguish
+            // between view/timeseries/collection. For view/timeseries, 'collectionType' will be set
+            // on the agg path taken above. In the normal path (i.e. here), we bypass the
+            // getCollectionType() call and hardcode "kCollection" for performance reasons.
+            CurOp::get(opCtx)->debug().collectionType = query_shape::CollectionType::kCollection;
 
             // Create an RAII object that prints the collection's shard key in the case of a tassert
             // or crash.

@@ -310,6 +310,11 @@ protected:
     // request. The sample will be freed on destruction of the SamplingEstimator instance or when a
     // re-sample is requested. A new sample will replace this.
     std::vector<BSONObj> _sample;
+    size_t _sampleSize;
+    bool _isSampleGenerated = false;
+    // Lazily computed on the first estimateNDV() call. Counts the number of documents with
+    // distinct _id values in the sample to detect duplicates from sampling with replacement.
+    mutable boost::optional<size_t> _uniqueDocCount;
 
 private:
     /**
@@ -319,13 +324,13 @@ private:
      * '_sampleSize' of the documents for the sample.
      */
     std::pair<std::unique_ptr<sbe::PlanStage>, mongo::stage_builder::PlanStageData>
-    generateRandomSamplingPlan(PlanYieldPolicy* sbeYieldPolicy);
+    generateRandomSamplingPlan(PlanYieldPolicySBE* sbeYieldPolicy);
 
     /**
      * Constructs a sampling SBE plan using the chunk-based method.
      */
     std::pair<std::unique_ptr<sbe::PlanStage>, mongo::stage_builder::PlanStageData>
-    generateChunkSamplingPlan(PlanYieldPolicy* sbeYieldPolicy);
+    generateChunkSamplingPlan(PlanYieldPolicySBE* sbeYieldPolicy);
 
     /**
      * Generates a sample by doing a full "CollScan" against the target collection. This sample is
@@ -356,10 +361,8 @@ private:
     NamespaceString _nss;
     PlanYieldPolicy::YieldPolicy _yieldPolicy;
     SamplingCEMethodEnum _samplingStyle;
-    size_t _sampleSize;
     // The set of top level fields that we want to include in the sampled documents.
     StringSet _topLevelSampleFieldNames;
-    bool _isSampleGenerated = false;
 
     boost::optional<int> _numChunks;
 
