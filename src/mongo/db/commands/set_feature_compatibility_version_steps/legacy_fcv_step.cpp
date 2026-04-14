@@ -44,6 +44,7 @@
 #include "mongo/db/query/query_settings/query_settings_service.h"
 #include "mongo/db/replicated_fast_count/replicated_fast_count_init.h"
 #include "mongo/db/replicated_fast_count/replicated_fast_count_manager.h"
+#include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/s/migration_blocking_operation/multi_update_coordinator.h"
 #include "mongo/db/s/range_deletion_util.h"
 #include "mongo/db/server_feature_flags_gen.h"
@@ -392,7 +393,7 @@ private:
                 const auto& encryptedFields =
                     collection->getCollectionOptions().encryptedFieldConfig;
                 if (encryptedFields &&
-                    hasQueryTypeMatching(encryptedFields.get(), isFLE2TextQueryType)) {
+                    hasQueryTypeMatching(encryptedFields.get(), isFLE2TextPreviewQueryType)) {
                     uasserted(ErrorCodes::CannotDowngrade,
                               fmt::format(
                                   "Collection {} (UUID: {}) has an encrypted field with query type "
@@ -405,6 +406,29 @@ private:
                 return true;
             };
             catalog::forEachCollectionFromAllDbs(opCtx, MODE_IS, checkForStringSearchQueryType);
+        }
+
+        if (gFeatureFlagQEPrefixSuffixSearch.isDisabledOnTargetFCVButEnabledOnOriginalFCV(
+                requestedVersion, originalVersion)) {
+            auto checkForPrefixSuffixQueryType = [](const Collection* collection) {
+                const auto& encryptedFields =
+                    collection->getCollectionOptions().encryptedFieldConfig;
+                if (encryptedFields &&
+                    (hasQueryTypeMatching(encryptedFields.get(), [](QueryTypeEnum qt) {
+                        return qt == QueryTypeEnum::Suffix || qt == QueryTypeEnum::Prefix;
+                    }))) {
+                    uasserted(ErrorCodes::CannotDowngrade,
+                              fmt::format(
+                                  "Collection {} (UUID: {}) has an encrypted field with query type "
+                                  "suffix or prefix, which "
+                                  "are not compatible with the target FCV. Please drop this "
+                                  "collection before trying to downgrade FCV.",
+                                  collection->ns().toStringForErrorMsg(),
+                                  collection->uuid().toString()));
+                }
+                return true;
+            };
+            catalog::forEachCollectionFromAllDbs(opCtx, MODE_IS, checkForPrefixSuffixQueryType);
         }
 
         if (feature_flags::gFeatureFlagEnableReplicasetTransitionToCSRS
@@ -561,6 +585,13 @@ private:
         // recordIds.
         if (gFeatureFlagRecordIdsReplicated.isDisabledOnTargetFCVButEnabledOnOriginalFCV(
                 requestedVersion, originalVersion)) {
+            // On DSC, the persistence provider drives recordIdsReplicated independently of the
+            // feature flag, so stripping it on FCV downgrade is neither correct nor permitted.
+            const auto& provider =
+                rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider();
+            if (provider.shouldUseReplicatedRecordIds()) {
+                return;
+            }
             LOGV2(8700500,
                   "Automatically issuing collMod to strip recordIdsReplicated:true field.");
             catalog::modifyAllCollectionsMatching(

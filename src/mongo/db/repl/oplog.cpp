@@ -55,6 +55,7 @@
 #include "mongo/db/index_builds/primary_driven/util.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/namespace_string_util.h"
+#include "mongo/db/op_observer/batched_write_context.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_util.h"
 #include "mongo/db/pipeline/change_stream_preimage_gen.h"
@@ -887,11 +888,17 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
           const auto cmd = getObjWithSanitizedStorageEngineOptions(opCtx, entry.getObject());
           const NamespaceString nss(extractNs(entry.getNss().dbName(), cmd));
 
+          // Check the provider first: if the persistence provider requires replicated RecordIds
+          // (e.g. DSC), allow the field regardless of FCV state. Only fall back to the feature
+          // flag for clusters where the provider does not mandate it.
+          // TODO SERVER-123600: Revisit FCV handling for recordIdsReplicated.
+          const auto& ridsProvider =
+              rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider();
           uassert(ErrorCodes::CommandNotSupported,
                   "'recordIdsReplicated' field may not be used for 'applyOps' without "
                   "featureFlagRecordIdsReplicated enabled",
                   mode != repl::OplogApplication::Mode::kApplyOpsCmd ||
-                      !cmd["recordIdsReplicated"] ||
+                      !cmd["recordIdsReplicated"] || ridsProvider.shouldUseReplicatedRecordIds() ||
                       gFeatureFlagRecordIdsReplicated.isEnabled(
                           VersionContext::getDecoration(opCtx),
                           serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
@@ -2299,7 +2306,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
                         insertStmt.oplogSlot = OpTime(op.getTimestamp(), op.getTerm().value());
                     } else if (!repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(
                                    opCtx, collection->ns()) &&
-                               !wuow.isGroupingOplogEntries()) {
+                               !BatchedWriteContext::get(opCtx).writesAreBatched()) {
                         // Primaries processing inserts always pre-allocate timestamps. For parity,
                         // we also pre-allocate timestamps for an `applyOps` of insert oplog
                         // entries. This parity is meaningful for capped collections where the
