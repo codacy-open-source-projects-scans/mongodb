@@ -1101,6 +1101,30 @@ protected:
         return _localCatalogCollections[0]->uuid();
     }
 
+    void setAuthoritativeShardCatalogMetadata(const UUID& uuid,
+                                              const KeyPattern& keyPattern,
+                                              const std::vector<ChunkType>& chunks) {
+        auto rt = RoutingTableHistory::makeNewAllowingGaps(_nss,
+                                                           uuid,
+                                                           keyPattern,
+                                                           false,
+                                                           nullptr,
+                                                           false,
+                                                           chunks[0].getVersion().epoch(),
+                                                           chunks[0].getVersion().getTimestamp(),
+                                                           boost::none,
+                                                           boost::none,
+                                                           true,
+                                                           chunks);
+        const auto version = rt.getVersion();
+        const auto rtHandle = RoutingTableHistoryValueHandle(
+            std::make_shared<RoutingTableHistory>(std::move(rt)),
+            ComparableChunkVersion::makeComparableChunkVersion(version));
+        const auto collectionMetadata = CollectionMetadata(CurrentChunkManager(rtHandle), _shardId);
+        auto scopedCSR = CollectionShardingRuntime::acquireExclusive(operationContext(), _nss);
+        scopedCSR->setFilteringMetadata_authoritative(operationContext(), collectionMetadata);
+    }
+
     void setShardCatalogMetadata(const UUID& uuid,
                                  const KeyPattern& keyPattern,
                                  const std::vector<ChunkType>& chunks) {
@@ -1405,6 +1429,32 @@ TEST_F(MetadataConsistencyShardCatalogTest,
     const auto inconsistencies = checkConsistency(globalCatalogColl);
 
     ASSERT_EQ(1, countInconsistenciesWithDetailField(inconsistencies, "chunksDomain"_sd));
+}
+
+TEST_F(MetadataConsistencyShardCatalogTest,
+       ValidateCollectionMetadata_NotOwnedChunksDisallowed_DurableAuthoritativeShardCatalogChunks) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagShardAuthoritativeCollMetadata", true);
+    const auto localUuid = setUpLocalCollection();
+    auto globalCatalogColl = generateCollectionType(_nss, localUuid, _keyPattern);
+
+    const OID epoch = OID::gen();
+    auto chunk = generateChunk(
+        localUuid, _shardId, _keyPattern.globalMin(), BSON("x" << 10), kShard0History, epoch);
+    setAuthoritativeShardCatalogMetadata(localUuid, _keyPattern, {chunk});
+
+    _catalogClient->setChunksToReturn({chunk});
+    insertDurableShardCatalogCollection(globalCatalogColl);
+
+    auto foreignChunk =
+        generateChunk(localUuid, kShard1, BSON("x" << 10), BSON("x" << 20), kShard1History, epoch);
+    insertDurableShardCatalogChunks({chunk, foreignChunk});
+
+    const auto inconsistencies = checkConsistency(globalCatalogColl);
+
+    ASSERT_EQ(1,
+              countInconsistenciesWithDetailFieldAndSource(
+                  inconsistencies, "chunkHistory"_sd, "durableShardCatalog"_sd));
 }
 
 TEST_F(MetadataConsistencyShardCatalogTest,
@@ -1873,6 +1923,74 @@ TEST_F(MakeInconsistencySeverityTest, SeverityRoundTripsViaBSON) {
     const auto roundTripped = MetadataInconsistencyItem::parse(original.toBSON());
     ASSERT_TRUE(roundTripped.getSeverity().has_value());
     ASSERT_EQ(MetadataInconsistencySeverityEnum::kHigh, roundTripped.getSeverity().value());
+}
+
+// Tests for low severity on config.system.sessions inconsistencies.
+
+TEST_F(MetadataConsistencyTest, CollectionUUIDMismatchOnSessionsNamespaceHasLowSeverity) {
+    OperationContext* opCtx = operationContext();
+    const auto& nss = NamespaceString::kLogicalSessionsNamespace;
+
+    createTestCollection(opCtx, nss);
+
+    const auto [localCatalogSnapshot, localCatalogCollections] = getLocalCatalog(opCtx, nss);
+    ASSERT_EQ(1, localCatalogCollections.size());
+
+    // Use a different UUID to trigger a CollectionUUIDMismatch.
+    auto configColl = generateCollectionType(nss, UUID::gen());
+
+    const auto inconsistencies = metadata_consistency_util::checkCollectionMetadataConsistency(
+        opCtx,
+        _shardId,
+        _shardId,
+        {configColl},
+        localCatalogSnapshot,
+        localCatalogCollections,
+        false /*checkRangeDeletionIndexes*/,
+        false /*optionalCheckIndexes*/);
+
+    const auto it =
+        std::find_if(inconsistencies.begin(), inconsistencies.end(), [](const auto& item) {
+            return item.getType() == MetadataInconsistencyTypeEnum::kCollectionUUIDMismatch;
+        });
+    ASSERT_NE(it, inconsistencies.end());
+    ASSERT_TRUE(it->getSeverity().has_value());
+    ASSERT_EQ(MetadataInconsistencySeverityEnum::kLow, it->getSeverity().value());
+}
+
+TEST_F(MetadataConsistencyTest, CollectionOptionsMismatchOnSessionsNamespaceHasLowSeverity) {
+    OperationContext* opCtx = operationContext();
+    const auto& nss = NamespaceString::kLogicalSessionsNamespace;
+
+    // Create a capped local collection to trigger CollectionOptionsMismatch.
+    CreateCommand cmd(nss);
+    cmd.getCreateCollectionRequest().setCapped(true);
+    cmd.getCreateCollectionRequest().setSize(100);
+    createTestCollection(opCtx, nss, cmd.toBSON());
+
+    const auto [localCatalogSnapshot, localCatalogCollections] = getLocalCatalog(opCtx, nss);
+    ASSERT_EQ(1, localCatalogCollections.size());
+
+    // Config entry has the same UUID but does not mark it as unsplittable, triggering the mismatch.
+    auto configColl = generateCollectionType(nss, localCatalogCollections[0]->uuid());
+
+    const auto inconsistencies = metadata_consistency_util::checkCollectionMetadataConsistency(
+        opCtx,
+        _shardId,
+        _shardId,
+        {configColl},
+        localCatalogSnapshot,
+        localCatalogCollections,
+        false /*checkRangeDeletionIndexes*/,
+        false /*optionalCheckIndexes*/);
+
+    const auto it =
+        std::find_if(inconsistencies.begin(), inconsistencies.end(), [](const auto& item) {
+            return item.getType() == MetadataInconsistencyTypeEnum::kCollectionOptionsMismatch;
+        });
+    ASSERT_NE(it, inconsistencies.end());
+    ASSERT_TRUE(it->getSeverity().has_value());
+    ASSERT_EQ(MetadataInconsistencySeverityEnum::kLow, it->getSeverity().value());
 }
 
 }  // namespace
