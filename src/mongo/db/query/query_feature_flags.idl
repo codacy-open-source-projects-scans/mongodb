@@ -264,6 +264,12 @@ feature_flags:
         version: 8.3
         fcv_gated: true
 
+    featureFlagConvertObjectToBinData:
+        description: "Feature flag to enable converting from Object to BinData"
+        cpp_varname: gFeatureFlagConvertObjectToBinData
+        default: false
+        fcv_gated: true
+
     featureFlagVectorSimilarityExpressions:
         description:
             "Feature flag to enable vector similarity expressions $similarityDotProduct,
@@ -405,12 +411,6 @@ feature_flags:
         fcv_gated: false
         default: false
         incremental_rollout_phase: in_development
-
-    featureFlagExtensionViewsAndUnionWith:
-        description: "Feature flag to enable extension stages on views and in $unionWith."
-        cpp_varname: gFeatureFlagExtensionViewsAndUnionWith
-        default: false
-        fcv_gated: false
 
     featureFlag2dsphereIndexVersion4:
         description: "Feature flag to enable v4 of 2dsphereIndexVersion."

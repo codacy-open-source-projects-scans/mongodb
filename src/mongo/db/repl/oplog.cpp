@@ -587,7 +587,8 @@ OpTime logOp(OperationContext* opCtx, MutableOplogEntry* oplogEntry) {
             LOGV2_ERROR(11006000,
                         "Could not acquire write intent when trying to reserve optime",
                         "opCtx"_attr = opCtx->getOpID(),
-                        "oplogEntry"_attr = oplogEntry->toBSON());
+                        "nss"_attr = oplogEntry->getNss().toStringForErrorMsg(),
+                        "opType"_attr = idl::serialize(oplogEntry->getOpType()));
         }
 
         slot = oplogInfo->getNextOpTimes(opCtx, 1U)[0];
@@ -1991,7 +1992,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
     if (opType == OpTypeEnum::kNoop) {
         // no op
         if (incrementOpsAppliedStats) {
-            incrementOpsAppliedStats();
+            incrementOpsAppliedStats(1);
         }
 
         return Status::OK();
@@ -2012,7 +2013,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
         }
 
         if (incrementOpsAppliedStats) {
-            incrementOpsAppliedStats();
+            incrementOpsAppliedStats(1);
         }
         return Status::OK();
     }
@@ -2244,7 +2245,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
                             opCtx->getWriteConcern());
                     }
                     if (incrementOpsAppliedStats) {
-                        incrementOpsAppliedStats();
+                        incrementOpsAppliedStats(1);
                     }
                 }
             } else {
@@ -2466,7 +2467,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
                 }
 
                 if (incrementOpsAppliedStats) {
-                    incrementOpsAppliedStats();
+                    incrementOpsAppliedStats(1);
                 }
             }
             break;
@@ -2709,7 +2710,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
             }
 
             if (incrementOpsAppliedStats) {
-                incrementOpsAppliedStats();
+                incrementOpsAppliedStats(1);
             }
             break;
         }
@@ -2891,7 +2892,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
                 mode == repl::OplogApplication::Mode::kSecondary);
 
             if (incrementOpsAppliedStats) {
-                incrementOpsAppliedStats();
+                incrementOpsAppliedStats(1);
             }
             break;
         }
@@ -2904,25 +2905,27 @@ Status applyOperation_inlock(OperationContext* opCtx,
     return Status::OK();
 }
 
-Status applyContainerOperation(OperationContext* opCtx,
-                               const ApplierOperation& op,
-                               OplogApplication::Mode mode) {
+Status applyContainerOperations(OperationContext* opCtx,
+                                std::span<const ApplierOperation> ops,
+                                OplogApplication::Mode mode) {
+    uassert(12337300, "applyContainerOperations requires at least one op", !ops.empty());
 
-    auto ident = op->getContainer();
+    const auto& firstOp = ops.front();
     auto* engine = opCtx->getServiceContext()->getStorageEngine();
     auto* ru = shard_role_details::getRecoveryUnit(opCtx);
 
-    const bool assignOperationTimestamp = shouldAssignTimestampForOplogApplication(
-        *opCtx, shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork(), mode);
-    const auto timestamp = op->getApplyOpsTimestamp().value_or(op->getTimestamp());
+    const bool alreadyInWriteUnitOfWork =
+        shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork();
+    const bool assignOperationTimestamp =
+        shouldAssignTimestampForOplogApplication(*opCtx, alreadyInWriteUnitOfWork, mode);
+    const auto timestamp = firstOp->getApplyOpsTimestamp().value_or(firstOp->getTimestamp());
     // If it is determined we need to set a timestamp for this operation, there should be one. It's
     // possible for 'assignOperationTimestamp' to be false while a timestamp is supplied, we will
     // ignore it below.
     uassert(11348300,
             str::stream() << "Oplog entry did not have 'ts' field when expected: "
-                          << redact(op->toBSONForLogging()),
+                          << redact(firstOp->toBSONForLogging()),
             !assignOperationTimestamp || !timestamp.isNull());
-    const BSONObj o = op->getObject();
 
     WriteUnitOfWork wuow{opCtx};
     if (assignOperationTimestamp && !timestamp.isNull()) {
@@ -2938,45 +2941,60 @@ Status applyContainerOperation(OperationContext* opCtx,
             uassertStatusOK(ru->setTimestamp(timestamp));
         }
     }
-    Status s = Status::OK();
 
-    switch (op->getOpType()) {
-        case repl::OpTypeEnum::kContainerInsert: {
-            auto parsed = repl::ContainerInsertOplogEntryO::parse(
-                o, IDLParserContext("ContainerInsertOplogEntryO"));
-            auto valSpan = parsed.getValue().data();
-            s = parsed.getKey().visit([&](auto key) {
-                return storage_engine_direct_crud::insert(*engine, *ru, *ident, key, valSpan);
-            });
-            break;
+    for (const auto& op : ops) {
+        uassert(12337301,
+                str::stream() << "applyContainerOperations requires container ops, found "
+                              << idl::serialize(op->getOpType()),
+                op->isContainerOpType());
+        uassert(12337302,
+                str::stream() << "Grouped container ops must share a commit timestamp. Found "
+                              << op->getApplyOpsTimestamp().value_or(op->getTimestamp()).toString()
+                              << " but expected " << timestamp.toString(),
+                op->getApplyOpsTimestamp().value_or(op->getTimestamp()) == timestamp);
+
+        const auto ident = *op->getContainer();
+        const BSONObj o = op->getObject();
+        Status s = Status::OK();
+
+        switch (op->getOpType()) {
+            case repl::OpTypeEnum::kContainerInsert: {
+                auto parsed = repl::ContainerInsertOplogEntryO::parse(
+                    o, IDLParserContext("ContainerInsertOplogEntryO"));
+                auto valSpan = parsed.getValue().data();
+                s = parsed.getKey().visit([&](auto key) {
+                    return storage_engine_direct_crud::insert(*engine, *ru, ident, key, valSpan);
+                });
+                break;
+            }
+            case repl::OpTypeEnum::kContainerUpdate: {
+                auto parsed = repl::ContainerUpdateOplogEntryO::parse(
+                    o, IDLParserContext("ContainerUpdateOplogEntryO"));
+                auto valSpan = parsed.getValue().data();
+                s = parsed.getKey().visit([&](auto key) {
+                    return storage_engine_direct_crud::update(*engine, *ru, ident, key, valSpan);
+                });
+                break;
+            }
+            case repl::OpTypeEnum::kContainerDelete: {
+                auto parsed = repl::ContainerDeleteOplogEntryO::parse(
+                    o, IDLParserContext("ContainerDeleteOplogEntryO"));
+                s = parsed.getKey().visit([&](auto key) {
+                    return storage_engine_direct_crud::remove(*engine, *ru, ident, key);
+                });
+                break;
+            }
+            default:
+                MONGO_UNREACHABLE;
         }
-        case repl::OpTypeEnum::kContainerUpdate: {
-            auto parsed = repl::ContainerUpdateOplogEntryO::parse(
-                o, IDLParserContext("ContainerUpdateOplogEntryO"));
-            auto valSpan = parsed.getValue().data();
-            s = parsed.getKey().visit([&](auto key) {
-                return storage_engine_direct_crud::update(*engine, *ru, *ident, key, valSpan);
-            });
-            break;
+
+        if (!s.isOK()) {
+            return s;
         }
-        case repl::OpTypeEnum::kContainerDelete: {
-            auto parsed = repl::ContainerDeleteOplogEntryO::parse(
-                o, IDLParserContext("ContainerDeleteOplogEntryO"));
-            s = parsed.getKey().visit([&](auto key) {
-                return storage_engine_direct_crud::remove(*engine, *ru, *ident, key);
-            });
-            break;
-        }
-        default:
-            uasserted(10704705,
-                      str::stream() << "Unsupported opType: " << idl::serialize(op->getOpType()));
     }
 
-    if (!s.isOK())
-        return s;
-
     wuow.commit();
-    return s;
+    return Status::OK();
 }
 
 Status applyCommand_inlock(OperationContext* opCtx,

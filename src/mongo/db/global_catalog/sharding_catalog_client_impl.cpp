@@ -332,8 +332,10 @@ AggregateCommandRequest makeCollectionAndChunksAggregation(OperationContext* opC
     };
 
     auto buildUnionWithStage = [&](bool incremental) -> boost::intrusive_ptr<DocumentSource> {
-        // TODO SERVER-120179 Remove the feature flag guard and the createFromBson path.
-        if (feature_flags::gFeatureFlagExtensionViewsAndUnionWith.isEnabled()) {
+        auto ifrCtx = expCtx->getIfrContext();
+        auto hybridSearchFlagEnabled = ifrCtx &&
+            ifrCtx->getSavedFlagValue(feature_flags::gFeatureFlagExtensionsInsideHybridSearch);
+        if (hybridSearchFlagEnabled) {
             auto bsonDoc = Doc{{"$unionWith", buildUnionWithFn(incremental)}}.toBson();
             auto liteParsed = LiteParsedUnionWith::parse(
                 expCtx->getNamespaceString(), bsonDoc.firstElement(), LiteParserOptions{});
@@ -504,16 +506,19 @@ DatabaseType ShardingCatalogClientImpl::getDatabase(OperationContext* opCtx,
     return uassertStatusOK(std::move(result)).value;
 }
 
-std::vector<DatabaseType> ShardingCatalogClientImpl::getAllDBs(OperationContext* opCtx,
-                                                               repl::ReadConcernLevel readConcern) {
-    auto dbs = uassertStatusOK(_exhaustiveFindOnConfig(opCtx,
-                                                       getConfigReadPreference(opCtx),
-                                                       readConcern,
-                                                       NamespaceString::kConfigDatabasesNamespace,
-                                                       BSONObj(),
-                                                       BSONObj(),
-                                                       boost::none))
-                   .value;
+std::vector<DatabaseType> ShardingCatalogClientImpl::getAllDBs(
+    OperationContext* opCtx,
+    repl::ReadConcernLevel readConcern,
+    const boost::optional<ReadPreferenceSetting>& readPref) {
+    auto dbs =
+        uassertStatusOK(_exhaustiveFindOnConfig(opCtx,
+                                                readPref.value_or(getConfigReadPreference(opCtx)),
+                                                readConcern,
+                                                NamespaceString::kConfigDatabasesNamespace,
+                                                BSONObj(),
+                                                BSONObj(),
+                                                boost::none))
+            .value;
 
     std::vector<DatabaseType> databases;
     databases.reserve(dbs.size());
