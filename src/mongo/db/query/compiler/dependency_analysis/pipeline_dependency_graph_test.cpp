@@ -70,7 +70,7 @@ protected:
         pipeline->getContext()->setPathArrayness(pathArrayness);
         stages.assign(pipeline->getSources().begin(), pipeline->getSources().end());
         canPathBeArray = [this](StringData path) -> bool {
-            return pathArrayness->canPathBeArray(FieldRef(path), pipeline->getContext().get());
+            return pipeline->getContext()->canMainCollPathBeArray(FieldPath(path));
         };
         graph = std::make_unique<DependencyGraph>(pipeline->getSources(), canPathBeArray);
     }
@@ -291,7 +291,7 @@ TEST_F(PipelineDependencyGraphTest, ComplexPathShadowing) {
 
     runTest([&] {
         // Lookup from the end of the pipeline.
-        ASSERT_EQUALS(graph->getDeclaringStage(stages.back().get(), "d.b.c"), stages.back());
+        ASSERT_EQUALS(graph->getDeclaringStage(nullptr, "d.b.c"), stages.back());
     });
 }
 
@@ -499,7 +499,7 @@ TEST_F(PipelineDependencyGraphTest, ComplexPathsMultiple) {
 
     runTest([&] {
         // Lookup from the end of the pipeline.
-        auto* ds = stages.back().get();
+        DocumentSource* ds = nullptr;
         ASSERT_EQUALS(graph->getDeclaringStage(ds, "a"), stages[2]);
         ASSERT_EQUALS(graph->getDeclaringStage(ds, "b"), stages[2]);
         ASSERT_EQUALS(graph->getDeclaringStage(ds, "c"), stages[1]);
@@ -758,12 +758,11 @@ TEST_F(PipelineDependencyGraphTest, ReplaceRootAttributesAllFields) {
         "{$set: { c: 1 }}]");
 
     runTest([&] {
-        auto* last = stages.back().get();
         // All pre-existing fields are attributed to $replaceRoot.
-        ASSERT_EQUALS(graph->getDeclaringStage(last, "a"), stages[1]);
-        ASSERT_EQUALS(graph->getDeclaringStage(last, "b"), stages[1]);
+        ASSERT_EQUALS(graph->getDeclaringStage(nullptr, "a"), stages[1]);
+        ASSERT_EQUALS(graph->getDeclaringStage(nullptr, "b"), stages[1]);
         // 'c' set after $replaceRoot.
-        ASSERT_EQUALS(graph->getDeclaringStage(last, "c"), stages[2]);
+        ASSERT_EQUALS(graph->getDeclaringStage(nullptr, "c"), stages[2]);
     });
 }
 

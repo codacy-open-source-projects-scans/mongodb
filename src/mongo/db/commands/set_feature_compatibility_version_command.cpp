@@ -197,8 +197,8 @@ void handleDropPendingDBsGarbage(OperationContext* parentOpCtx) {
     const auto opCtxShared = cc().makeOperationContext();
     auto* const opCtx = opCtxShared.get();
 
-    const auto kVersionTimestampFieldName = std::string{} + DatabaseType::kVersionFieldName + "." +
-        DatabaseVersion::kTimestampFieldName;
+    const auto kVersionTimestampFieldName = std::string{DatabaseType::kVersionFieldName} + "." +
+        std::string{DatabaseVersion::kTimestampFieldName};
 
     const auto& configShard = ShardingCatalogManager::get(opCtx)->localConfigShard();
 
@@ -544,7 +544,7 @@ public:
             ? "replica set/maintenance mode"
             : (role->has(ClusterRole::ConfigServer) ? "config server" : "shard server");
 
-        if (!request.getPhase() || request.getPhase() == SetFCVPhaseEnum::kStart) {
+        if ((!request.getPhase() || request.getPhase() == SetFCVPhaseEnum::kStart) && !isDryRun) {
             LOGV2(6744300,
                   "setFeatureCompatibilityVersion command called",
                   "upgradeOrDowngrade"_attr = upgradeOrDowngrade,
