@@ -50,6 +50,7 @@ namespace {
 MONGO_FAIL_POINT_DEFINE(sleepAfterFlush);
 MONGO_FAIL_POINT_DEFINE(failDuringFlush);
 MONGO_FAIL_POINT_DEFINE(hangBeforePersistingNewFastCountEntries);
+MONGO_FAIL_POINT_DEFINE(useInMemoryReplicatedSizeCount);
 
 }  // namespace
 
@@ -217,7 +218,8 @@ CollectionSizeCount ReplicatedFastCountManager::findLatest(OperationContext* opC
     ScopedOplogVisibleTimestamp scopedOplogVisibleTimestamp(
         shard_role_details::getRecoveryUnit(opCtx), boost::none);
 
-    const AutoGetOplogFastPath oplogRead(opCtx, OplogAccessMode::kRead);
+    const AutoGetOplogFastPath oplogRead(
+        opCtx, OplogAccessMode::kRead, Date_t::max(), {.skipRSTLLock = true});
     const auto& oplogColl = oplogRead.getCollection();
     massert(123334, "oplog collection not found", oplogColl);
 
@@ -230,6 +232,10 @@ CollectionSizeCount ReplicatedFastCountManager::findLatest(OperationContext* opC
 
 CollectionSizeCount ReplicatedFastCountManager::findPersisted(OperationContext* opCtx,
                                                               UUID uuid) const {
+    if (MONGO_unlikely(useInMemoryReplicatedSizeCount.shouldFail())) {
+        return find(uuid);
+    }
+
     return replicated_fast_count::readPersisted(opCtx, _sizeCountStore, uuid);
 }
 
