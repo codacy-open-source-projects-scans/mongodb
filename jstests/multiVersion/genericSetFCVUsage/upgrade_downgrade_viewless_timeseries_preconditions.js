@@ -6,10 +6,12 @@
  * @tags: [
  *   requires_timeseries,
  *   requires_sharding,
+ *   requires_fcv_90,
  *   featureFlagCreateViewlessTimeseriesCollections,
  * ]
  */
 
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {getTimeseriesBucketsColl} from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
 
@@ -119,7 +121,9 @@ function testUpgradeErrors() {
         };
         const primaryShard = st.rs0.getPrimary();
         const shardDB = primaryShard.getDB(dbName);
+        const fp = configureFailPoint(primaryShard, "skipCreateTimeseriesVersionMismatchCheck");
         assert.commandWorked(shardDB.runCommand({applyOps: [createBucketsOp]}));
+        fp.off();
         assert.commandFailedWithCode(
             db.runCommand({
                 upgradeDowngradeViewlessTimeseries: regularCollName,

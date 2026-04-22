@@ -974,7 +974,20 @@ server_parameters:
             name: TransformHoistPolicy
             data: synchronized_value<TransformHoistPolicyEnum>
         default:
-            expr: TransformHoistPolicyEnum::kNever
+            expr: TransformHoistPolicyEnum::kForMatchPushdown
+        redact: false
+
+    internalQueryTransformHoistMaximumPaths:
+        description: >-
+            Maximum number of modified paths (computed fields and renames) in a $project or
+            $addFields for which the hoist transformation will be attempted. Projections with more
+            modified paths than this threshold are not hoisted, even when
+            internalQueryTransformHoistPolicy is always.
+        set_at: [startup, runtime]
+        cpp_varname: "internalQueryTransformHoistMaximumPaths"
+        cpp_vartype: AtomicWord<int>
+        default: 1024
+        validator: {gte: 0}
         redact: false
 # Note for adding additional query knobs:
 #

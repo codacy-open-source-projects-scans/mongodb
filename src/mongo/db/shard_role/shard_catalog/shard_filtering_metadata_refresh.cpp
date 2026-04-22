@@ -65,6 +65,7 @@
 #include "mongo/db/shard_role/shard_catalog/shard_filtering_util.h"
 #include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/sharding_environment/sharding_api_d_params_gen.h"
 #include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/sharding_environment/sharding_statistics.h"
 #include "mongo/db/tenant_id.h"
@@ -910,9 +911,35 @@ void FilteringMetadataCache::_onDbVersionMismatchAuthoritative(
         //      moved the database elsewhere or dropped, meaning this node is no longer the primary
         //      shard for this database.
 
-        uassert(StaleDbRoutingVersion(dbName, receivedDbVersion, boost::none),
-                str::stream() << "No cached info for the database " << dbName.toStringForErrorMsg(),
-                dbVersion);
+        if (!dbVersion) {
+            // In the second case there are two solutions possible:
+            // * Either we return no wantedVersion and trigger a full refresh on the routing side
+            //   for the db entry
+            // * Or we return a "fake" version such that the causal cache can intelligently merge
+            //   the requests on the router side.
+            //
+            // Going for the first version causes a potential convoy of refreshes on the router if
+            // there are multiple requests with a stale version and each resolution triggers an
+            // invalidation. As such the second option is the only real possibility.
+            //
+            // The chosen "fake" version is the immediately following timestamp of the dbVersion
+            // received which will trigger the routing cache to advance its time in store and all
+            // subsequent requests will be merged onto a single cache lookup. This is safe because
+            // of two reasons:
+            //
+            // 1. This can only occur if the dbVersion timestamp has advanced to a time higher than
+            //    the one sent. Therefore the dbVersion wanted is at least the received timestamp
+            //    + 1.
+            // 2. If there is no actual entry (think a drop) on the CSRS the cache will handle this
+            //    gracefully. The cache just clears out the entry since nothing is present and the
+            //    time advancing will at most trigger a refresh which will anyway happen since there
+            //    is no entry present.
+            auto newVersion = receivedDbVersion;
+            newVersion.setTimestamp(newVersion.getTimestamp() + 1);
+            uasserted(StaleDbRoutingVersion(dbName, receivedDbVersion, newVersion),
+                      str::stream()
+                          << "No cached info for the database " << dbName.toStringForErrorMsg());
+        }
 
         const auto wantedVersion = *dbVersion;
 
@@ -946,8 +973,10 @@ void FilteringMetadataCache::_onDbVersionMismatchAuthoritative(
 void FilteringMetadataCache::_recoverCollectionMetadataFromDisk(OperationContext* opCtx,
                                                                 const NamespaceString& nss) {
     auto executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
+    const int maxAttempts = maxShardMetadataDiskRecoveryAttempts.loadRelaxed();
+    StringData lastRetryReason;
 
-    while (true) {
+    for (int attempt = 1; attempt <= maxAttempts; ++attempt) {
         std::shared_ptr<CollectionCacheRecoverer> recoverer;
         SharedPromise<void> promise;
         CancellationToken cancellationToken = CancellationToken::uncancelable();
@@ -957,6 +986,7 @@ void FilteringMetadataCache::_recoverCollectionMetadataFromDisk(OperationContext
                 boost::make_optional(CollectionShardingRuntime::acquireExclusive(opCtx, nss));
 
             if (joinPlacementVersionOperations(opCtx, &scopedCsr)) {
+                lastRetryReason = "ongoing critical section or concurrent refresh"_sd;
                 continue;
             }
 
@@ -1013,6 +1043,7 @@ void FilteringMetadataCache::_recoverCollectionMetadataFromDisk(OperationContext
                         logAttrs(nss),
                         "error"_attr = status);
 
+            lastRetryReason = "disk recoverer initial pass failed"_sd;
             continue;
         }
 
@@ -1028,6 +1059,7 @@ void FilteringMetadataCache::_recoverCollectionMetadataFromDisk(OperationContext
                     "Authoritative metadata recovery: interrupted by an invalidate oplog entry",
                     logAttrs(nss));
 
+                lastRetryReason = "interrupted by an invalidate oplog entry"_sd;
                 continue;
             }
 
@@ -1039,6 +1071,7 @@ void FilteringMetadataCache::_recoverCollectionMetadataFromDisk(OperationContext
                     "retrying",
                     logAttrs(nss));
 
+                lastRetryReason = "critical section entered after drain"_sd;
                 continue;
             }
 
@@ -1059,8 +1092,14 @@ void FilteringMetadataCache::_recoverCollectionMetadataFromDisk(OperationContext
 
         promise.emplaceValue();
 
-        break;
+        return;
     }
+
+    tasserted(12332300,
+              str::stream() << "Exhausted maximum number (" << maxAttempts
+                            << ") of authoritative collection metadata recovery attempts for "
+                            << nss.toStringForErrorMsg()
+                            << "; last retry reason: " << lastRetryReason);
 }
 
 void FilteringMetadataCache::_tryNoopWriteToAdvanceMajorityCommitPoint(OperationContext* opCtx) {
