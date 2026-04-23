@@ -46,20 +46,10 @@
 namespace mongo::otel::metrics {
 
 #ifdef MONGO_CONFIG_OTEL
-namespace {
+using metrics_service_detail::makeObservableInstrument;
+using metrics_service_detail::observableCallback;
 
-// Static callback function for metric types that are observable.
-template <template <typename> class MetricT, typename ValueT>
-void observableCallback(opentelemetry::metrics::ObserverResult observer_result, void* state) {
-    invariant(state != nullptr);
-    auto* const metric = static_cast<MetricT<ValueT>*>(state);
-    auto observer = std::get_if<std::shared_ptr<opentelemetry::metrics::ObserverResultT<ValueT>>>(
-        &observer_result);
-    invariant(observer != nullptr && *observer != nullptr);
-    for (const auto& entry : metric->values()) {
-        (*observer)->Observe(entry.value, entry.attributes);
-    }
-}
+namespace {
 
 // Creates a view with the provided aggregation type and aggregation configuration.
 void createView(WithLock,
@@ -102,86 +92,6 @@ void createAndRegisterHistogramView(WithLock lock,
                unit,
                opentelemetry::sdk::metrics::AggregationType::kHistogram,
                std::move(aggregationConfig));
-}
-
-template <typename T>
-std::shared_ptr<opentelemetry::metrics::ObservableInstrument> makeObservableInstrument(
-    opentelemetry::metrics::MeterProvider& provider,
-    std::string name,
-    std::string description,
-    MetricUnit unit);
-
-template <>
-std::shared_ptr<opentelemetry::metrics::ObservableInstrument>
-makeObservableInstrument<ObservableCounter<int64_t>>(
-    opentelemetry::metrics::MeterProvider& provider,
-    std::string name,
-    std::string description,
-    MetricUnit unit) {
-    return provider.GetMeter(std::string{MetricsService::kMeterName})
-        ->CreateInt64ObservableCounter(toStdStringViewForInterop(name),
-                                       description,
-                                       toStdStringViewForInterop(toString(unit)));
-}
-
-template <>
-std::shared_ptr<opentelemetry::metrics::ObservableInstrument>
-makeObservableInstrument<ObservableCounter<double>>(opentelemetry::metrics::MeterProvider& provider,
-                                                    std::string name,
-                                                    std::string description,
-                                                    MetricUnit unit) {
-    return provider.GetMeter(std::string{MetricsService::kMeterName})
-        ->CreateDoubleObservableCounter(toStdStringViewForInterop(name),
-                                        description,
-                                        toStdStringViewForInterop(toString(unit)));
-}
-
-template <>
-std::shared_ptr<opentelemetry::metrics::ObservableInstrument>
-makeObservableInstrument<UpDownCounter<int64_t>>(opentelemetry::metrics::MeterProvider& provider,
-                                                 std::string name,
-                                                 std::string description,
-                                                 MetricUnit unit) {
-    return provider.GetMeter(std::string{MetricsService::kMeterName})
-        ->CreateInt64ObservableUpDownCounter(toStdStringViewForInterop(name),
-                                             description,
-                                             toStdStringViewForInterop(toString(unit)));
-}
-
-template <>
-std::shared_ptr<opentelemetry::metrics::ObservableInstrument>
-makeObservableInstrument<UpDownCounter<double>>(opentelemetry::metrics::MeterProvider& provider,
-                                                std::string name,
-                                                std::string description,
-                                                MetricUnit unit) {
-    return provider.GetMeter(std::string{MetricsService::kMeterName})
-        ->CreateDoubleObservableUpDownCounter(toStdStringViewForInterop(name),
-                                              description,
-                                              toStdStringViewForInterop(toString(unit)));
-}
-
-template <>
-std::shared_ptr<opentelemetry::metrics::ObservableInstrument>
-makeObservableInstrument<Gauge<int64_t>>(opentelemetry::metrics::MeterProvider& provider,
-                                         std::string name,
-                                         std::string description,
-                                         MetricUnit unit) {
-    return provider.GetMeter(std::string{MetricsService::kMeterName})
-        ->CreateInt64ObservableGauge(toStdStringViewForInterop(name),
-                                     description,
-                                     toStdStringViewForInterop(toString(unit)));
-}
-
-template <>
-std::shared_ptr<opentelemetry::metrics::ObservableInstrument>
-makeObservableInstrument<Gauge<double>>(opentelemetry::metrics::MeterProvider& provider,
-                                        std::string name,
-                                        std::string description,
-                                        MetricUnit unit) {
-    return provider.GetMeter(std::string{MetricsService::kMeterName})
-        ->CreateDoubleObservableGauge(toStdStringViewForInterop(name),
-                                      description,
-                                      toStdStringViewForInterop(toString(unit)));
 }
 
 template <typename T>
@@ -255,6 +165,42 @@ void MetricsService::OwnedMetricVisitor::operator()(std::unique_ptr<Gauge<double
     newObservableInstruments.push_back(observable);
 }
 
+void MetricsService::OwnedMetricVisitor::operator()(std::unique_ptr<MinGauge<int64_t>>& gauge) {
+    gauge->reset();
+    auto observable =
+        makeObservableInstrument<Gauge<int64_t>>(provider, name, id.description, id.unit);
+    observable->AddCallback(observableCallback<Gauge, int64_t>,
+                            static_cast<Gauge<int64_t>*>(gauge.get()));
+    newObservableInstruments.push_back(observable);
+}
+
+void MetricsService::OwnedMetricVisitor::operator()(std::unique_ptr<MinGauge<double>>& gauge) {
+    gauge->reset();
+    auto observable =
+        makeObservableInstrument<Gauge<double>>(provider, name, id.description, id.unit);
+    observable->AddCallback(observableCallback<Gauge, double>,
+                            static_cast<Gauge<double>*>(gauge.get()));
+    newObservableInstruments.push_back(observable);
+}
+
+void MetricsService::OwnedMetricVisitor::operator()(std::unique_ptr<MaxGauge<int64_t>>& gauge) {
+    gauge->reset();
+    auto observable =
+        makeObservableInstrument<Gauge<int64_t>>(provider, name, id.description, id.unit);
+    observable->AddCallback(observableCallback<Gauge, int64_t>,
+                            static_cast<Gauge<int64_t>*>(gauge.get()));
+    newObservableInstruments.push_back(observable);
+}
+
+void MetricsService::OwnedMetricVisitor::operator()(std::unique_ptr<MaxGauge<double>>& gauge) {
+    gauge->reset();
+    auto observable =
+        makeObservableInstrument<Gauge<double>>(provider, name, id.description, id.unit);
+    observable->AddCallback(observableCallback<Gauge, double>,
+                            static_cast<Gauge<double>*>(gauge.get()));
+    newObservableInstruments.push_back(observable);
+}
+
 void MetricsService::OwnedMetricVisitor::operator()(std::unique_ptr<Histogram<double>>& histogram) {
     auto* histogramImpl = dynamic_cast<HistogramImpl<double>*>(histogram.get());
     invariant(histogramImpl);
@@ -302,28 +248,6 @@ void MetricsService::initialize(opentelemetry::metrics::MeterProvider& provider)
     // destructors of any observable instrument instance(s) created before initialization.
     _observableInstruments = std::move(newObservableInstruments);
 }
-#endif  // MONGO_CONFIG_OTEL
-
-#ifdef MONGO_CONFIG_OTEL
-template <template <typename> class MetricT, typename T>
-void MetricsService::_addObservable(WithLock,
-                                    const std::string& nameStr,
-                                    MetricT<T>* metricPtr,
-                                    std::string description,
-                                    MetricUnit unit) {
-    auto provider = opentelemetry::metrics::Provider::GetMeterProvider();
-    auto observable = makeObservableInstrument<MetricT<T>>(*provider, nameStr, description, unit);
-    tassert(ErrorCodes::InternalError,
-            fmt::format("Could not create observable instrument for metric: {}", nameStr),
-            observable != nullptr);
-    observable->AddCallback(observableCallback<MetricT, T>, metricPtr);
-    _observableInstruments.push_back(std::move(observable));
-}
-
-template void MetricsService::_addObservable<ObservableCounter, int64_t>(
-    WithLock, const std::string&, ObservableCounter<int64_t>*, std::string, MetricUnit);
-template void MetricsService::_addObservable<ObservableCounter, double>(
-    WithLock, const std::string&, ObservableCounter<double>*, std::string, MetricUnit);
 #endif  // MONGO_CONFIG_OTEL
 
 void MetricsService::_registerServerStatusTree(
@@ -389,24 +313,28 @@ UpDownCounter<double>& MetricsService::createDoubleUpDownCounter(
     return createUpDownCounter<double>(name, description, unit, options);
 }
 
-template <typename T>
-Gauge<T>& MetricsService::createGauge(MetricName name,
-                                      std::string description,
-                                      MetricUnit unit,
-                                      const GaugeOptions& options) {
+template <template <typename> class GaugeTpl, typename T>
+GaugeTpl<T>& MetricsService::createGaugeBase(MetricName name,
+                                             std::string description,
+                                             MetricUnit unit,
+                                             const GaugeOptions& options,
+                                             T initialValue) {
     MetricIdentifier identifier{.description = description,
                                 .unit = unit,
                                 .serverStatusOptions = options.serverStatusOptions,
                                 .histogramBucketBoundaries = boost::none};
-    return _createMetric<GaugeImpl<T>, Gauge<T>, GaugeOptions>(
+    return _createMetric<GaugeTpl<T>, GaugeTpl<T>, GaugeOptions>(
         name,
         options,
         std::move(identifier),
         /* makeInstrument= */
-        [](WithLock, const std::string&) { return std::make_unique<GaugeImpl<T>>(); },
+        [initialValue](WithLock, const std::string&) -> std::unique_ptr<GaugeTpl<T>> {
+            return std::make_unique<GaugeImpl<T>>(initialValue);
+        },
 #ifdef MONGO_CONFIG_OTEL
         /* addObservable= */
-        [this, description, unit](WithLock lock, const std::string& nameStr, Gauge<T>* gauge_ptr) {
+        [this, description, unit](
+            WithLock lock, const std::string& nameStr, GaugeTpl<T>* gauge_ptr) {
             (void)lock;
             auto provider = opentelemetry::metrics::Provider::GetMeterProvider();
             std::shared_ptr<opentelemetry::metrics::ObservableInstrument> observableGauge =
@@ -414,13 +342,22 @@ Gauge<T>& MetricsService::createGauge(MetricName name,
             tassert(ErrorCodes::InternalError,
                     fmt::format("Could not create observable gauge for metric: {}", nameStr),
                     observableGauge != nullptr);
-            observableGauge->AddCallback(observableCallback<Gauge, T>, gauge_ptr);
+            observableGauge->AddCallback(observableCallback<Gauge, T>,
+                                         static_cast<Gauge<T>*>(gauge_ptr));
             _observableInstruments.push_back(std::move(observableGauge));
         }
 #else
-        [](WithLock, const std::string&, Gauge<T>*) {}
+        [](WithLock, const std::string&, GaugeTpl<T>*) {}
 #endif
     );
+}
+
+template <typename T>
+Gauge<T>& MetricsService::createGauge(MetricName name,
+                                      std::string description,
+                                      MetricUnit unit,
+                                      const GaugeOptions& options) {
+    return createGaugeBase<Gauge, T>(name, description, unit, options, T{0});
 }
 
 Gauge<int64_t>& MetricsService::createInt64Gauge(MetricName name,
@@ -435,6 +372,52 @@ Gauge<double>& MetricsService::createDoubleGauge(MetricName name,
                                                  MetricUnit unit,
                                                  const GaugeOptions& options) {
     return createGauge<double>(name, description, unit, options);
+}
+
+template <typename T>
+MinGauge<T>& MetricsService::createMinGauge(MetricName name,
+                                            std::string description,
+                                            MetricUnit unit,
+                                            const GaugeOptions& options) {
+    return createGaugeBase<MinGauge, T>(
+        name, description, unit, options, std::numeric_limits<T>::max());
+}
+
+MinGauge<int64_t>& MetricsService::createInt64MinGauge(MetricName name,
+                                                       std::string description,
+                                                       MetricUnit unit,
+                                                       const GaugeOptions& options) {
+    return createMinGauge<int64_t>(name, description, unit, options);
+}
+
+MinGauge<double>& MetricsService::createDoubleMinGauge(MetricName name,
+                                                       std::string description,
+                                                       MetricUnit unit,
+                                                       const GaugeOptions& options) {
+    return createMinGauge<double>(name, description, unit, options);
+}
+
+template <typename T>
+MaxGauge<T>& MetricsService::createMaxGauge(MetricName name,
+                                            std::string description,
+                                            MetricUnit unit,
+                                            const GaugeOptions& options) {
+    return createGaugeBase<MaxGauge, T>(
+        name, description, unit, options, std::numeric_limits<T>::lowest());
+}
+
+MaxGauge<int64_t>& MetricsService::createInt64MaxGauge(MetricName name,
+                                                       std::string description,
+                                                       MetricUnit unit,
+                                                       const GaugeOptions& options) {
+    return createMaxGauge<int64_t>(name, description, unit, options);
+}
+
+MaxGauge<double>& MetricsService::createDoubleMaxGauge(MetricName name,
+                                                       std::string description,
+                                                       MetricUnit unit,
+                                                       const GaugeOptions& options) {
+    return createMaxGauge<double>(name, description, unit, options);
 }
 
 template <typename T>

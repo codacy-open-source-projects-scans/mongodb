@@ -1812,11 +1812,12 @@ export class ReplSetTest {
     }
 
     /**
-     *  Blocks until the set is initialized with a primary.
-     *  TODO SERVER-124472: Determine if initiateForDisagg needs additional functionality to
-     *  match ASC ReplSetTest.initiate.
+     * Runs replSetInitiate on the first node of the replica set.
+     *
+     * TODO (SERVER-109841): Replsetinitiate is currently a no-op command for disagg. Determine the
+     * next steps for this function if additional functionality is to be incorporated.
      */
-    initiateForDisagg() {
+    initiateForDisagg(cfg, initCmd) {
         const startTime = new Date(); // Measure the execution time of this function.
 
         // Blocks until there is a primary. We use a faster retry interval here since we expect the
@@ -4186,19 +4187,19 @@ function checkOplogs(rst, msgPrefix = "checkOplogs", secondaries) {
         oplogEntry0 = bsonGetImmutable(oplogEntry0);
         oplogEntry1 = bsonGetImmutable(oplogEntry1);
 
-        // TODO SERVER-116413: Remove the skipConsistencyCheckForNewPrimaryOpEntry param and this early return.
-        if (
-            TestData.skipConsistencyCheckForNewPrimaryOpEntry &&
-            oplogEntry0.o &&
-            oplogEntry0.o.msg === "new primary" &&
-            oplogEntry1.o &&
-            oplogEntry1.o.msg === "new primary"
-        ) {
-            jsTest.log.info(`Skipping oplog consistency check for 'new primary' entry type`);
-            return;
-        }
-
         if (!bsonBinaryEqual(oplogEntry0, oplogEntry1)) {
+            // TODO SERVER-124392: Investigate if "new primary" noop oplog entries can be generated with consistent
+            // field ordering to avoid the need for this special case.
+            if (
+                oplogEntry0.o &&
+                oplogEntry0.o.msg === "new primary" &&
+                oplogEntry1.o &&
+                oplogEntry1.o.msg === "new primary" &&
+                bsonUnorderedFieldsCompare(oplogEntry0, oplogEntry1) === 0
+            ) {
+                return;
+            }
+
             const query = prevOplogEntry ? {ts: {$lte: prevOplogEntry.ts}} : {};
             rst.nodes.forEach((node) => rst.dumpOplog(node, query, 100));
             const logLines = [
