@@ -83,6 +83,7 @@ TYPED_TEST(GaugeImplTest, SetIfGreater) {
     EXPECT_THAT(gauge.values(), ElementsAre(IsAttributesAndValue(IsEmpty(), 10)));
 }
 
+#ifdef MONGO_CONFIG_OTEL
 TYPED_TEST(GaugeImplTest, ResetRestoresInitialValue) {
     GaugeImpl<TypeParam> minGauge{std::numeric_limits<TypeParam>::max()};
     minGauge.setIfLess(5);
@@ -98,6 +99,7 @@ TYPED_TEST(GaugeImplTest, ResetRestoresInitialValue) {
         maxGauge.values(),
         ElementsAre(IsAttributesAndValue(IsEmpty(), std::numeric_limits<TypeParam>::lowest())));
 }
+#endif  // MONGO_CONFIG_OTEL
 
 // Any issues with thread safety should be caught by tsan on this test.
 TYPED_TEST(GaugeImplTest, ConcurrentSets) {
