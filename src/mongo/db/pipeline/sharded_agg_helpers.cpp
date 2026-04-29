@@ -1618,9 +1618,10 @@ BSONObj finalizePipelineAndTargetShardsForExplain(
                                                   pipelineToTarget->serializeToBson());
             PipelineDataSource pipelineDataSource = getPipelineDataSource(liteParsedPipeline);
 
-            if (expCtx->getIfrContext() &&
-                expCtx->getIfrContext()->getSavedFlagValue(
-                    feature_flags::gFeatureFlagExtensionsInsideHybridSearch)) {
+            auto ifrCtx = expCtx->getIfrContext();
+            auto hybridSearchFlagEnabled = ifrCtx &&
+                ifrCtx->getSavedFlagValue(feature_flags::gFeatureFlagExtensionsInsideHybridSearch);
+            if (hybridSearchFlagEnabled) {
                 liteParsedPipeline.validateWithCollectionMetadata(cri);
             } else {
                 // TODO SERVER-117803 Delete this duplicated check.
@@ -1823,23 +1824,21 @@ std::unique_ptr<Pipeline> targetShardsAndAddMergeCursors(
     bool useCollectionDefaultCollator) {
     auto&& aggRequestPipelinePair = [&] {
         return visit(
-            OverloadedVisitor{[&](std::unique_ptr<Pipeline>&& pipeline) {
-                                  return std::make_pair(
-                                      AggregateCommandRequest(expCtx->getNamespaceString(),
-                                                              pipeline->serializeToBson()),
-                                      std::move(pipeline));
-                              },
-                              [&](AggregateCommandRequest&& aggRequest) {
-                                  auto rawPipeline = aggRequest.getPipeline();
-                                  return std::make_pair(
-                                      std::move(aggRequest),
-                                      pipeline_factory::makePipeline(
-                                          rawPipeline, expCtx, pipeline_factory::kOptionsMinimal));
-                              },
-                              [&](std::pair<AggregateCommandRequest, std::unique_ptr<Pipeline>>&&
-                                      aggRequestPipelinePair) {
-                                  return std::move(aggRequestPipelinePair);
-                              }},
+            OverloadedVisitor{
+                [&](std::unique_ptr<Pipeline>&& pipeline) {
+                    return std::make_pair(AggregateCommandRequest(expCtx->getNamespaceString(),
+                                                                  pipeline->serializeToBson()),
+                                          std::move(pipeline));
+                },
+                [&](AggregateCommandRequest&& aggRequest) {
+                    auto rawPipeline = aggRequest.getPipeline();
+                    return std::make_pair(
+                        std::move(aggRequest),
+                        pipeline_factory::makePipeline(
+                            rawPipeline, expCtx, pipeline_factory::kOptionsMinimal));
+                },
+                [&](std::pair<AggregateCommandRequest, std::unique_ptr<Pipeline>>&&
+                        aggRequestPipelinePair) { return std::move(aggRequestPipelinePair); }},
             std::move(targetRequest));
     }();
     const auto& aggRequest = aggRequestPipelinePair.first;
@@ -1945,9 +1944,10 @@ std::unique_ptr<Pipeline> finalizeAndMaybePreparePipelineForExecution(
                                                   pipelineToTarget->serializeToBson());
             PipelineDataSource pipelineDataSource = getPipelineDataSource(liteParsedPipeline);
 
-            if (expCtx->getIfrContext() &&
-                expCtx->getIfrContext()->getSavedFlagValue(
-                    feature_flags::gFeatureFlagExtensionsInsideHybridSearch)) {
+            auto ifrCtx = expCtx->getIfrContext();
+            auto hybridSearchFlagEnabled = ifrCtx &&
+                ifrCtx->getSavedFlagValue(feature_flags::gFeatureFlagExtensionsInsideHybridSearch);
+            if (hybridSearchFlagEnabled) {
                 liteParsedPipeline.validateWithCollectionMetadata(cri);
             } else {
                 // TODO SERVER-117803 Delete this duplicated check.

@@ -79,6 +79,7 @@
 #include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/control/journal_flusher.h"
+#include "mongo/db/storage/ident.h"
 #include "mongo/db/storage/kv/kv_engine.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/storage_repair_observer.h"
@@ -575,20 +576,18 @@ void reconcileCatalogAndRestartUnfinishedIndexBuilds(
     const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
     if (feature_flags::gFeatureFlagPrimaryDrivenIndexBuilds.isEnabledUseLastLTSFCVWhenUninitialized(
             vCtx, fcvSnapshot)) {
-        const bool generateIndexBuildIdent =
-            feature_flags::gResumablePrimaryDrivenIndexBuilds
-                .isEnabledUseLastLTSFCVWhenUninitialized(vCtx, fcvSnapshot);
         for (auto&& [buildUUID, entry] : reconcileResult.indexBuildsToRestart) {
             std::vector<IndexBuildInfo> builds;
             builds.reserve(entry.indexSpecsAndIdents.size());
             for (auto&& [spec, ident] : entry.indexSpecsAndIdents) {
-                builds.emplace_back(spec,
-                                    ident,
-                                    *opCtx->getServiceContext()->getStorageEngine(),
-                                    generateIndexBuildIdent);
+                builds.emplace_back(spec, ident, *opCtx->getServiceContext()->getStorageEngine());
             }
             index_builds::primary_driven::registry(opCtx->getServiceContext())
-                .add(buildUUID, entry.dbName, entry.collUUID, std::move(builds));
+                .add(buildUUID,
+                     entry.dbName,
+                     entry.collUUID,
+                     std::move(builds),
+                     ident::generateNewIndexBuildIdent(buildUUID));
         }
         return;
     }
@@ -934,7 +933,8 @@ void startupRecovery(OperationContext* opCtx,
     });
 
     if (isReplicatedFastCountEnabled(opCtx)) {
-        ReplicatedFastCountManager::get(opCtx->getServiceContext()).initializeMetadata(opCtx);
+        replicated_fast_count::ReplicatedFastCountManager::get(opCtx->getServiceContext())
+            .initializeMetadata(opCtx);
     }
 }
 

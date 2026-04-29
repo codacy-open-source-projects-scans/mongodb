@@ -290,7 +290,7 @@ void MozJSImplScope::registerOperation(OperationContext* opCtx) {
         return;
 
     _opCtx = opCtx;
-    _opCtxThreadId = stdx::this_thread::get_id();
+    _opCtxThreadId = std::this_thread::get_id();
 
     _engine->registerOperation(opCtx, this);
 }
@@ -308,7 +308,7 @@ void MozJSImplScope::kill() {
 
         // If we are on the right thread, in the middle of an operation, and we have a
         // registered opCtx, then we should check the opCtx for interrupts.
-        if (_opCtxThreadId == stdx::this_thread::get_id() && _inOp > 0 && _opCtx) {
+        if (_opCtxThreadId == std::this_thread::get_id() && _inOp > 0 && _opCtx) {
             _killStatus = _opCtx->checkForInterruptNoAssert();
         }
 
@@ -879,7 +879,16 @@ bool MozJSImplScope::awaitPromise(JSContext* cx,
         return false;
     }
 
-    invariant(scope->_promiseResult.initialized());
+    // We can get here without a resolved result if the wait loop above broke
+    // out on an error state (e.g. OOM during scope init's bootstrap script
+    // execution). The promise never reached Fulfilled and the resolved
+    // callback never ran, so `_promiseResult` was never populated. Return
+    // false and let the caller propagate the already-pending error instead
+    // of crashing on an invariant.
+    if (!scope->_promiseResult.initialized()) {
+        return false;
+    }
+
     out.set(scope->_promiseResult);
     scope->_promiseResult.reset();
     return true;

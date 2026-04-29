@@ -70,6 +70,12 @@ function getCurrentClusterTime(conn, dbName) {
  * @returns {ShardingTest} The configured sharding test
  */
 function createShardingTest(mongos = 1, shards = 3, rsNodes = 1, configShard = false) {
+    const isMultiversion =
+        Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet) || Boolean(TestData.multiversionBinVersion);
+    // TODO (SERVER-125025): remove the failpoint.
+    const failpointSetParameter = isMultiversion
+        ? {}
+        : {"failpoint.useInMemoryReplicatedSizeCount": tojson({mode: "alwaysOn"})};
     const stOptions = {
         shards: shards,
         mongos: mongos,
@@ -79,6 +85,7 @@ function createShardingTest(mongos = 1, shards = 3, rsNodes = 1, configShard = f
             setParameter: {
                 writePeriodicNoops: true,
                 periodicNoopIntervalSecs: 1,
+                ...failpointSetParameter,
             },
         },
         other: {
@@ -95,6 +102,18 @@ function createShardingTest(mongos = 1, shards = 3, rsNodes = 1, configShard = f
         stOptions.config = 1;
     }
     return new ShardingTest(stOptions);
+}
+
+/**
+ * Build expected events with cursor metadata from a command sequence.
+ * @param {Array<Command>} commands - Command objects
+ * @param {number} watchMode - ChangeStreamWatchMode
+ * @returns {Array<{event: Object, cursorClosed: boolean}>}
+ */
+function buildExpectedEvents(commands, watchMode) {
+    return commands
+        .flatMap((cmd) => cmd.getChangeEvents(watchMode))
+        .map((e) => ({event: e, cursorClosed: e.operationType === "invalidate"}));
 }
 
 /**
@@ -659,9 +678,13 @@ export {
     TEST_COLL_2,
     TEST_SEED,
     kExcludedOperationTypes,
+    buildExpectedEvents,
+    createMatcher,
     createShardingTest,
+    getCurrentClusterTime,
     setupFsmCluster,
     resolveWatchConfig,
+    runTeardownSteps,
     BackgroundMutatorOpType,
     verifyContinuous,
     verifyResume,

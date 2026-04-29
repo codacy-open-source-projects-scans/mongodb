@@ -136,6 +136,7 @@ public:
         }
 
         // Prepare the SBE tree for execution.
+        attachCollectionAcquisition(colls);
         auto ctx = makeCompileCtx();
         prepareTree(ctx.get(), stage.get());
 
@@ -339,7 +340,9 @@ TEST_F(LookupStageBuilderTest, NestedLoopJoin_TopLevelLocalField_Null) {
 
     std::vector<std::pair<BSONObj, std::vector<BSONObj>>> expected{
         {ldocs[0],
-         {fdocs[1], fdocs[2], fdocs[3],
+         {fdocs[1],
+          fdocs[2],
+          fdocs[3],
           /*fdocs[4], fdocs[5] - match in classic, but for undefined we don't care*/}},
     };
 
@@ -361,7 +364,9 @@ TEST_F(LookupStageBuilderTest, NestedLoopJoin_TopLevelLocalField_Missing) {
 
     std::vector<std::pair<BSONObj, std::vector<BSONObj>>> expected = {
         {ldocs[0],
-         {fdocs[1], fdocs[2], fdocs[3],
+         {fdocs[1],
+          fdocs[2],
+          fdocs[3],
           /*fdocs[4], fdocs[5] - match in classic, but for undefined we don't care*/}},
     };
 
@@ -1199,6 +1204,7 @@ protected:
         }
 
         auto context = makeCompileCtx(data.env->makeDeepCopy());
+        attachCollectionAcquisition(colls);
         prepareTree(context.get(), rootStage.get());
 
         return ExecutablePlan(std::move(colls),

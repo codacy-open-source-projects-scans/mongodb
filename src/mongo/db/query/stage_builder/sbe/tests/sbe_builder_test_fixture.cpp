@@ -96,6 +96,10 @@ SbeStageBuilderTestFixture::buildPlanStage(std::unique_ptr<QuerySolution> queryS
 
     auto [stage, data] = builder.build(querySolution->root());
 
+    if (colls.hasMainCollection()) {
+        stage->attachCollectionAcquisition(colls);
+    }
+
     // Reset "shardFilterer".
     if (auto shardFiltererSlot = data.env->getSlotIfExists("shardFilterer"_sd);
         shardFiltererSlot && param.shardFilterInterface) {
@@ -197,6 +201,7 @@ void GoldenSbeStageBuilderTestFixture::runTest(std::unique_ptr<QuerySolutionNode
                                     MODE_IS));
         colls = MultipleCollectionAccessor(*localColl);
     }
+    attachCollectionAcquisition(colls);
 
     auto [resultSlots, stage, data, _] =
         buildPlanStage(std::move(querySolution), colls, false /*hasRecordId*/, std::move(param));

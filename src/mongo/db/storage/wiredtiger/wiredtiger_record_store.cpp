@@ -43,8 +43,11 @@
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
+#include "mongo/db/client.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id_helpers.h"
+#include "mongo/db/rss/persistence_provider.h"
+#include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/server_recovery.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/shard_role/transaction_resources.h"
@@ -278,7 +281,13 @@ void WiredTigerRecordStore::wtDeleteRecord(OperationContext* opCtx,
     opStats = OpStats{};
     opStats.keyLength = computeRecordIdSize(id);
 
-    auto cursorParams = getWiredTigerCursorParams(wtRu, tableId(), /*allowOverwrite=*/true);
+    auto& pp = rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider();
+    auto cursorParams =
+        getWiredTigerCursorParams(wtRu,
+                                  tableId(),
+                                  chooseBlindWriteOverwrite(/*defaultOverwrite=*/true,
+                                                            pp.shouldUseBlindWriteWhenSafe(opCtx),
+                                                            opCtx->getClient()->getPrng()));
     WiredTigerCursor cursor(std::move(cursorParams), getURI(), *wtRu.getSession());
     WT_CURSOR* c = cursor.get();
     CursorKey key = makeCursorKey(id, keyFormat());
@@ -360,8 +369,13 @@ Status WiredTigerRecordStore::wtUpdateRecord(OperationContext* opCtx,
                                              int len,
                                              OpStats& opStats) {
     opStats = OpStats{};
-
-    auto cursorParams = getWiredTigerCursorParams(wtRu, tableId(), /*allowOverwrite=*/true);
+    auto& pp = rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider();
+    auto cursorParams =
+        getWiredTigerCursorParams(wtRu,
+                                  tableId(),
+                                  chooseBlindWriteOverwrite(/*defaultOverwrite=*/true,
+                                                            pp.shouldUseBlindWriteWhenSafe(opCtx),
+                                                            opCtx->getClient()->getPrng()));
     WiredTigerCursor curwrap(std::move(cursorParams), getURI(), *wtRu.getSession());
     WT_CURSOR* c = curwrap.get();
     invariant(c);
@@ -804,7 +818,12 @@ Status WiredTigerRecordStore::_insertRecords(OperationContext* opCtx,
 
     auto& wtRu = WiredTigerRecoveryUnit::get(ru);
 
-    auto cursorParams = getWiredTigerCursorParams(wtRu, tableId(), _overwrite);
+    auto& pp = rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider();
+    auto cursorParams = getWiredTigerCursorParams(
+        wtRu,
+        tableId(),
+        chooseBlindWriteOverwrite(
+            _overwrite, pp.shouldUseBlindWriteWhenSafe(opCtx), opCtx->getClient()->getPrng()));
     WiredTigerCursor curwrap(std::move(cursorParams), getURI(), *wtRu.getSession());
 
     wtRu.assertInActiveTxn();
@@ -1241,7 +1260,7 @@ RecordId WiredTigerRecordStore::getLargestKey(OperationContext* opCtx, RecoveryU
         // TODO (SERVER-105908): Convert this to a different error code that is distinguishable from
         // a true write conflict.
         int err, sub_level_err;
-        const char* err_msg;
+        const char* err_msg = "<none>";
         sessRaii.get_last_error(&err, &sub_level_err, &err_msg);
         LOGV2_DEBUG(9979800,
                     2,
@@ -1589,7 +1608,12 @@ Status WiredTigerRecordStore::Oplog::_insertRecords(OperationContext* opCtx,
 
     auto& wtRu = WiredTigerRecoveryUnit::get(ru);
 
-    auto cursorParams = getWiredTigerCursorParams(wtRu, tableId(), _overwrite);
+    auto& pp = rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider();
+    auto cursorParams = getWiredTigerCursorParams(
+        wtRu,
+        tableId(),
+        chooseBlindWriteOverwrite(
+            _overwrite, pp.shouldUseBlindWriteWhenSafe(opCtx), opCtx->getClient()->getPrng()));
     WiredTigerCursor curwrap(std::move(cursorParams), getURI(), *wtRu.getSession());
 
     wtRu.assertInActiveTxn();

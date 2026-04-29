@@ -93,10 +93,10 @@ void IndexScanStageBase::prepareImpl(CompileCtx& ctx) {
         uassert(4822821, str::stream() << "duplicate slot: " << _vars[idx], inserted);
     }
 
-    // No-op if using acquisition.
-    _coll.acquireCollection(_opCtx, _dbName, _collUuid);
+    tassert(12546100, "MultipleCollectionAccessor must be set on CompileCtx", ctx.mca);
+    doAttachCollectionAcquisition(*ctx.mca);
 
-    auto indexCatalog = _coll.getPtr()->getIndexCatalog();
+    auto indexCatalog = _coll->getCollectionPtr()->getIndexCatalog();
     auto indexEntry = indexCatalog->findIndexByName(_opCtx, _indexName);
 
     // TODO SERVER-87437: Using a uassert below is a temporary fix. The long term fix will rely on
@@ -106,7 +106,7 @@ void IndexScanStageBase::prepareImpl(CompileCtx& ctx) {
     // BF-31798).
     uassert(4938500,
             str::stream() << "could not find index named '" << _indexName << "' in collection '"
-                          << _coll.getCollName()->toStringForErrorMsg() << "'",
+                          << _coll->getCollectionPtr()->ns().toStringForErrorMsg() << "'",
             indexEntry);
 
     _uniqueIndex = indexEntry->descriptor()->unique();
@@ -177,19 +177,17 @@ void IndexScanStageBase::doSaveState() {
 
     // Set the index entry to null, since accessing this pointer is illegal during yield.
     _entry = nullptr;
-    _coll.reset();
 }
 
 void IndexScanStageBase::restoreCollectionAndIndex() {
-    if (!_coll.isAcquisition()) {
-        _coll.restoreCollection(_opCtx, _dbName, _collUuid);
-    }
+    tassert(12499900, "Expected collection to be an acquisition", _coll.has_value());
 
     auto [identTag, identVal] = _indexIdentAccessor.getViewOfValue();
     tassert(7566700, "Expected ident to be a string", value::isString(identTag));
 
     auto indexIdent = value::getStringView(identTag, identVal);
-    auto indexEntry = _coll.getPtr()->getIndexCatalog()->findIndexByIdent(_opCtx, indexIdent);
+    auto indexEntry =
+        _coll->getCollectionPtr()->getIndexCatalog()->findIndexByIdent(_opCtx, indexIdent);
     uassert(ErrorCodes::QueryPlanKilled,
             str::stream() << "query plan killed :: index '" << _indexName << "' dropped",
             indexEntry);
@@ -204,13 +202,7 @@ void IndexScanStageBase::restoreCollectionAndIndex() {
 
 void IndexScanStageBase::doRestoreState() {
     invariant(_opCtx);
-    if (!_coll.isAcquisition()) {
-        invariant(!_coll);
-        // If this stage has not been prepared, then yield recovery is a no-op.
-        if (!_coll.getCollName()) {
-            return;
-        }
-    }
+    tassert(12499901, "Expected collection to be an acquisition", _coll.has_value());
     restoreCollectionAndIndex();
     auto& ru = *shard_role_details::getRecoveryUnit(_opCtx);
     if (_cursor) {
@@ -267,7 +259,7 @@ void IndexScanStageBase::openImpl(bool reOpen) {
 }
 
 void IndexScanStageBase::doAttachCollectionAcquisition(const MultipleCollectionAccessor& mca) {
-    _coll.setCollAcquisition(mca.getCollectionAcquisitionFromUuid(_collUuid));
+    _coll = mca.getCollectionAcquisitionFromUuid(_collUuid);
 }
 
 template <typename Derived>
@@ -329,7 +321,6 @@ void IndexScanStageBase::close() {
     trackClose();
 
     _cursor.reset();
-    _coll.reset();
     _open = false;
 }
 
@@ -480,7 +471,7 @@ IndexScanStageBaseImpl<Derived>::IndexScanStageBaseImpl(
                          vars,
                          yieldPolicy,
                          nodeId,
-                         participateInTrialRunTracking){};
+                         participateInTrialRunTracking) {};
 
 SimpleIndexScanStage::SimpleIndexScanStage(UUID collUuid,
                                            DatabaseName dbName,

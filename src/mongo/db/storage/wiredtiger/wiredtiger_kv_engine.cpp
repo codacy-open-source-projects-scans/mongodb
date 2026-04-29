@@ -40,6 +40,7 @@
 #include "mongo/db/index_names.h"
 #include "mongo/db/replicated_fast_count/replicated_fast_count_enabled.h"
 #include "mongo/db/replicated_fast_count/replicated_fast_count_manager.h"
+#include "mongo/db/rss/persistence_provider.h"
 #include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
@@ -340,9 +341,7 @@ std::string toString(const StorageEngine::OldestActiveTransactionTimestampResult
 void setKeyOnCursor(WT_CURSOR* c, const std::variant<std::span<const char>, int64_t>& key) {
     std::visit(OverloadedVisitor{
                    [&](const std::span<const char> k) { c->set_key(c, WiredTigerItem{k}.get()); },
-                   [&](int64_t k) {
-                       c->set_key(c, k);
-                   }},
+                   [&](int64_t k) { c->set_key(c, k); }},
                key);
 }
 
@@ -507,16 +506,28 @@ uint64_t WiredTigerKVEngineBase::_getTableIdForIdent(StringData ident) {
     return id;
 }
 
+BlindWritePolicy WiredTigerKVEngineBase::chooseBlindWritePolicy(OperationContext* opCtx) {
+    auto& pp = rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider();
+    return chooseBlindWriteOverwrite(/*defaultOverwrite=*/false,
+                                     pp.shouldUseBlindWriteWhenSafe(opCtx),
+                                     opCtx->getClient()->getPrng())
+        ? BlindWritePolicy::blind
+        : BlindWritePolicy::nonBlind;
+}
+
 Status WiredTigerKVEngineBase::insertIntoIdent(RecoveryUnit& ru,
                                                StringData ident,
                                                std::variant<std::span<const char>, int64_t> key,
-                                               std::span<const char> value) {
+                                               std::span<const char> value,
+                                               BlindWritePolicy policy) {
     invariant(ru.inUnitOfWork());
     auto& wtRu = WiredTigerRecoveryUnit::get(ru);
 
-    WiredTigerCursor cursor{getWiredTigerCursorParams(wtRu, _getTableIdForIdent(ident)),
-                            WiredTigerUtil::buildTableUri(ident),
-                            *wtRu.getSession()};
+    const bool allowOverwrite = policy == BlindWritePolicy::blind;
+    WiredTigerCursor cursor{
+        getWiredTigerCursorParams(wtRu, _getTableIdForIdent(ident), allowOverwrite),
+        WiredTigerUtil::buildTableUri(ident),
+        *wtRu.getSession()};
     wtRu.assertInActiveTxn();
     WT_CURSOR* c = cursor.get();
 
@@ -531,13 +542,16 @@ Status WiredTigerKVEngineBase::insertIntoIdent(RecoveryUnit& ru,
 Status WiredTigerKVEngineBase::updateInIdent(RecoveryUnit& ru,
                                              StringData ident,
                                              std::variant<std::span<const char>, int64_t> key,
-                                             std::span<const char> value) {
+                                             std::span<const char> value,
+                                             BlindWritePolicy policy) {
     invariant(ru.inUnitOfWork());
     auto& wtRu = WiredTigerRecoveryUnit::get(ru);
 
-    WiredTigerCursor cursor{getWiredTigerCursorParams(wtRu, _getTableIdForIdent(ident)),
-                            WiredTigerUtil::buildTableUri(ident),
-                            *wtRu.getSession()};
+    const bool allowOverwrite = policy == BlindWritePolicy::blind;
+    WiredTigerCursor cursor{
+        getWiredTigerCursorParams(wtRu, _getTableIdForIdent(ident), allowOverwrite),
+        WiredTigerUtil::buildTableUri(ident),
+        *wtRu.getSession()};
     wtRu.assertInActiveTxn();
     WT_CURSOR* c = cursor.get();
 
@@ -580,13 +594,16 @@ StatusWith<UniqueBuffer> WiredTigerKVEngineBase::getFromIdent(
 
 Status WiredTigerKVEngineBase::deleteFromIdent(RecoveryUnit& ru,
                                                StringData ident,
-                                               std::variant<std::span<const char>, int64_t> key) {
+                                               std::variant<std::span<const char>, int64_t> key,
+                                               BlindWritePolicy policy) {
     invariant(ru.inUnitOfWork());
     auto& wtRu = WiredTigerRecoveryUnit::get(ru);
 
-    WiredTigerCursor cursor{getWiredTigerCursorParams(wtRu, _getTableIdForIdent(ident)),
-                            WiredTigerUtil::buildTableUri(ident),
-                            *wtRu.getSession()};
+    const bool allowOverwrite = policy == BlindWritePolicy::blind;
+    WiredTigerCursor cursor{
+        getWiredTigerCursorParams(wtRu, _getTableIdForIdent(ident), allowOverwrite),
+        WiredTigerUtil::buildTableUri(ident),
+        *wtRu.getSession()};
     wtRu.assertInActiveTxn();
     WT_CURSOR* c = cursor.get();
 
@@ -1188,7 +1205,8 @@ void WiredTigerKVEngine::flushAllFiles(OperationContext* opCtx, bool callerHolds
     // Immediately flush the size storer information to disk. When the node is fsync locked for
     // operations such as backup, it's imperative that we copy the most up-to-date data files.
     if (isReplicatedFastCountEnabled(opCtx)) {
-        ReplicatedFastCountManager::get(opCtx->getServiceContext()).flushAsync();
+        replicated_fast_count::ReplicatedFastCountManager::get(opCtx->getServiceContext())
+            .flushAsync();
     }
     syncSizeInfo(true);
 

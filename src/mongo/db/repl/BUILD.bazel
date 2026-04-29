@@ -300,6 +300,7 @@ mongo_cc_library(
     ],
     deps = [
         ":optime",
+        ":optime_observer",
         ":repl_server_parameters",
         ":repl_settings",
         ":replication_process",
@@ -898,8 +899,10 @@ mongo_cc_library(
         ":oplog",
         ":oplog_entry",
         "//src/mongo/db:dbhelpers",
+        "//src/mongo/db:server_base",
         "//src/mongo/db/global_catalog/ddl:notify_sharding_event_idl",
         "//src/mongo/db/pipeline:change_stream_helpers",
+        "//src/mongo/db/s/resharding:resharding_change_event_o2_field",
         "//src/mongo/db/shard_role/lock_manager",
         "//src/mongo/db/shard_role/lock_manager:exception_util",
     ],
@@ -1389,6 +1392,8 @@ mongo_cc_unit_test(
         ":auto_get_rstl_for_stepup_stepdown",
         "//src/mongo/db:service_context_d_test_fixture",
         "//src/mongo/db/session:logical_session_id_helpers",
+        "//src/mongo/db/session:session_catalog",
+        "//src/mongo/db/transaction",
     ],
 )
 
@@ -1412,6 +1417,7 @@ mongo_cc_library(
         "delayable_timeout_callback",
         "intent_registry",
         "oplog_visibility_manager",
+        "optime_observer_dispatcher",
         "repl_coordinator_interface",
         "repl_server_parameters",
         "repl_settings",
@@ -1921,6 +1927,7 @@ mongo_cc_unit_test(
 mongo_cc_unit_test(
     name = "db_repl_coordinator_test",
     srcs = [
+        "replication_coordinator_applied_op_time_observer_test.cpp",
         "replication_coordinator_impl_elect_v1_test.cpp",
         "replication_coordinator_impl_heartbeat_v1_test.cpp",
         "replication_coordinator_impl_reconfig_test.cpp",
@@ -1932,6 +1939,7 @@ mongo_cc_unit_test(
     ],
     deps = [
         ":isself",
+        ":optime_observer",
         ":repl_coordinator_impl",
         ":repl_coordinator_test_fixture",
         ":repl_server_parameters",

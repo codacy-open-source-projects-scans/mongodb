@@ -33,7 +33,6 @@
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/platform/compiler.h"
-#include "mongo/stdx/thread.h"
 #include "mongo/unittest/join_thread.h"
 #include "mongo/unittest/thread_assertion_monitor.h"
 #include "mongo/unittest/unittest.h"
@@ -305,10 +304,8 @@ using unittest::JoinThread;
 TEST(SharedFuture, ConcurrentTest_Simple) {
     SharedPromise<void> promise;
     auto shared = promise.getFuture();
-    JoinThread thread{stdx::thread{[&] {
-        shared.get();
-    }}};
-    stdx::this_thread::yield();  // Slightly increase the chance of racing.
+    JoinThread thread{stdx::thread{[&] { shared.get(); }}};
+    std::this_thread::yield();  // Slightly increase the chance of racing.
     promise.emplaceValue();
 }
 
@@ -361,7 +358,7 @@ void sharedFutureConcurrentTest(unittest::ThreadAssertionMonitor& monitor, Polic
         }
 
         if (tryCount % 2 == 0)
-            stdx::this_thread::yield();  // Slightly increase the chance of racing.
+            std::this_thread::yield();  // Slightly increase the chance of racing.
 
         promise.emplaceValue();
     }

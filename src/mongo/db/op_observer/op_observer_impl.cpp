@@ -58,6 +58,7 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/set_multikey_metadata_oplog_entry_gen.h"
 #include "mongo/db/repl/truncate_range_oplog_entry_gen.h"
+#include "mongo/db/replicated_fast_count/replicated_fast_count_delta_utils.h"
 #include "mongo/db/replicated_fast_count/replicated_fast_count_enabled.h"
 #include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/s/resharding/sharding_write_router.h"
@@ -80,6 +81,7 @@
 #include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/storage/container.h"
+#include "mongo/db/storage/ident.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/recovery_unit.h"
@@ -125,6 +127,7 @@ constexpr long long kInvalidNumRecords = -1LL;
 Date_t getWallClockTimeForOpLog(OperationContext* opCtx) {
     return opCtx->fastClockSource().now();
 }
+
 
 /**
  * Generates contents for the 'm' field of an OplogEntry.
@@ -322,19 +325,11 @@ OpTimeBundle replLogDelete(OperationContext* opCtx,
  */
 std::vector<repl::IndexIdents> buildIndexIdentsForO2(OperationContext* opCtx,
                                                      const std::vector<IndexBuildInfo>& indexes,
-                                                     const NamespaceString& nss) {
+                                                     const NamespaceString& nss,
+                                                     bool pdibEnabled) {
     auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
     std::vector<repl::IndexIdents> o2Indexes;
     o2Indexes.reserve(indexes.size());
-    // Acquire one FCV snapshot so the two feature-flag checks below see the same FCV value.
-    const auto vCtx = VersionContext::getDecoration(opCtx);
-    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
-    const bool pdibEnabled =
-        feature_flags::gFeatureFlagPrimaryDrivenIndexBuilds.isEnabledUseLastLTSFCVWhenUninitialized(
-            vCtx, fcvSnapshot);
-    const bool resumablePdibEnabled =
-        feature_flags::gResumablePrimaryDrivenIndexBuilds.isEnabledUseLastLTSFCVWhenUninitialized(
-            vCtx, fcvSnapshot);
     for (const auto& indexBuildInfo : indexes) {
         auto indexIdentUniqueTag =
             storageEngine->getIndexIdentUniqueTag(indexBuildInfo.indexIdent, nss.dbName());
@@ -349,7 +344,6 @@ std::vector<repl::IndexIdents> buildIndexIdentsForO2(OperationContext* opCtx,
                 !(indexBuildInfo.spec["unique"].trueValue() ||
                   IndexDescriptor::isIdIndexPattern(indexBuildInfo.spec.getObjectField("key"))) ||
                 indexBuildInfo.constraintViolationsIdent);
-            invariant(indexBuildInfo.indexBuildIdent.has_value() == resumablePdibEnabled);
 
             repl::InternalIdents internalIdents;
             internalIdents.setSorterIdent(*indexBuildInfo.sorterIdent);
@@ -358,9 +352,6 @@ std::vector<repl::IndexIdents> buildIndexIdentsForO2(OperationContext* opCtx,
             if (indexBuildInfo.constraintViolationsIdent) {
                 internalIdents.setConstraintViolationsIdent(
                     *indexBuildInfo.constraintViolationsIdent);
-            }
-            if (indexBuildInfo.indexBuildIdent) {
-                internalIdents.setIndexBuildIdent(*indexBuildInfo.indexBuildIdent);
             }
             indexIdents.setInternalIdents(std::move(internalIdents));
         }
@@ -371,15 +362,28 @@ std::vector<repl::IndexIdents> buildIndexIdentsForO2(OperationContext* opCtx,
 }
 
 /**
- * Populates the o2 field of oplogEntry with index idents (plus internal idents when
- * primary-driven builds are active).
+ * Populates the o2 field of oplogEntry with index idents.
  */
 void setIndexBuildO2(OperationContext* opCtx,
                      MutableOplogEntry& oplogEntry,
+                     const UUID& indexBuildUUID,
                      const std::vector<IndexBuildInfo>& indexes,
                      const NamespaceString& nss) {
+    // Acquire one FCV snapshot so the two feature-flag checks see the same FCV value.
+    const auto vCtx = VersionContext::getDecoration(opCtx);
+    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    const bool pdibEnabled =
+        feature_flags::gFeatureFlagPrimaryDrivenIndexBuilds.isEnabledUseLastLTSFCVWhenUninitialized(
+            vCtx, fcvSnapshot);
+    const bool resumablePdibEnabled =
+        feature_flags::gResumablePrimaryDrivenIndexBuilds.isEnabledUseLastLTSFCVWhenUninitialized(
+            vCtx, fcvSnapshot);
+
     repl::IndexBuildOplogEntryO2 o2;
-    o2.setIndexes(buildIndexIdentsForO2(opCtx, indexes, nss));
+    o2.setIndexes(buildIndexIdentsForO2(opCtx, indexes, nss, pdibEnabled));
+    if (pdibEnabled && resumablePdibEnabled) {
+        o2.setIndexBuildIdent(ident::generateNewIndexBuildIdent(indexBuildUUID));
+    }
     oplogEntry.setObject2(o2.toBSON());
 }
 
@@ -530,7 +534,7 @@ void OpObserverImpl::onStartIndexBuild(OperationContext* opCtx,
     oplogEntry.setObject(oplogEntryBuilder.done());
     if (shouldReplicateLocalCatalogIdentifiers(
             rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider())) {
-        setIndexBuildO2(opCtx, oplogEntry, indexes, nss);
+        setIndexBuildO2(opCtx, oplogEntry, indexBuildUUID, indexes, nss);
     }
     oplogEntry.setFromMigrateIfTrue(fromMigrate);
     logOperation(opCtx, &oplogEntry, true /*assignCommonFields*/, _operationLogger.get());
@@ -610,7 +614,7 @@ void OpObserverImpl::onCommitIndexBuild(OperationContext* opCtx,
     oplogEntry.setObject(oplogEntryBuilder.done());
     if (shouldReplicateLocalCatalogIdentifiers(
             rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider())) {
-        setIndexBuildO2(opCtx, oplogEntry, indexes, nss);
+        setIndexBuildO2(opCtx, oplogEntry, indexBuildUUID, indexes, nss);
     }
     oplogEntry.setFromMigrateIfTrue(fromMigrate);
     logOperation(opCtx, &oplogEntry, true /*assignCommonFields*/, _operationLogger.get());
@@ -662,7 +666,7 @@ void OpObserverImpl::onAbortIndexBuild(OperationContext* opCtx,
     oplogEntry.setObject(oplogEntryBuilder.done());
     if (shouldReplicateLocalCatalogIdentifiers(
             rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider())) {
-        setIndexBuildO2(opCtx, oplogEntry, indexes, nss);
+        setIndexBuildO2(opCtx, oplogEntry, indexBuildUUID, indexes, nss);
     }
     oplogEntry.setFromMigrateIfTrue(fromMigrate);
     logOperation(opCtx, &oplogEntry, true /*assignCommonFields*/, _operationLogger.get());
@@ -2056,14 +2060,16 @@ std::size_t getMaxSizeOfBatchedOperationsInSingleOplogEntryBytes() {
 // updated after the oplog entry is written.
 //
 // Returns the optime of the written oplog entry.
-repl::OpTime logApplyOps(OperationContext* opCtx,
-                         MutableOplogEntry* oplogEntry,
-                         boost::optional<DurableTxnStateEnum> txnState,
-                         boost::optional<repl::OpTime> startOpTime,
-                         std::vector<StmtId> stmtIdsWritten,
-                         const bool updateTxnTable,
-                         WriteUnitOfWork::OplogEntryGroupType oplogGroupingFormat,
-                         OperationLogger* operationLogger) {
+repl::OpTime logApplyOps(
+    OperationContext* opCtx,
+    MutableOplogEntry* oplogEntry,
+    boost::optional<DurableTxnStateEnum> txnState,
+    boost::optional<repl::OpTime> startOpTime,
+    std::vector<StmtId> stmtIdsWritten,
+    const bool updateTxnTable,
+    WriteUnitOfWork::OplogEntryGroupType oplogGroupingFormat,
+    OperationLogger* operationLogger,
+    boost::optional<std::vector<MultiOpSizeMetadata>> preparedTxnSizeMetadata = boost::none) {
 
     const auto txnRetryCounter = opCtx->getTxnRetryCounter();
     if (oplogGroupingFormat == WriteUnitOfWork::kGroupForPossiblyRetryableOperations) {
@@ -2111,17 +2117,20 @@ repl::OpTime logApplyOps(OperationContext* opCtx,
                 sessionTxnRecord.setTxnRetryCounter(*txnRetryCounter);
             }
 
-            if (rss::ReplicatedStorageService::get(opCtx)
-                    .getPersistenceProvider()
-                    .supportsPreservingPreparedTxnInPreciseCheckpoints() &&
-                txnState && *txnState == DurableTxnStateEnum::kPrepared) {
-                // TODO SERVER-113730: Decide if kInProgress needs to include these fields too.
-                auto txnParticipant = TransactionParticipant::get(opCtx);
-                tassert(11372300,
-                        "Tried to set state to prepared without an active transaction",
-                        txnParticipant);
-                txnParticipant.addPreparedTransactionPreciseCheckpointRecoveryFields(
-                    sessionTxnRecord);
+            if (txnState && *txnState == DurableTxnStateEnum::kPrepared) {
+                if (preparedTxnSizeMetadata && shouldPersistPreparedTxnSizeMetadata(opCtx)) {
+                    sessionTxnRecord.setSizeMetadata(std::move(preparedTxnSizeMetadata));
+                }
+                if (rss::ReplicatedStorageService::get(opCtx)
+                        .getPersistenceProvider()
+                        .supportsPreservingPreparedTxnInPreciseCheckpoints()) {
+                    auto txnParticipant = TransactionParticipant::get(opCtx);
+                    tassert(11372300,
+                            "Tried to set state to prepared without an active transaction",
+                            txnParticipant);
+                    txnParticipant.addPreparedTransactionPreciseCheckpointRecoveryFields(
+                        sessionTxnRecord);
+                }
             }
 
             onWriteOpCompleted(
@@ -2527,6 +2536,14 @@ void OpObserverImpl::onTransactionPrepare(
     // OplogSlotReserver.
     invariant(shard_role_details::getLocker(opCtx)->isWriteLocked());
 
+    // Aggregate size metadata once across all prepared operations rather than re-parsing each
+    // applyOps entry's inner ops after batching. Applies to both non-empty and empty (read-only)
+    // transactions so "m" field is consistently persisted when supported.
+    const boost::optional<std::vector<MultiOpSizeMetadata>> preparedTxnSizeMetadata =
+        shouldPersistPreparedTxnSizeMetadata(opCtx)
+        ? boost::make_optional(replicated_fast_count::aggregateMultiOpSizeMetadata(statements))
+        : boost::none;
+
     // It is possible that the transaction resulted in no changes, In that case, we
     // should not write any operations other than the prepare oplog entry.
     if (!statements.empty()) {
@@ -2560,12 +2577,15 @@ void OpObserverImpl::onTransactionPrepare(
             : reservedSlots.front();
 
         auto logApplyOpsForPreparedTransaction =
-            [opCtx, operationLogger = _operationLogger.get(), startOpTime](
+            [opCtx, operationLogger = _operationLogger.get(), startOpTime, preparedTxnSizeMetadata](
                 repl::MutableOplogEntry* oplogEntry,
                 bool firstOp,
                 bool lastOp,
                 std::vector<StmtId> stmtIdsWritten,
                 WriteUnitOfWork::OplogEntryGroupType oplogGroupingFormat) {
+                // Size metadata is written to the session transaction record only when the
+                // transaction is moved to the prepared state, which is done as a part of the last
+                // `applyOps` entry when there is a chained sequence.
                 return logApplyOps(
                     opCtx,
                     oplogEntry,
@@ -2575,7 +2595,8 @@ void OpObserverImpl::onTransactionPrepare(
                     std::move(stmtIdsWritten),
                     /*updateTxnTable=*/(firstOp || lastOp),
                     oplogGroupingFormat,
-                    operationLogger);
+                    operationLogger,
+                    /*preparedTxnSizeMetadata=*/lastOp ? preparedTxnSizeMetadata : boost::none);
             };
 
         // We had reserved enough oplog slots for the worst case where each operation
@@ -2619,7 +2640,8 @@ void OpObserverImpl::onTransactionPrepare(
                     /*stmtIdsWritten=*/{},
                     /*updateTxnTable=*/true,
                     WriteUnitOfWork::kDontGroup,
-                    _operationLogger.get());
+                    _operationLogger.get(),
+                    preparedTxnSizeMetadata);
     }
 }
 

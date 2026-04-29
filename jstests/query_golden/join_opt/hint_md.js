@@ -2,11 +2,12 @@
  * Tests hinting joins orders.
  *
  * @tags: [
- *   requires_fcv_83,
- *   requires_sbe
+ *   requires_fcv_90,
+ *   requires_sbe,
+ *   featureFlagPathArrayness
  * ]
  */
-import {normalizeArray} from "jstests/libs/golden_test.js";
+import {normalizeArray} from "jstests/libs/query_optimization/golden_test.js";
 import {code, line, linebreak, subSection} from "jstests/libs/query/pretty_md.js";
 import {getJoinOrderOneLine, getWinningJoinOrderOneLine} from "jstests/query_golden/libs/pretty_plan.js";
 import {getRejectedPlans} from "jstests/libs/query/analyze_plan.js";
